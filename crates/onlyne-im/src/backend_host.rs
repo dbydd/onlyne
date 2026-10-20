@@ -14,6 +14,7 @@ use onlyne_im_backend::frame::{
     SentArgs, StopArgs,
 };
 use onlyne_wire::frame::{FrameReader, write_frame};
+use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::io::AsyncRead;
@@ -25,6 +26,14 @@ pub struct BackendHost {
     reader: FrameReader,
     stdin: tokio::process::ChildStdin,
     stdout: tokio::process::ChildStdout,
+    /// The frames a request/response method passed over while it waited for its
+    /// own answer.
+    ///
+    /// They belong to the caller, not to that exchange: an event the backend
+    /// queued before it answered `list_conversations` is still an event the
+    /// gateway must see. They wait here, in arrival order, until
+    /// [`BackendHost::next_op`] hands each one over exactly once.
+    pending: VecDeque<BackendOp>,
 }
 
 impl BackendHost {
@@ -55,6 +64,7 @@ impl BackendHost {
             reader: FrameReader::default(),
             stdin,
             stdout,
+            pending: VecDeque::new(),
         })
     }
 
@@ -68,7 +78,24 @@ impl BackendHost {
     }
 
     /// Read one backend frame; `None` when the backend ended its stream.
+    ///
+    /// Frames a request/response method passed over come out here first, in the
+    /// order the backend sent them.
     pub async fn next_op(&mut self) -> Result<Option<BackendOp>> {
+        if let Some(op) = self.pending.pop_front() {
+            return Ok(Some(op));
+        }
+        read_op(&mut self.reader, &mut self.stdout).await
+    }
+
+    /// Read the next frame straight off the wire, leaving the frames
+    /// [`BackendHost::next_op`] still owes the caller in place.
+    ///
+    /// A request/response method answers its own question: it may not consume a
+    /// frame the caller has not seen. What it passes over is stashed in
+    /// `pending`, which keeps every frame in arrival order relative to the ones
+    /// read later.
+    async fn read_wire(&mut self) -> Result<Option<BackendOp>> {
         read_op(&mut self.reader, &mut self.stdout).await
     }
 
@@ -81,14 +108,15 @@ impl BackendHost {
     pub async fn send(&mut self, args: SendArgs) -> Result<SentArgs> {
         write_frame(&mut self.stdin, &CoreOp::Send(args)).await?;
         loop {
-            match self.next_op().await? {
+            match self.read_wire().await? {
                 Some(BackendOp::Sent(sent)) => return Ok(sent),
                 Some(BackendOp::Hello(args)) => {
                     bail!("the backend sent a second hello while sending: {args:?}")
                 }
                 // An event that arrives while the send is in flight is ordinary
-                // traffic; the next read gets the answer.
-                Some(_) => continue,
+                // traffic: it waits for the caller instead of being dropped,
+                // and the next read gets the answer.
+                Some(other) => self.pending.push_back(other),
                 None => bail!("the backend closed before answering the send"),
             }
         }
@@ -98,23 +126,28 @@ impl BackendHost {
     ///
     /// The answer arrives as a frame, so a refused credential is a sentence an
     /// operator reads rather than a dead process. A frame of another kind in
-    /// between is skipped rather than mistaken for the answer: a backend may
-    /// still be reporting the events it saw before the login arrived.
+    /// between is not mistaken for the answer — a backend may still be
+    /// reporting the events it saw before the login arrived — and waits for the
+    /// caller's next `next_op` rather than being dropped.
     pub async fn login(&mut self, args: LoginArgs) -> Result<LoginResult> {
         write_frame(&mut self.stdin, &CoreOp::Login(args)).await?;
         loop {
-            match self.next_op().await? {
+            match self.read_wire().await? {
                 Some(BackendOp::Login(result)) => return Ok(result),
                 Some(BackendOp::Hello(args)) => {
                     bail!("the backend sent a second hello while logging in: {args:?}")
                 }
-                Some(_) => continue,
+                Some(other) => self.pending.push_back(other),
                 None => bail!("the backend closed before answering the login"),
             }
         }
     }
 
     /// Ask the backend which conversations it can see.
+    ///
+    /// An event the backend queued before this answer — a message that arrived
+    /// while the gateway was still starting up — is not the answer and is not
+    /// lost: the caller's next `next_op` returns it.
     pub async fn list_conversations(&mut self) -> Result<Vec<ImConversation>> {
         write_frame(
             &mut self.stdin,
@@ -124,12 +157,12 @@ impl BackendHost {
         )
         .await?;
         loop {
-            match self.next_op().await? {
+            match self.read_wire().await? {
                 Some(BackendOp::Conversations(list)) => return Ok(list.conversations),
                 Some(BackendOp::Hello(args)) => {
                     bail!("the backend sent a second hello while listing: {args:?}")
                 }
-                Some(_) => continue,
+                Some(other) => self.pending.push_back(other),
                 None => bail!("the backend closed before answering the listing"),
             }
         }
@@ -347,5 +380,77 @@ mod tests {
         drop(read);
         drop(write);
         backend.await.unwrap().unwrap();
+    }
+
+    /// A spawned backend that answers its startup the way a real one does when
+    /// a message is already queued: the hello, then the event it was holding,
+    /// and each answer only once the gateway asks for it. The event therefore
+    /// reaches the host *before* the answers the host is waiting for.
+    #[tokio::test]
+    async fn an_event_queued_before_the_conversation_list_is_not_lost() {
+        let script = r#"
+import json, struct, sys
+def frame(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
+    sys.stdout.buffer.flush()
+def request():
+    header = sys.stdin.buffer.read(4)
+    if len(header) < 4:
+        return None
+    size = struct.unpack(">I", header)[0]
+    body = b""
+    while len(body) < size:
+        chunk = sys.stdin.buffer.read(size - len(body))
+        if not chunk:
+            return None
+        body += chunk
+    return json.loads(body)
+frame({"op": "hello", "args": {"platform": "telegram", "version": "1",
+                               "capabilities": ["message"], "authenticated": True}})
+frame({"op": "event", "args": {
+    "gateway": "tg1", "platform": "telegram", "channel": "telegram",
+    "conversation": "-1007788", "kind": "message", "id": "msg-1",
+    "text": "deploy please", "at": "2026-10-10T12:00:00Z"}})
+assert request()["op"] == "list_conversations"
+frame({"op": "conversations", "args": {"conversations": [
+    {"id": "-1007788", "title": "Project", "kind": "group"}]}})
+assert request()["op"] == "send"
+frame({"op": "sent", "args": {"conversation": "-1007788", "message_id": "m-9"}})
+"#;
+        let command = vec!["python3".to_string(), "-c".to_string(), script.to_string()];
+        let mut host = BackendHost::spawn(&command, "tg1", Path::new("/nonexistent/credential"))
+            .await
+            .unwrap();
+
+        assert_eq!(host.hello().await.unwrap().platform, "telegram");
+        let listed = host.list_conversations().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "-1007788");
+
+        // A second exchange, with the queued event still waiting: its answer
+        // comes off the wire, not out of the queue.
+        let sent = host
+            .send(SendArgs {
+                conversation: "-1007788".into(),
+                payload: ImPayload {
+                    text: "hi".into(),
+                    ..ImPayload::default()
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(sent.message_id.as_deref(), Some("m-9"));
+
+        // The event that arrived while the listing was in flight is the
+        // caller's to observe, and it comes exactly once.
+        match host.next_op().await.unwrap() {
+            Some(BackendOp::Event(event)) => {
+                assert_eq!(event.id, "msg-1");
+                assert_eq!(event.text.as_deref(), Some("deploy please"));
+            }
+            other => panic!("expected the queued event, got {other:?}"),
+        }
+        assert!(host.next_op().await.unwrap().is_none());
     }
 }

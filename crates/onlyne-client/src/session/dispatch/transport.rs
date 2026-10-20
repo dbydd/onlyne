@@ -8,7 +8,7 @@ use super::retire::{
     PendingClose, close_retired, keeps_idle, retire_idle_locked, stored_close_reason,
 };
 use super::state::{
-    DispatchInner, DispatchState, FrameGuard, SessionSlot, has_attached_transport,
+    DispatchInner, DispatchState, FrameGuard, ParkedMount, SessionSlot, has_attached_transport,
     rebase_generation, slot_key_named, slot_key_serving_task, slot_task,
 };
 
@@ -48,6 +48,68 @@ fn resident_session_name(inner: &DispatchInner, mounted: Option<&str>) -> Option
     let external = inner.placement.map(|placement| placement.as_str()) == Some("external");
     let role_scope = inner.session_policy.scope == onlyne_config::SessionScope::Role;
     (external || role_scope).then(|| "resident".to_string())
+}
+
+/// Whether a live connection other than `io` declares one session by name.
+///
+/// Only a name a mount itself carried answers: a standing connection declares
+/// none, so it keeps no session alive but its own.
+fn declares_session_elsewhere(inner: &DispatchInner, session_id: &str, io: &AdapterIo) -> bool {
+    inner
+        .parked
+        .iter()
+        .any(|mount| mount.session.as_deref() == Some(session_id) && !mount.io.same_connection(io))
+        || inner
+            .declarations
+            .iter()
+            .any(|(declared, held)| declared == session_id && !held.same_connection(io))
+        || inner.transports.iter().any(|(declared, (transport, _))| {
+            declared == session_id && !transport.same_connection(io)
+        })
+        || inner
+            .revived
+            .iter()
+            .any(|(declared, revived, _)| declared == session_id && !revived.same_connection(io))
+}
+
+/// Remember the session one connection declared, under the name it declared.
+fn remember_declaration(inner: &mut DispatchInner, io: &AdapterIo, declared: &str) {
+    match inner
+        .declarations
+        .iter_mut()
+        .find(|(_, held)| held.same_connection(io))
+    {
+        Some(entry) => entry.0 = declared.to_string(),
+        None => inner.declarations.push((declared.to_string(), io.clone())),
+    }
+}
+
+/// Take one connection's declaration out of the record.
+pub(super) fn take_declaration(inner: &mut DispatchInner, io: &AdapterIo) -> Option<String> {
+    let index = inner
+        .declarations
+        .iter()
+        .position(|(_, held)| held.same_connection(io))?;
+    Some(inner.declarations.remove(index).0)
+}
+
+/// The session one connection declared, from whichever table holds it.
+///
+/// The park keeps it beside a waiting connection and `declarations` beside a
+/// claimed one, so this is the first of the two that names the connection.
+fn declared_by(inner: &DispatchInner, io: &AdapterIo) -> Option<String> {
+    inner
+        .parked
+        .iter()
+        .find(|mount| mount.io.same_connection(io))
+        .and_then(|mount| mount.session.clone())
+        .or_else(|| {
+            inner
+                .declarations
+                .iter()
+                .find(|(_, held)| held.same_connection(io))
+                .map(|(declared, _)| declared.clone())
+        })
 }
 
 /// Whether a connection other than `io` is the one serving one slot.
@@ -421,6 +483,21 @@ fn rebase_returned_reporter(inner: &mut DispatchInner, key: &str) {
     }
 }
 
+/// Remember what one mount declared about resuming its session.
+///
+/// The runtime is the only party that knows whether its conversation outlives
+/// its process, and the declaration has to stay on the slot: the idle bound, the
+/// detach branch of `release_connection` and the sweep that reclaims an ended
+/// resource all ask after the connection is gone (`Capability::Resume`).
+fn remember_resume(inner: &mut DispatchInner, session_id: &str, capabilities: &[Capability]) {
+    let Some(key) = slot_key_named(inner, session_id) else {
+        return;
+    };
+    if let Some(slot) = inner.sessions.get_mut(&key) {
+        slot.resume_capable = capabilities.contains(&Capability::Resume);
+    }
+}
+
 /// Attach one plugin connection to the session it names, or hold it read-only.
 ///
 /// This is where a mount that named a session becomes a transport, so the
@@ -440,6 +517,7 @@ fn attach_transport_locked(
         record_revived_connection(inner, session_id, io, capabilities);
         return false;
     }
+    remember_resume(inner, session_id, &capabilities);
     inner
         .transports
         .insert(session_id.to_string(), (io, capabilities));
@@ -548,15 +626,33 @@ impl DispatchState {
     /// A connection already in the queue is refreshed where it stands rather
     /// than sent to the back: a mount that names nothing twice over is the same
     /// agent re-helloing, and its place in line is that agent's due.
-    pub fn park_transport(&self, io: AdapterIo, capabilities: Vec<Capability>) {
+    ///
+    /// `session` is the name the mount declared, kept verbatim: a mount that
+    /// names a session this client holds no slot for waits here, and that name
+    /// is what keeps the connection counted as a declarer of it (§4.1).
+    pub fn park_transport(
+        &self,
+        io: AdapterIo,
+        capabilities: Vec<Capability>,
+        session: Option<&str>,
+    ) {
         let mut inner = self.inner.lock();
         let waiting = inner
             .parked
             .iter()
-            .position(|(parked, _)| parked.same_connection(&io));
+            .position(|mount| mount.io.same_connection(&io));
         match waiting {
-            Some(index) => inner.parked[index].1 = capabilities,
-            None => inner.parked.push((io, capabilities)),
+            // A re-hello is the same agent saying the same thing again, so the
+            // declaration it carries now replaces the one it parked with.
+            Some(index) => {
+                inner.parked[index].capabilities = capabilities;
+                inner.parked[index].session = session.map(str::to_string);
+            }
+            None => inner.parked.push(ParkedMount {
+                io,
+                capabilities,
+                session: session.map(str::to_string),
+            }),
         }
     }
 
@@ -676,22 +772,31 @@ impl DispatchState {
             return None;
         }
         // The queue is served oldest first.
-        let (io, capabilities) = inner.parked.remove(0);
+        let mount = inner.parked.remove(0);
         // The judgement of §1 (b) runs first, and the transport is written only
         // once it answers that this connection takes the session: a refusal here
         // must leave no read-only record behind, which is why this path does not
         // run `attach_transport_locked`.
-        if note_binding_locked(&mut inner, session_id, &io) {
-            inner
-                .transports
-                .insert(session_id.to_string(), (io.clone(), capabilities.clone()));
-            return Some((io, capabilities));
+        if note_binding_locked(&mut inner, session_id, &mount.io) {
+            remember_resume(&mut inner, session_id, &mount.capabilities);
+            inner.transports.insert(
+                session_id.to_string(),
+                (mount.io.clone(), mount.capabilities.clone()),
+            );
+            // The park's copy of the name went with the claim, and the transport
+            // map is keyed by the delivery, so the declaration is kept here.
+            if let Some(declared) = mount.session.as_deref() {
+                remember_declaration(&mut inner, &mount.io, declared);
+            }
+            return Some((mount.io, mount.capabilities));
         }
         tracing::warn!(
             session = %session_id,
             "the longest-waiting agent took nothing from this session; it waits for the next"
         );
-        inner.parked.push((io, capabilities));
+        // The declaration travels back to the queue with it: a refusal here
+        // takes nothing from what the mount said about itself.
+        inner.parked.push(mount);
         None
     }
 
@@ -747,6 +852,7 @@ impl DispatchState {
             slot.session.backend_ref = serde_json::Value::String(opened.session_id.clone());
         }
         slot.resume_handle = opened.resume_handle.clone();
+        slot.resume_capable = capabilities.contains(&Capability::Resume);
         inner
             .transports
             .insert(session_id.to_string(), (io, capabilities));
@@ -877,38 +983,54 @@ impl DispatchState {
                 .retain(|(_, revived, _)| !revived.same_connection(io));
             before != inner.revived.len()
         };
+        // What this connection said about itself, read before the prunes below
+        // take it out of the tables that hold it.
+        let leaving_declaration = declared_by(&inner, io);
         // A waiting agent whose socket ended leaves the queue and nothing else:
         // the agents behind it are other connections, still waiting for work.
-        let was_parked = inner
-            .parked
-            .iter()
-            .any(|(parked, _)| parked.same_connection(io));
+        inner.parked.retain(|mount| !mount.io.same_connection(io));
         inner
-            .parked
-            .retain(|(parked, _)| !parked.same_connection(io));
-        // A resident agent that stopped waiting is the role losing its idle
-        // session: its row goes `gone`, which projects `exited`, so the server
-        // stops treating the role as one a note can wake. A row this client has
-        // no record of, or one a live slot already speaks for, is left alone.
-        let resident_exit = was_parked
-            .then(|| resident_session_name(&inner, session_id))
-            .flatten()
-            .filter(|resident| {
-                !inner
-                    .sessions
-                    .iter()
-                    .any(|(key, slot)| names_session(key, slot, resident))
-                    && inner.store.get_session(resident).ok().flatten().is_some()
-            });
-        if let Some(resident) = resident_exit.as_deref() {
+            .declarations
+            .retain(|(_, held)| !held.same_connection(io));
+        // A resident agent whose connection ended is the role losing its idle
+        // session: its row goes `gone`, which projects `exited`. A row this
+        // client has no record of, one a live slot speaks for, or one another
+        // live connection still declares by name, is left alone (§4.1).
+        //
+        // This is not gated on the park: an owner claimed for a delivery sits in
+        // `transports` under the delivery's name, and the idle row seeded at its
+        // mount has no slot, so no sweep would ever reach it.
+        let mut candidates: Vec<String> = Vec::new();
+        for resident in [
+            leaving_declaration,
+            resident_session_name(&inner, session_id),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !candidates.contains(&resident) {
+                candidates.push(resident);
+            }
+        }
+        let mut resident_exit: Vec<String> = Vec::new();
+        for resident in candidates {
+            let ended = !inner
+                .sessions
+                .iter()
+                .any(|(key, slot)| names_session(key, slot, &resident))
+                && inner.store.get_session(&resident).ok().flatten().is_some()
+                && !declares_session_elsewhere(&inner, &resident, io);
+            if !ended {
+                continue;
+            }
             for (step, result) in [
                 (
                     "agent gone",
-                    feed_agent_gone(&inner.bridge, &inner.store, resident),
+                    feed_agent_gone(&inner.bridge, &inner.store, &resident),
                 ),
                 (
                     "resource closed",
-                    feed_resource_closed(&inner.bridge, &inner.store, resident),
+                    feed_resource_closed(&inner.bridge, &inner.store, &resident),
                 ),
             ] {
                 if let Err(error) = result {
@@ -920,6 +1042,7 @@ impl DispatchState {
                     );
                 }
             }
+            resident_exit.push(resident);
         }
         let released: Vec<String> = inner
             .transports

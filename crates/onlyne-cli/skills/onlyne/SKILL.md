@@ -150,6 +150,21 @@ covers queued and in-flight candidates, since the send path marks an eligible ro
 any pull. Keep `PULLABLE_KINDS` free of notes: that constant governs task and session claim
 adoption, not note eligibility.
 
+**Lifecycle ownership** (`docs/v2.11-LIFECYCLE-IS-DECLARED-NOT-INFERRED.md`): identity and liveness
+are declared by their owner, and a transport event is evidence rather than a verdict. A parked mount
+stores the `mount.session` it declared, so `release_connection` ends a
+resident session only when no other live connection declares it; its candidates are
+`resident_session_name` and the leaving connection's own declaration, never `was_parked`, because a
+resident claimed for a delivery sits in `transports` under the task id. A runtime plugin refuses to
+mount from a subagent session: OMP carries `ctx.agent.kind` on every extension context, and the
+env/config fallback stays only for hosts that report no such identity. A server-side `hold_ms` waits
+off the connection's read loop, writes its answer through the session's frame channel so reports and
+pings keep flowing, gates every pull on the connection's registry generation so a replaced link
+claims no row, and compensates a claim whose write failed. A kept session records its runtime's
+resume capability on the slot. Exit checks read that slot's current binding, and ready reports name
+the session itself across deliveries. The gateway keeps its pending pull alive across report handling.
+Backend request/response methods retain unsolicited frames for the normal event reader.
+
 ## Gates
 
 ```bash

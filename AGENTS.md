@@ -619,6 +619,7 @@ systemd is present, and keep launchd specifics out of core logic.
 
 ## 16. Implementation style rules
 
+- **Main session owns documentation and subagent orchestration; code changes go to subagents.** The main session holds project understanding, architecture, cross-slice contracts, acceptance criteria, and all documentation (`AGENTS.md`, `docs/`, `README*`, `SKILL.md`). Delegate all source and test edits to subagents with explicit file ownership and contracts.
 - Make surgical, bounded changes.
 - Prefer boring, robust code to abstraction for its own sake.
 - Keep one adapter protocol with tagged mount kinds.

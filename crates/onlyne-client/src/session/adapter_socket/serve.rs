@@ -666,6 +666,9 @@ impl AdapterSocket {
         // holding no such slot. The agent keeps its conversation and takes the
         // next staged delivery.
         let named = session_id.filter(|id| self.dispatch.knows_session(id));
+        // The mount's own word about the session it serves, kept out of the
+        // shadowing below: the parked branch stores it verbatim (§4.1).
+        let declared = session_id;
         if session_id.is_some() && named.is_none() {
             tracing::warn!(
                 session = ?session_id,
@@ -688,12 +691,15 @@ impl AdapterSocket {
                 self.dispatch.stand_transport(io, capabilities);
                 return;
             }
-            self.dispatch.park_transport(io, capabilities);
+            // A mount that declared a session this client holds no slot for
+            // parks with that name, which is what keeps it counted as a
+            // declarer of the session (§4.1).
+            self.dispatch.park_transport(io, capabilities, declared);
             // A resident agent is idle from the moment it parks: it holds an
             // attached process and no delivery. Publishing that row is what lets
             // a note to this role find it, and what keeps the mirror from
             // reading the role as sessionless between tasks.
-            if let Some(resident) = self.dispatch.seed_resident_parked_session(session_id) {
+            if let Some(resident) = self.dispatch.seed_resident_parked_session(declared) {
                 if let Err(error) = sync_session(&self.dispatch, &resident).await {
                     tracing::warn!(
                         session = %resident,

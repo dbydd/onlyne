@@ -347,17 +347,24 @@ pub async fn role_connection_with_io<I: RoleIo + Send>(
             incoming = connection.recv_frame() => {
                 match incoming {
                     Ok(Some(Frame::Req { id, op })) => {
-                        let body = router::dispatch_client(&state, &mut session, op).await;
-                        if let Err(error) = connection
-                            .send_frame(&Frame::<ClientOp>::res(id, body))
-                            .await
+                        // A deferred answer belongs to the task the router
+                        // spawned: it writes `res` through the session's
+                        // channel, so the loop keeps serving this connection's
+                        // other frames meanwhile.
+                        if let router::Answer::Immediate(body) =
+                            router::dispatch_client(&state, &mut session, &id, op).await
                         {
-                            tracing::debug!(
-                                error = %error,
-                                role,
-                                "role connection write failed; the link is ending"
-                            );
-                            break;
+                            if let Err(error) = connection
+                                .send_frame(&Frame::<ClientOp>::res(id, body))
+                                .await
+                            {
+                                tracing::debug!(
+                                    error = %error,
+                                    role,
+                                    "role connection write failed; the link is ending"
+                                );
+                                break;
+                            }
                         }
                     }
                     Ok(Some(Frame::Ping { t })) => {

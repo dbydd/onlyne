@@ -154,6 +154,11 @@ impl RoleLink {
         // Once every sender is gone, nothing can report again and the branch
         // parks instead of spinning on a closed channel.
         let mut reports_open = true;
+        // One pull stays in flight across report receives. The server holds the
+        // request for its whole window and refuses a second pull on the same
+        // connection, so a pull dropped on the way to answering a report leaves
+        // the first request held and the next loop's pull answered `Conflict`.
+        let mut pull = std::pin::pin!(self.pull_and_render(link, renders));
         loop {
             tokio::select! {
                 _ = shutdown.changed() => {
@@ -170,12 +175,13 @@ impl RoleLink {
                         None => reports_open = false,
                     }
                 }
-                outcome = self.pull_and_render(link, renders) => {
+                outcome = &mut pull => {
                     outcome?;
                     // A pull that came back is the run working: the next
                     // failure earns a first-rung delay, not the one this link
                     // was already sitting on.
                     backoff.reset();
+                    pull.set(self.pull_and_render(link, renders));
                 }
             }
         }
@@ -806,7 +812,7 @@ async fn sleep_or_shutdown(delay: Duration, shutdown: &mut tokio::sync::watch::R
 mod tests {
     use super::*;
     use crate::Gateway;
-    use onlyne_proto::{Body, Envelope, MsgKind, Principal, new_envelope};
+    use onlyne_proto::{Body, Envelope, ErrorCode, MsgKind, Principal, new_envelope};
     use std::path::{Path, PathBuf};
 
     fn conversation(dir: &Path) -> Conversation {
@@ -1007,5 +1013,164 @@ run = ["onlyne-im-backend-feishu"]
             msg_id: "m1".into(),
             envelope: Box::new(envelope),
         }
+    }
+
+    /// The refusal the server answers a second pull with while the first is
+    /// still held (`onlyne_server::router::held_pull_refusal`).
+    const HELD_REFUSAL: &str =
+        "this connection already holds a pull; one connection reads its queue once per wait";
+
+    /// One request off the fake server's stream, answering the liveness frames
+    /// the shared connection may interleave with it.
+    async fn next_request(
+        frames: &mut onlyne_wire::FrameReader,
+        stream: &mut tokio::io::DuplexStream,
+    ) -> (String, ClientOp) {
+        loop {
+            match frames
+                .next::<_, Frame>(stream)
+                .await
+                .expect("a frame reads")
+            {
+                Some(Frame::Req { id, op }) => return (id, op),
+                Some(Frame::Ping { t }) => {
+                    let pong: Frame = Frame::Pong { t, server_seq: 0 };
+                    onlyne_wire::write_frame(stream, &pong)
+                        .await
+                        .expect("the pong writes");
+                }
+                Some(_) => {}
+                None => panic!("the link closed before the next request"),
+            }
+        }
+    }
+
+    /// The report a gateway sends on the link that speaks for its role.
+    fn a_report() -> onlyne_proto::Report {
+        onlyne_proto::Report::Fault {
+            task_id: None,
+            session_id: None,
+            generation: None,
+            seq: None,
+            kind: "test".into(),
+            reason: "a fault reported while a pull is held".into(),
+            desired: None,
+            observed: None,
+        }
+    }
+
+    /// A report received while the server still holds this link's pull is
+    /// answered beside it, not by dropping the request and opening a second
+    /// one — which the server refuses as `Conflict`, and which the field log
+    /// showed as `im_push_failed` after a report landed mid-hold.
+    #[tokio::test]
+    async fn a_report_during_a_held_pull_does_not_open_a_second_pull() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".onlyne")).unwrap();
+        std::fs::write(
+            root.join(".onlyne/config.toml"),
+            r#"
+[gateway]
+role = "im"
+[server]
+endpoint = "127.0.0.1:9443"
+cert_pin = "sha256/placeholder"
+"#,
+        )
+        .unwrap();
+        let link = RoleLink::new(Gateway::load(root).unwrap());
+
+        // One duplex pair, read and written from both ends, so the server half
+        // sees exactly the frames `pull_and_render` puts on a real link.
+        let (client, mut wire) = tokio::io::duplex(64 * 1024);
+        let settings = ConnSettings {
+            agent: AGENT.to_string(),
+            version: "test".to_string(),
+            ..ConnSettings::new(PROTOCOL_VERSION)
+        };
+        let conn: ClientConn = ClientConn::attach(client, "im", settings);
+
+        let (renders, _rendered) = mpsc::channel(8);
+        let (reports_tx, mut reports) = mpsc::channel(4);
+        let (shutdown_tx, mut shutdown) = tokio::sync::watch::channel(false);
+
+        let server = tokio::spawn(async move {
+            let mut frames = onlyne_wire::FrameReader::new();
+            let (held_id, held) = next_request(&mut frames, &mut wire).await;
+            assert!(
+                matches!(held, ClientOp::Pull(_)),
+                "the link opens with a pull"
+            );
+            // The pull is on the wire and unanswered: this is the report that
+            // used to win the loop's `select` and take the held pull with it.
+            reports_tx
+                .send(a_report())
+                .await
+                .expect("the report queues");
+            let (report_id, report) = next_request(&mut frames, &mut wire).await;
+            assert!(
+                matches!(report, ClientOp::Report(_)),
+                "the report rides the held pull's link"
+            );
+            onlyne_wire::write_frame(&mut wire, &Frame::ok(report_id, serde_json::json!({})))
+                .await
+                .unwrap();
+
+            // The held pull is still unanswered, so no other pull may appear.
+            match tokio::time::timeout(
+                Duration::from_millis(500),
+                next_request(&mut frames, &mut wire),
+            )
+            .await
+            {
+                Ok((id, ClientOp::Pull(_))) => {
+                    onlyne_wire::write_frame(
+                        &mut wire,
+                        &Frame::error(
+                            id,
+                            ErrorCode::Conflict,
+                            HELD_REFUSAL,
+                            Some("op".to_string()),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    while let Ok(Some(_)) = frames.next::<_, Frame>(&mut wire).await {}
+                    return;
+                }
+                Ok((_, other)) => panic!("unexpected request during the held pull: {other:?}"),
+                Err(_) => {}
+            }
+            onlyne_wire::write_frame(
+                &mut wire,
+                &Frame::ok(held_id, serde_json::json!({ "deliveries": [], "seq": 0 })),
+            )
+            .await
+            .unwrap();
+            // The pull came back, so the next one is legitimate; end `serve`.
+            let (_, next) =
+                tokio::time::timeout(Duration::from_secs(5), next_request(&mut frames, &mut wire))
+                    .await
+                    .expect("an answered pull is followed by the next one");
+            assert!(matches!(next, ClientOp::Pull(_)));
+            let _ = shutdown_tx.send(true);
+            // Keep the wire open until the link closes it: a wire dropped here
+            // would fail the pull the shutdown is racing with.
+            while let Ok(Some(_)) = frames.next::<_, Frame>(&mut wire).await {}
+        });
+
+        let mut backoff = onlyne_net::Backoff::new();
+        let served = tokio::time::timeout(
+            Duration::from_secs(20),
+            link.serve(&conn, &renders, &mut reports, &mut shutdown, &mut backoff),
+        )
+        .await
+        .expect("serve answers inside the deadline");
+        assert!(
+            served.is_ok(),
+            "a report must not cost the held pull: {served:?}"
+        );
+        server.await.unwrap();
     }
 }

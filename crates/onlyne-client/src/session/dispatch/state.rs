@@ -72,7 +72,14 @@ pub(super) struct DispatchInner {
     /// `AdapterIo` with no accounting of any kind: no release, no log, and no
     /// bye, so the role silently lost a worker that was waiting to be told.
     /// `revived` has held several connections the same way from the start.
-    pub(super) parked: Vec<(AdapterIo, Vec<Capability>)>,
+    pub(super) parked: Vec<ParkedMount>,
+    /// The session each live connection declared when it mounted, for the
+    /// connections whose declaration is not the name they serve under.
+    ///
+    /// A claim moves a mount out of `parked` into a transport keyed by the
+    /// delivery it serves, so the declaration waits here until that connection
+    /// parks again or leaves (§4.1).
+    pub(super) declarations: Vec<(String, AdapterIo)>,
     /// Connections from **hosting** runtimes: ones that declared `open`,
     /// `suspend` or `close` and own their sessions rather than serving the one
     /// the client started them for.
@@ -140,6 +147,21 @@ pub(super) struct DispatchInner {
     /// frame, so a host frame written on the same connection during that handler
     /// leaves first. The bye sweep in `retire_revived` skips these connections.
     pub(super) in_frame: Vec<AdapterIo>,
+}
+
+/// One connection waiting in [`DispatchInner::parked`], with the session its
+/// mount declared.
+///
+/// The declaration is the fact this table used to drop: a mount that names a
+/// session this client holds no slot for parks here, and the name it carried is
+/// what keeps the connection counted as a declarer of that session
+/// (`docs/v2.11-LIFECYCLE-IS-DECLARED-NOT-INFERRED.md` §4.1).
+pub(super) struct ParkedMount {
+    pub(super) io: AdapterIo,
+    pub(super) capabilities: Vec<Capability>,
+    /// The session the mount declared, verbatim; `None` for a mount that
+    /// declared none.
+    pub(super) session: Option<String>,
 }
 
 #[derive(Clone)]
@@ -245,6 +267,14 @@ pub struct SessionSlot {
     /// live session rather than an exit, and the verdict of a delivery it has
     /// already finished says nothing about it.
     pub(super) keeps_idle: bool,
+    /// Whether the runtime serving this session declared `Capability::Resume`
+    /// when it mounted.
+    ///
+    /// The declaration is remembered here because every reader asks after the
+    /// connection is gone — the idle bound, the detach branch of
+    /// `release_connection`, and the sweep that reclaims an ended resource — and
+    /// a reinstated mount may be the only thing that ever says it again.
+    pub(super) resume_capable: bool,
 }
 
 /// One operator's word this client is still waiting to see answered.

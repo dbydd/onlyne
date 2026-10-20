@@ -18,13 +18,15 @@ use onlyne_config::layout::ServerRoot;
 use onlyne_config::{Spec, SpecDiff};
 use onlyne_proto::{
     AdminOp, Body, Causality, ClientOp, ControlOp, ErrorCode, Event, Frame, GatewayOp,
-    HELLO_REQUIRED_MESSAGE, LedgerEntry, MsgKind, Presence, Principal, QueryRolesArgs, ResBody,
-    RoleInfo, RolePresence, SpecReloaded,
+    HELLO_REQUIRED_MESSAGE, LedgerEntry, MsgKind, Presence, Principal, PullArgs, PullReply,
+    QueryRolesArgs, ResBody, RoleInfo, RolePresence, SpecReloaded,
 };
 use onlyne_store::RoleRow;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc};
 
 /// Per-connection state carried by the router.
 #[derive(Debug, Default)]
@@ -41,6 +43,12 @@ pub struct Session {
     pub generation: u64,
     pub sender: Option<mpsc::Sender<Frame>>,
     pub gateway: Option<String>,
+    /// True while a task this connection spawned owns a held `pull`'s answer.
+    ///
+    /// One connection holds at most one pull at a time: a second held request
+    /// would park a second task beside the first, and both would read the same
+    /// role's queue.
+    pub held_pull: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -85,18 +93,45 @@ pub(crate) fn hello_required() -> ResBody {
     )
 }
 
+/// How one answered request reaches the wire.
+///
+/// Almost every request settles inside the read loop and is written there. A
+/// held `pull` cannot: its window belongs to the server, and blocking the loop
+/// for it would stop this connection's reports and heartbeats. Its answer
+/// therefore leaves on the task that waited, through the session's channel.
+pub enum Answer {
+    Immediate(ResBody),
+    /// The reply is written by the task this arm spawned, as
+    /// `Frame::res(id, body)` sent through the session's channel.
+    Deferred,
+}
+
+/// The server's ceiling on one held `pull`, so a client cannot park a task for
+/// an arbitrarily long window.
+pub const MAX_HOLD_MS: u64 = 30_000;
+
 /// Route one client frame body.
-pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: ClientOp) -> ResBody {
+///
+/// `id` is the request's frame id. Only a held `pull` needs it: that arm
+/// answers on a task of its own and builds the `res` frame there, because
+/// waiting out its window inside this function would stop every other frame on
+/// the connection (design §4.3).
+pub async fn dispatch_client(
+    state: &Arc<State>,
+    session: &mut Session,
+    id: &str,
+    op: ClientOp,
+) -> Answer {
     let pre_auth = matches!(op, ClientOp::Hello(_));
     if !session.authenticated && !pre_auth {
-        return hello_required();
+        return Answer::Immediate(hello_required());
     }
     match op {
-        ClientOp::Hello(args) => hello(state, session, args),
+        ClientOp::Hello(args) => Answer::Immediate(hello(state, session, args)),
         ClientOp::Send(envelope) => {
             let role = match session.role_or_reject() {
                 Ok(role) => role.to_string(),
-                Err(body) => return body,
+                Err(body) => return Answer::Immediate(body),
             };
             let mut envelope = *envelope;
             envelope.from = Principal::role(role.clone());
@@ -104,88 +139,169 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
             let owner = envelope
                 .task_id()
                 .and_then(|task| relay::task_owner(state, task));
-            reply_body(
+            Answer::Immediate(reply_body(
                 state,
                 relay::send(state, &envelope, session.admin, owner.as_deref()),
-            )
+            ))
         }
         ClientOp::Pull(args) => {
             let role = match session.role_or_reject() {
                 Ok(role) => role.to_string(),
-                Err(body) => return body,
+                Err(body) => return Answer::Immediate(body),
             };
-            match relay::pull(state, &role, session.session_id.as_deref(), &args) {
-                Ok(reply) => ResBody::ok(serde_json::to_value(reply).unwrap_or_default()),
-                Err(error) => internal(error),
+            // One connection reads its queue once per wait. A second pull
+            // while a held one owns the connection would read the same queue
+            // and arm a second ticket for rows the first is about to be
+            // handed, so it is refused rather than answered — and an immediate
+            // pull is refused by the same rule, because it is the same read.
+            let held = session.held_pull.clone();
+            if held.load(Ordering::SeqCst) {
+                return Answer::Immediate(held_pull_refusal());
             }
+            // The registry is what names this connection's role, so a link it
+            // has already replaced claims no row at all: every ticket it armed
+            // would outlive it, and a role-level pull carries no session to
+            // tell the two links apart.
+            if !holds_role(state, &role, session.generation) {
+                return Answer::Immediate(departed_link_refusal(&role));
+            }
+            // A session with no channel has no way back to the wire on its
+            // own, so its answer travels the read loop like every other one.
+            let Some(sender) = session.sender.clone() else {
+                return Answer::Immediate(immediate_pull(state, session, &role, &args));
+            };
+            let Some(window) = hold_window(args.hold_ms) else {
+                return Answer::Immediate(owned_pull(
+                    state,
+                    session,
+                    &role,
+                    &args,
+                    session.generation,
+                    &sender,
+                ));
+            };
+            held.store(true, Ordering::SeqCst);
+            // The subscription is taken before the first read of the queue: a
+            // delivery appended while that read runs is then both in the
+            // ledger and on the receiver, so the wait below cannot miss the
+            // wake a `send` published in between.
+            let frames = state.subscribe_frames();
+            let first = match relay::pull(state, &role, session.session_id.as_deref(), &args) {
+                Ok(reply) => reply,
+                Err(error) => {
+                    held.store(false, Ordering::SeqCst);
+                    return Answer::Immediate(internal(error));
+                }
+            };
+            if !first.deliveries.is_empty() {
+                held.store(false, Ordering::SeqCst);
+                let body = match keep_claim(state, &role, session.generation, &sender, first) {
+                    Ok(answer) => answer.body,
+                    Err(body) => body,
+                };
+                return Answer::Immediate(body);
+            }
+            let hold = HeldPull {
+                state: Arc::clone(state),
+                role,
+                session_id: session.session_id.clone(),
+                generation: session.generation,
+                args,
+                frames,
+                window,
+            };
+            let id = id.to_string();
+            let owner = Arc::clone(&hold.state);
+            tokio::spawn(async move {
+                // A dead link, a replaced registry entry, or a shutdown request
+                // ends the wait with no answer: none of the three may claim a
+                // row for a connection that is gone.
+                if let Some(answer) = hold_pull(hold, &sender).await {
+                    if sender.send(Frame::res(id, answer.body)).await.is_err() {
+                        // The answer never reached the client, so the rows it
+                        // hands over go back: an in-flight row whose ticket
+                        // names this link is one no later pull will take.
+                        release_claims(&owner, &answer.claimed);
+                    }
+                }
+                held.store(false, Ordering::SeqCst);
+            });
+            Answer::Deferred
         }
-        ClientOp::Ack(args) => match relay::ack(state, &args) {
+        ClientOp::Ack(args) => Answer::Immediate(match relay::ack(state, &args) {
             Ok(Ok(event)) => ResBody::ok(serde_json::to_value(event).unwrap_or_default()),
             Ok(Err(reject)) => reject.body(),
             Err(error) => internal(error),
-        },
+        }),
         ClientOp::Report(report) => {
             let role = match session.role_or_reject() {
                 Ok(role) => role.to_string(),
-                Err(body) => return body,
+                Err(body) => return Answer::Immediate(body),
             };
-            report_body(projection::report(state, &role, &report), &report)
+            Answer::Immediate(report_body(
+                projection::report(state, &role, &report),
+                &report,
+            ))
         }
-        ClientOp::Subscribe(subscribe) => match events::page_for(state, &subscribe) {
-            Ok(page) => {
-                if let Some(sender) = session.sender.clone() {
-                    events::spawn_forwarder(
-                        state,
-                        events::EventFilter::from_subscribe(&subscribe),
-                        sender,
-                    );
+        ClientOp::Subscribe(subscribe) => {
+            Answer::Immediate(match events::page_for(state, &subscribe) {
+                Ok(page) => {
+                    if let Some(sender) = session.sender.clone() {
+                        events::spawn_forwarder(
+                            state,
+                            events::EventFilter::from_subscribe(&subscribe),
+                            sender,
+                        );
+                    }
+                    ResBody::ok(events::page_json(&page))
                 }
-                ResBody::ok(events::page_json(&page))
-            }
-            Err(error) => internal(error),
-        },
-        ClientOp::QueryLedger(query) => match state.ledger.ledger_query(query) {
+                Err(error) => internal(error),
+            })
+        }
+        ClientOp::QueryLedger(query) => Answer::Immediate(match state.ledger.ledger_query(query) {
             Ok(rows) => ResBody::ok(json!({
                 "ledger": rows.iter().map(relay::entry_from_row).collect::<Vec<LedgerEntry>>(),
             })),
             Err(error) => internal(error.into()),
-        },
+        }),
         ClientOp::QuerySessions(query) => {
             let admin = session.admin;
-            match projection::sessions_read(state, query, admin).await {
+            Answer::Immediate(match projection::sessions_read(state, query, admin).await {
                 Ok(rows) => ResBody::ok(json!({ "sessions": rows })),
                 Err(error) => internal(error),
-            }
+            })
         }
         // The one question a scoped session asks of the ledger: does the family
         // it holds a conversation for still owe work? The row count is the whole
         // answer, and the client reads it back as `open`.
-        ClientOp::QueryFamilyOpen(args) => match state.ledger.family_open_count(&args.family) {
-            Ok(open) => ResBody::ok(json!({ "open": open })),
-            Err(error) => internal(error.into()),
-        },
-        ClientOp::QueryRoles(query) => match roles(state, &query) {
+        ClientOp::QueryFamilyOpen(args) => {
+            Answer::Immediate(match state.ledger.family_open_count(&args.family) {
+                Ok(open) => ResBody::ok(json!({ "open": open })),
+                Err(error) => internal(error.into()),
+            })
+        }
+        ClientOp::QueryRoles(query) => Answer::Immediate(match roles(state, &query) {
             Ok(rows) => ResBody::ok(json!({ "roles": rows })),
             Err(error) => internal(error),
-        },
-        ClientOp::QueryFaults(query) => match faults::query(state, &query) {
+        }),
+        ClientOp::QueryFaults(query) => Answer::Immediate(match faults::query(state, &query) {
             Ok(rows) => ResBody::ok(json!({ "faults": rows })),
             Err(error) => internal(error),
-        },
+        }),
         ClientOp::Control(args) => {
             let role = match session.role_or_reject() {
                 Ok(role) => role.to_string(),
-                Err(body) => return body,
+                Err(body) => return Answer::Immediate(body),
             };
             let envelope = control_envelope(&role, &args.op, args.to.as_deref());
             let owner = relay::task_owner(state, args.op.task_id());
             // A control word settles the same way whether an operator's socket
             // or a supervisor role's link carried it: one rule, two doors.
             crate::faults::settle_controlled(state, &args.op);
-            reply_body(
+            Answer::Immediate(reply_body(
                 state,
                 relay::send(state, &envelope, session.admin, owner.as_deref()),
-            )
+            ))
         }
         // §3c's turn-end family reaches the server's stream through this one
         // verb and nothing else: it carries no `(generation, seq)`, passes
@@ -197,10 +313,10 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
         // nobody publishes (`docs/v2-CONTRACT.md` §"Slice 7").
         ClientOp::PublishEvent(args) => {
             if session.role_or_reject().is_err() {
-                return hello_required();
+                return Answer::Immediate(hello_required());
             }
             let Some(event) = onlyne_proto::client_event(&args.class, args.payload) else {
-                return ResBody::err(
+                return Answer::Immediate(ResBody::err(
                     ErrorCode::Invalid,
                     format!(
                         "unknown event class '{}'; a client may publish only {}",
@@ -208,21 +324,295 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
                         onlyne_proto::CLIENT_EVENT_CLASSES.join(", ")
                     ),
                     Some("class".to_string()),
-                );
+                ));
             };
-            match state.emit(event) {
+            Answer::Immediate(match state.emit(event) {
                 Ok(_) => ResBody::ok(Value::Null),
                 Err(error) => internal(error),
-            }
+            })
         }
         ClientOp::Bye(args) => {
             if let Some(role) = session.role.clone() {
                 relay::disconnect(state, &role).ok();
             }
             session.authenticated = false;
-            ResBody::ok(json!({ "bye": args.reason }))
+            Answer::Immediate(ResBody::ok(json!({ "bye": args.reason })))
         }
     }
+}
+
+/// The window a `pull` asks the server to hold, or `None` when it wants its
+/// answer now.
+///
+/// `hold_ms` absent or zero is the immediate read every client used before the
+/// window existed; a request above [`MAX_HOLD_MS`] is capped to it.
+fn hold_window(hold_ms: Option<u64>) -> Option<Duration> {
+    match hold_ms {
+        Some(ms) if ms > 0 => Some(Duration::from_millis(ms.min(MAX_HOLD_MS))),
+        _ => None,
+    }
+}
+
+/// The one queue read every `pull` answered inside the read loop performs.
+fn immediate_pull(state: &Arc<State>, session: &Session, role: &str, args: &PullArgs) -> ResBody {
+    match relay::pull(state, role, session.session_id.as_deref(), args) {
+        Ok(reply) => pull_body(&reply),
+        Err(error) => internal(error),
+    }
+}
+
+/// The queue read of a link that owns its role.
+///
+/// A row this read hands over belongs to the link, and the loop writes the
+/// answer that says so; a link the registry replaced in the same instant gets
+/// the rows put back and a refusal instead.
+fn owned_pull(
+    state: &Arc<State>,
+    session: &Session,
+    role: &str,
+    args: &PullArgs,
+    generation: u64,
+    sender: &mpsc::Sender<Frame>,
+) -> ResBody {
+    let reply = match relay::pull(state, role, session.session_id.as_deref(), args) {
+        Ok(reply) => reply,
+        Err(error) => return internal(error),
+    };
+    match keep_claim(state, role, generation, sender, reply) {
+        Ok(answer) => answer.body,
+        Err(body) => body,
+    }
+}
+
+/// The refusal a `pull` earns while this connection already holds one.
+fn held_pull_refusal() -> ResBody {
+    ResBody::err(
+        ErrorCode::Conflict,
+        "this connection already holds a pull; one connection reads its queue once per wait",
+        Some("op".to_string()),
+    )
+}
+
+/// The refusal a `pull` earns on a link the registry no longer names.
+fn departed_link_refusal(role: &str) -> ResBody {
+    ResBody::err(
+        ErrorCode::Conflict,
+        format!("another connection holds role {role}; this link reads no queue"),
+        Some("role".to_string()),
+    )
+}
+
+/// Everything one held `pull` needs to answer after its window.
+struct HeldPull {
+    state: Arc<State>,
+    role: String,
+    session_id: Option<String>,
+    /// The registry generation this connection registered at `hello`.
+    generation: u64,
+    args: PullArgs,
+    frames: broadcast::Receiver<Arc<Frame>>,
+    window: Duration,
+}
+
+/// One held pull's answer, with the rows it hands over.
+struct HeldAnswer {
+    body: ResBody,
+    /// The rows this answer moves to this connection. An answer that never
+    /// reaches the client must put them back.
+    claimed: Vec<String>,
+}
+
+/// An answer that hands over no row.
+fn answered(body: ResBody) -> HeldAnswer {
+    HeldAnswer {
+        body,
+        claimed: Vec::new(),
+    }
+}
+
+/// Wait out one held `pull` and build the answer the connection will write.
+///
+/// Each wake re-reads the queue, and only a frame that can change that read is
+/// a wake: a ledger row reaches this role through its target, the eligibility
+/// a note needs lands as a session row of this role, a reload can change what
+/// the role may be handed, and a lag drops events whose read this loop owes
+/// itself. Everything else — a fault, a gateway's health, another role's
+/// traffic — leaves the queue as it was. The deadline is fixed when the wait
+/// starts and a wake never moves it.
+///
+/// `None` is a link that can no longer receive: its channel has closed, its
+/// role's registry entry has moved to another connection, or the server is
+/// shutting down. None of those may claim a row, so the wait ends without a
+/// further read.
+async fn hold_pull(hold: HeldPull, sender: &mpsc::Sender<Frame>) -> Option<HeldAnswer> {
+    let HeldPull {
+        state,
+        role,
+        session_id,
+        generation,
+        args,
+        mut frames,
+        window,
+    } = hold;
+    let shutdown = Arc::clone(&state.shutdown);
+    // One `notified` future for the whole wait, pinned: a waiter registered
+    // once is still registered between two reads of the queue, so a shutdown
+    // request that lands while this loop is pulling a row is not lost.
+    let shutdown_requested = shutdown.notified();
+    tokio::pin!(shutdown_requested);
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::select! {
+            _ = sender.closed() => return None,
+            _ = &mut shutdown_requested => return None,
+            waited = tokio::time::timeout(remaining, frames.recv()) => {
+                match waited {
+                    // A lag is a wake: what the broadcast dropped is still in
+                    // the ledger, so the read below owes the queue a look.
+                    Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
+                    Ok(Ok(frame)) if wakes(frame.as_ref(), &role) => {}
+                    Ok(Ok(_)) => continue,
+                    // The broadcast closed and the window elapsed, alike.
+                    Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => break,
+                }
+            }
+        }
+        if !owns_link(&state, &role, generation, sender) {
+            return None;
+        }
+        let reply = match relay::pull(&state, &role, session_id.as_deref(), &args) {
+            Ok(reply) => reply,
+            Err(error) => return Some(answered(internal(error))),
+        };
+        if reply.deliveries.is_empty() {
+            // Nothing to hand over, so the wait goes on to its window — on a
+            // link that still holds the role, which every wake re-asks.
+            if !owns_link(&state, &role, generation, sender) {
+                return None;
+            }
+            continue;
+        }
+        return Some(match keep_claim(&state, &role, generation, sender, reply) {
+            Ok(answer) => answer,
+            Err(body) => answered(body),
+        });
+    }
+    // Expiry reads once more, so the empty answer carries the head the
+    // connection resumes from and a delivery that landed exactly at the
+    // deadline is handed over instead of waiting for the client's next round.
+    if !owns_link(&state, &role, generation, sender) {
+        return None;
+    }
+    let reply = match relay::pull(&state, &role, session_id.as_deref(), &args) {
+        Ok(reply) => reply,
+        Err(error) => return Some(answered(internal(error))),
+    };
+    Some(match keep_claim(&state, &role, generation, sender, reply) {
+        Ok(answer) => answer,
+        Err(body) => answered(body),
+    })
+}
+
+/// Answer one read that found rows, or put them back when the registry moved
+/// on between the ownership check and the read.
+///
+/// Checking ownership and reading the queue are two separate reads of the
+/// registry, so a successor that registers the role in between leaves this
+/// connection holding rows no later pull will take: `pull` passes by an
+/// in-flight row whose ticket names the puller, and a role-level pull carries
+/// no session to tell two links of one role apart. The rows go back to the
+/// queue, and the connection that is gone is told it holds no queue.
+fn keep_claim(
+    state: &State,
+    role: &str,
+    generation: u64,
+    sender: &mpsc::Sender<Frame>,
+    reply: PullReply,
+) -> Result<HeldAnswer, ResBody> {
+    let claimed: Vec<String> = reply
+        .deliveries
+        .iter()
+        .map(|delivery| delivery.msg_id.clone())
+        .collect();
+    if !claimed.is_empty() && !owns_link(state, role, generation, sender) {
+        release_claims(state, &claimed);
+        return Err(departed_link_refusal(role));
+    }
+    Ok(HeldAnswer {
+        body: pull_body(&reply),
+        claimed,
+    })
+}
+
+/// Put rows this connection claimed back where they were.
+///
+/// The ledger write is what makes a row pullable again, and the ticket is what
+/// stops one: `pull` passes by an in-flight row whose ticket is still armed,
+/// so the ticket goes with the same move. A row that settled meanwhile is left
+/// alone.
+fn release_claims(state: &State, msg_ids: &[String]) {
+    for msg_id in msg_ids {
+        state.take_delivery(msg_id);
+        if let Err(error) = state.ledger.requeue_one(msg_id) {
+            tracing::warn!(
+                error = %error,
+                msg_id = %msg_id,
+                "a row claimed by a departed link was left in flight"
+            );
+        }
+    }
+}
+
+/// Whether one published frame can change what this role's pull is handed.
+///
+/// A held pull re-reads the queue on every wake, so a frame that cannot change
+/// that read must not wake it: a busy cluster publishes for every role, and
+/// waking every waiter on all of them turns one read per event into a query
+/// per event for every waiting link.
+fn wakes(frame: &Frame, role: &str) -> bool {
+    let Frame::Ev { event, .. } = frame else {
+        return false;
+    };
+    match &**event {
+        Event::LedgerState(update) => update.to.role_name() == Some(role),
+        Event::SessionState(update) => update.role == role,
+        Event::RolePresence(presence) => presence.role == role,
+        // A reload can change what this role may be handed, and the roles
+        // table with it, so it wakes every waiter.
+        Event::SpecReloaded(_) => true,
+        _ => false,
+    }
+}
+
+/// Whether this connection can still carry an answer.
+///
+/// The two halves are the two ways a role link ends: the read loop returns and
+/// drops its channel, or a successor connection registers the role and takes
+/// the registry entry (and with it every ticket the role holds).
+fn owns_link(state: &State, role: &str, generation: u64, sender: &mpsc::Sender<Frame>) -> bool {
+    !sender.is_closed() && holds_role(state, role, generation)
+}
+
+/// Whether the registry still names this connection for the role.
+///
+/// A connection registers at `hello` and the entry is replaced by whoever
+/// registers next, so a generation that moved on is another link's queue.
+fn holds_role(state: &State, role: &str, generation: u64) -> bool {
+    state
+        .roles
+        .read()
+        .ok()
+        .and_then(|roles| roles.current_generation(role))
+        == Some(generation)
+}
+
+/// Map one pull reply onto a response body.
+fn pull_body(reply: &PullReply) -> ResBody {
+    ResBody::ok(serde_json::to_value(reply).unwrap_or_default())
 }
 
 /// Route one admin frame body.

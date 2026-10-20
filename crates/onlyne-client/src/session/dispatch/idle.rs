@@ -10,7 +10,7 @@
 
 use super::retire::{PendingClose, close_retired};
 use super::state::{DispatchInner, binding_task_state};
-use super::transport::{names_session, recycle_over};
+use super::transport::recycle_over;
 use super::*;
 use std::collections::HashMap;
 
@@ -160,18 +160,18 @@ impl DispatchState {
 /// socket, so no mount ever declares anything for it: this client answers no,
 /// which keeps the process in place. Answering yes there would take the client's
 /// own guarantee on behalf of a runtime nobody asked.
+///
+/// The declaration is read off the slot, where the mount left it: the callers
+/// that need the answer most — the detach branch of `release_connection` and the
+/// sweep that reclaims an ended resource — ask after the connection is gone.
 pub(super) fn resumable(inner: &DispatchInner, key: &str) -> bool {
     if inner.backend.self_driven() {
         return false;
     }
-    let Some(slot) = inner.sessions.get(key) else {
-        return false;
-    };
     inner
-        .transports
-        .iter()
-        .find(|(session, _)| names_session(key, slot, session))
-        .is_some_and(|(_, (_, capabilities))| capabilities.contains(&Capability::Resume))
+        .sessions
+        .get(key)
+        .is_some_and(|slot| slot.resume_capable)
 }
 
 /// Release one idle session's process while its row and its conversation stay.

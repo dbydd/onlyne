@@ -1,12 +1,13 @@
 use super::*;
 
+use super::idle::{resumable, suspend_locked};
 use super::outbound::store_ack;
 use super::projection::stored_task_state;
 use super::state::{
-    DispatchInner, DispatchState, forget_tools_binding, has_attached_transport, session_exited,
-    slot_key_named, slot_key_serving_task,
+    DispatchInner, DispatchState, ParkedMount, forget_tools_binding, has_attached_transport,
+    slot_exited, slot_key_named, slot_key_serving_task,
 };
-use super::transport::{held_read_only, names_session};
+use super::transport::{held_read_only, names_session, take_declaration};
 
 /// Reason a session that stopped answering is closed with.
 ///
@@ -293,6 +294,16 @@ pub(super) fn keeps_idle(inner: &DispatchInner, key: &str) -> bool {
         .is_some_and(|slot| slot.keeps_idle && !slot.read_only)
 }
 
+/// Whether one task-free slot is a session its family can bring back.
+///
+/// The scope keeps it and its runtime declared `resume`, so the honest reading
+/// of "the last connection left" is the idle bound's: release the process and
+/// keep the conversation, rather than ending a session the family still has a
+/// chain on.
+fn kept_for_resume(inner: &DispatchInner, key: &str) -> bool {
+    keeps_idle(inner, key) && resumable(inner, key)
+}
+
 /// Retire one task-free session after its transport set becomes empty.
 ///
 /// This is the `oneshot` ending, and the ending of every session whose scope
@@ -514,11 +525,25 @@ pub(super) fn release_locked(
                         .cloned()
                         .collect();
                     for matched in matched_keys {
-                        if let Some((io, caps)) = inner.transports.remove(&matched)
-                            && !inner.parked.iter().any(|(p, _)| p.same_connection(&io))
+                        let Some((io, caps)) = inner.transports.remove(&matched) else {
+                            continue;
+                        };
+                        // The park keeps the name the connection declared, never
+                        // the delivery key it happened to serve under: the
+                        // resident alias is what outlives this slot (`§4.1`).
+                        let session = Some(take_declaration(inner, &io).unwrap_or(matched));
+                        if inner
+                            .parked
+                            .iter()
+                            .any(|mount| mount.io.same_connection(&io))
                         {
-                            inner.parked.push((io, caps));
+                            continue;
                         }
+                        inner.parked.push(ParkedMount {
+                            io,
+                            capabilities: caps,
+                            session,
+                        });
                     }
                 }
                 let mut pending = Vec::new();
@@ -723,7 +748,8 @@ impl DispatchState {
         rebased
     }
 
-    /// Retire tracked resources whose stored lifecycle has reached `Exited`.
+    /// Retire the resources of sessions that are over, or release the ones a
+    /// scope keeps under a runtime that can resume them.
     ///
     /// The periodic readiness tick calls this after completed work becomes an
     /// idle slot. Task-free sessions with an attached transport stay bound to
@@ -737,44 +763,45 @@ impl DispatchState {
     /// gives the sweep above.
     pub fn reclaim_exited_resources(&self) -> Vec<String> {
         let mut inner = self.inner.lock();
-        let candidates: Vec<(String, crate::backend::CloseReason)> = inner
+        let candidates: Vec<String> = inner
             .sessions
             .iter()
             .filter(|(key, slot)| {
-                // A suspended session is not an exited one. Its process is gone
-                // *because* it was released, its conversation is what the
-                // family's next delivery is for, and the row it published says
-                // `idle` for exactly that reason — `binding_task_state` answers
-                // `Pending` for a slot that serves nothing and whose scope keeps
-                // it, so the two derivations of "is this over" disagree here.
-                //
-                // This sweep asks the other one, and it asks about the *work*:
-                // a suspended session's delivery is finished, so it reads
-                // `Exited` and the slot is retired within a tick. The family's
-                // next delivery then finds nothing to resume and opens a second
-                // conversation for one chain — which is the failure this filter
-                // existed to prevent, reached through the sweep that was meant
-                // to clean up after a session that was already gone.
+                // A session that is over is asked through the slot, which reads
+                // its binding: a kept session between deliveries projects
+                // `idle`, where the verdict of a delivery it already finished
+                // would read `exited`. The second arm is the same session seen
+                // from its runtime's side — one the family can bring back.
                 !slot.suspended
                     && slot.task_id.is_none()
-                    && session_exited(&inner, &slot.session.task_id)
                     && !has_attached_transport(&inner, key, slot)
+                    && (slot_exited(&inner, slot) || kept_for_resume(&inner, key))
             })
-            .filter_map(|(key, slot)| {
-                stored_close_reason(&inner, &slot.session.task_id)
-                    .map(|reason| (key.clone(), reason))
-            })
+            .map(|(key, _)| key.clone())
             .collect();
         let mut retired: Vec<String> = Vec::new();
         let mut pending: Vec<PendingClose> = Vec::new();
-        for (key, reason) in candidates {
+        for key in candidates {
             // The id that travels is the session's own, the one whose row the
-            // retirement below is about to write.
+            // retirement or suspension below writes.
             let Some(task_id) = inner
                 .sessions
                 .get(&key)
                 .map(|slot| slot.session.task_id.clone())
             else {
+                continue;
+            };
+            // A kept session its runtime can resume keeps its conversation: the
+            // process goes the way the idle bound releases one, and the family's
+            // next delivery lands in the same session rather than opening a
+            // second one for a chain that already has a conversation.
+            if kept_for_resume(&inner, &key) {
+                if suspend_locked(&mut inner, &key, &mut pending) {
+                    retired.push(task_id);
+                }
+                continue;
+            }
+            let Some(reason) = stored_close_reason(&inner, &task_id) else {
                 continue;
             };
             if retire_idle_locked(&mut inner, &key, reason, &mut pending) {
@@ -1053,6 +1080,7 @@ mod tests {
                 read_only: false,
                 tools_token: String::new(),
                 delivered_roles: BTreeSet::new(),
+                resume_capable: false,
             },
         );
         if attached {

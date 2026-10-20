@@ -21,6 +21,16 @@
 // report a session id at all is the one case where both answer yes — refusing
 // every call on an older pi would break the ordinary session to prevent nothing,
 // because the env-bound mount is still the only one that connected.
+//
+// A session id is not the only thing that can decide the door, and where the
+// host declares more, the declaration wins: `declaredSubagent` reads the agent a
+// session runs (omp re-binds every extension factory into each subagent session
+// — the `task` tool, an `eval` child, a `/tan` clone — so a child arrives at a
+// handler carrying the parent's environment and a session id of its own), and
+// `isSessionReplacement` reads the host's own reason for a `session_start` that
+// is really `/new`, `/resume` or `/fork` replacing the live session. A child is
+// never the session a role's tools belong to, whatever id it carries; a
+// replacement is that session moving, not a second one arriving.
 
 /**
  * The id of the session a pi extension context belongs to.
@@ -53,6 +63,49 @@ export function sessionIdOf(sessionManager) {
  */
 export function mountsSession(identitySessionId, startingSessionId) {
   return startingSessionId === null || startingSessionId === identitySessionId;
+}
+
+/**
+ * The host's own declaration that the session starting is a spawned subagent,
+ * as `{ id, parentId }` for the line a refusal is logged with, or `null`.
+ *
+ * omp puts the agent a session runs on every extension context
+ * (`{ kind: "main" | "sub", id, name, depth, parentId? }`, `ExtensionAgentIdentity`)
+ * and says at that declaration that factories are re-bound "to every subagent
+ * session (task tool, eval `agent()`, `/tan` clones)". `kind` is the field to
+ * read and `depth` is not: a `/tan` clone is a subagent at depth 0. The read is
+ * structural because the installed typings of the host this plugin is published
+ * against (`@earendil-works/pi-coding-agent`, 1.3.0) do not declare `agent` at
+ * all — that host answers `null` here, and its sessions are told apart by the
+ * session id and the resident claim instead.
+ *
+ * @param {{ agent?: { kind?: unknown, id?: unknown, parentId?: unknown } } | null | undefined} ctx
+ * @returns {{ id: string | null, parentId: string | null } | null}
+ */
+export function declaredSubagent(ctx) {
+  const agent = ctx?.agent;
+  if (!agent || typeof agent !== "object" || agent.kind !== "sub") return null;
+  const text = (value) => (typeof value === "string" && value.length > 0 ? value : null);
+  return { id: text(agent.id), parentId: text(agent.parentId) };
+}
+
+/**
+ * Whether this `session_start` is the host declaring a session replacement —
+ * `/new`, `/resume`, `/fork` — rather than a session arriving beside the live
+ * one.
+ *
+ * The reason strings are the host's: `@earendil-works/pi-coding-agent` reports
+ * these transitions as `session_start.reason`, and omp reports them as
+ * `session_switch.reason`. `"startup"` and an absent reason are the other
+ * reading, which is what a factory re-bound for a subagent or a second session
+ * in the same process looks like.
+ *
+ * @param {{ reason?: unknown } | null | undefined} event
+ * @returns {boolean}
+ */
+export function isSessionReplacement(event) {
+  const reason = event?.reason;
+  return reason === "new" || reason === "resume" || reason === "fork";
 }
 
 /**

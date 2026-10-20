@@ -487,6 +487,7 @@ fn stage_slot(
                     inner.session_policy.scope,
                     onlyne_config::SessionScope::Oneshot
                 ),
+                resume_capable: false,
             },
         );
         inner.stall.note_assigned(task_id, Instant::now());
@@ -770,15 +771,20 @@ impl DispatchState {
     /// takes the next staged session, once. A plugin-driven session with neither
     /// waits for its mount. Answers whether the payload had somewhere to go.
     pub async fn hand_staged(&self, session_id: &str) -> Result<bool> {
+        // The session's own id, which a scope's later delivery is not: the
+        // claim, the transport map and the ready report all speak for the
+        // session, and a delivery's id told to the server as a session would
+        // mirror a second one beside the conversation that is already there.
+        let session_id = self.session_name_of(session_id);
         let self_driven = self.inner.lock().backend.self_driven();
         if self_driven {
             let prose = self.role_prose();
-            let (task_id, generation) = self.served_delivery(session_id);
+            let (task_id, generation) = self.served_delivery(&session_id);
             on_ready(
                 self,
                 ReadyNotice {
                     task_id,
-                    session_id: session_id.to_string(),
+                    session_id: session_id.clone(),
                     generation,
                     io: None,
                     capabilities: Vec::new(),
@@ -795,13 +801,25 @@ impl DispatchState {
         // reaches it by being asked for, so a connection that has already been
         // lent one is lent nothing by this path.
         let transport = self
-            .session_transport(session_id)
-            .or_else(|| self.claim_parked_transport(session_id));
+            .session_transport(&session_id)
+            .or_else(|| self.claim_parked_transport(&session_id));
         let Some((io, capabilities)) = transport else {
             return Ok(false);
         };
-        self.hand_session(session_id, io, capabilities).await?;
+        self.hand_session(&session_id, io, capabilities).await?;
         Ok(true)
+    }
+
+    /// The session's own id for a name this client holds, which may be the
+    /// delivery that session is serving.
+    fn session_name_of(&self, named: &str) -> String {
+        let inner = self.inner.lock();
+        inner
+            .sessions
+            .iter()
+            .find(|(key, slot)| names_session(key, slot, named))
+            .map(|(_, slot)| slot.session.task_id.clone())
+            .unwrap_or_else(|| named.to_string())
     }
 
     /// The delivery one session is serving, and the generation it runs under.
@@ -914,7 +932,7 @@ impl DispatchState {
                 capabilities,
             });
         }
-        let (io, capabilities) = inner.parked.first()?;
+        let mount = inner.parked.first()?;
         Some(NoteTarget {
             task_id: envelope.id.clone(),
             session_id: inner
@@ -923,8 +941,8 @@ impl DispatchState {
                 .unwrap_or("resident")
                 .to_string(),
             generation: 1,
-            io: io.clone(),
-            capabilities: capabilities.clone(),
+            io: mount.io.clone(),
+            capabilities: mount.capabilities.clone(),
         })
     }
 }
@@ -972,7 +990,7 @@ mod tests {
         );
         let (stream, mut peer) = tokio::io::duplex(4096);
         let io = AdapterIo::new(stream, Duration::from_secs(5), Duration::from_secs(5));
-        state.park_transport(io.clone(), vec![Capability::Inject]);
+        state.park_transport(io.clone(), vec![Capability::Inject], None);
         let note = new_envelope(
             MsgKind::Note,
             Principal::role("planner"),
@@ -988,7 +1006,7 @@ mod tests {
         {
             let inner = state.inner.lock();
             assert_eq!(inner.parked.len(), 1, "the note does not spend the park");
-            assert!(inner.parked[0].0.same_connection(&io));
+            assert!(inner.parked[0].io.same_connection(&io));
         }
         let frame = onlyne_wire::read_frame::<_, onlyne_adapter::WireMessage>(&mut peer)
             .await

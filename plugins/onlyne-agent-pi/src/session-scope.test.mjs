@@ -6,7 +6,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  declaredSubagent,
   foreignSessionRefusal,
+  isSessionReplacement,
   mountsSession,
   ownsSession,
   sessionIdOf,
@@ -58,4 +60,36 @@ test("the refusal names both sessions and why the call is refused", () => {
   assert.ok(sentence.includes(SIDECHAIN), sentence);
   assert.ok(sentence.includes(PARENT), sentence);
   assert.ok(sentence.includes("subagent"), sentence);
+});
+
+test("a host that declares the session a subagent is read before any session id", () => {
+  assert.deepEqual(
+    declaredSubagent({ agent: { kind: "sub", id: "0-Explore", name: "explore", depth: 1, parentId: "Main" } }),
+    { id: "0-Explore", parentId: "Main" },
+  );
+  assert.deepEqual(
+    declaredSubagent({ agent: { kind: "sub", id: "tan-1", name: "sub", depth: 0 } }),
+    { id: "tan-1", parentId: null },
+    "a /tan clone is a subagent at depth 0, which is why depth is not the field read",
+  );
+  assert.deepEqual(
+    declaredSubagent({ agent: { kind: "sub" } }),
+    { id: null, parentId: null },
+    "a declaration with no ids still refuses; the caller names what it can",
+  );
+  assert.equal(declaredSubagent({ agent: { kind: "main", id: "Main", name: "main", depth: 0 } }), null);
+  assert.equal(declaredSubagent({ agent: "sub" }), null, "a non-object declaration declares nothing");
+  assert.equal(declaredSubagent({ agent: null }), null);
+  assert.equal(declaredSubagent({}), null, "a host that declares no agent identity is answered with none");
+  assert.equal(declaredSubagent(undefined), null);
+});
+
+test("only the transitions a host calls a replacement read as one", () => {
+  assert.equal(isSessionReplacement({ reason: "new" }), true);
+  assert.equal(isSessionReplacement({ reason: "resume" }), true);
+  assert.equal(isSessionReplacement({ reason: "fork" }), true);
+  assert.equal(isSessionReplacement({ reason: "startup" }), false, "a second session beside the live one");
+  assert.equal(isSessionReplacement({ reason: "reload" }), false, "the same session, reopened");
+  assert.equal(isSessionReplacement({}), false, "a host that names no reason names no replacement");
+  assert.equal(isSessionReplacement(undefined), false);
 });

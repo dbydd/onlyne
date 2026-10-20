@@ -38,6 +38,28 @@ python3 examples/im-gateway/run.py status   # roles, gateway check, each convers
 python3 examples/im-gateway/run.py stop
 ```
 
+## The lifecycle and federation cluster
+
+`examples/lifecycle/run.py` builds an isolated copy of this machine's three-root layout. It runs three Onlyne servers, eight clients, a resident adapter host, and an IM gateway with the fake backend. Alexandria and ResearchChamber each have a representative role on the central server and a matching role on the member server. The representative explicitly sends work to the member cluster and returns its result to the central role.
+
+The tree defaults to `/tmp/onlyne-lifecycle`. Its private runtime directory is `/tmp/onlyne-lifecycle/runtime`, so it does not read the machine-wide Onlyne registrations. Set `LIFECYCLE_ROOT` and `LIFECYCLE_RUNTIME_DIR` to select other paths.
+
+```bash
+cargo build --workspace
+python3 examples/lifecycle/run.py up
+python3 examples/lifecycle/run.py status
+python3 examples/lifecycle/run.py lifecycle
+python3 examples/lifecycle/run.py federation
+python3 examples/lifecycle/run.py im
+python3 examples/lifecycle/run.py idle
+bun examples/lifecycle/omp-live.mjs --paths-json /tmp/onlyne-lifecycle/paths.json
+python3 examples/lifecycle/run.py stop
+```
+
+`lifecycle` checks which declared adapter connections keep a session alive. `federation` exercises both member clusters and cross-cluster replies. `im` drives an inbound event through the real gateway and fake backend process, then checks the outbound receipt. `idle` records CPU time and loopback traffic over a bounded idle window. `omp-live.mjs` loads the plugin into a real headless OMP parent, creates and disposes a task child, sends notes before and after a parent session replacement, and checks the session row after shutdown. The OMP step uses the configured model route and can take several minutes.
+
+The script writes `paths.json` and evidence under `/tmp/onlyne-lifecycle`. It creates fresh keys and ledgers there. The IM round trip uses a fake backend and does not read platform credentials.
+
 ## Configuration example tree
 
 `.onlyne.example/` holds three things: a comment-dense `spec.toml`, a `templates/dev/` tree for the
@@ -85,6 +107,28 @@ python3 examples/im-gateway/run.py smoke    # 免凭据运行一次完整的入�
 python3 examples/im-gateway/run.py status   # 查看角色、网关检查结果与每条会话的 chat key
 python3 examples/im-gateway/run.py stop
 ```
+
+## 生命周期与联邦集群
+
+`examples/lifecycle/run.py` 会在独立目录中搭建本机三根目录拓扑的副本。它启动 3 个 Onlyne server、8 个 client、一个常驻 adapter 主机，以及使用 fake 后端的 IM 网关。Alexandria 和 ResearchChamber 在中心 server 各有一个代表 role，并在成员 server 上各有一个同名 role。代表会显式把工作发给成员集群，再把结果带回中心 role。
+
+默认运行目录是 `/tmp/onlyne-lifecycle`，专用运行时目录是 `/tmp/onlyne-lifecycle/runtime`，不会读取机器级 Onlyne 注册文件。设置 `LIFECYCLE_ROOT` 和 `LIFECYCLE_RUNTIME_DIR` 可以选择其他目录。
+
+```bash
+cargo build --workspace
+python3 examples/lifecycle/run.py up
+python3 examples/lifecycle/run.py status
+python3 examples/lifecycle/run.py lifecycle
+python3 examples/lifecycle/run.py federation
+python3 examples/lifecycle/run.py im
+python3 examples/lifecycle/run.py idle
+bun examples/lifecycle/omp-live.mjs --paths-json /tmp/onlyne-lifecycle/paths.json
+python3 examples/lifecycle/run.py stop
+```
+
+`lifecycle` 检查连接声明如何保活会话。`federation` 实际经过两个成员集群并跨集群返回结果。`im` 通过真实网关和 fake 后端进程处理入站事件，并检查出站回执。`idle` 在限定时间内记录 CPU 时间和环回流量。`omp-live.mjs` 会在真实的无界面 OMP 父会话中加载插件、创建并回收 task 子会话、在父会话切换前后发送 note，并检查关闭后的会话行。OMP 步骤使用当前配置的模型路由，可能运行几分钟。
+
+脚本会在 `/tmp/onlyne-lifecycle` 写入 `paths.json` 和证据文件，并在其中创建新密钥和账本。IM 往返使用 fake 后端，不读取平台凭据。
 
 ## 配置示例目录树
 

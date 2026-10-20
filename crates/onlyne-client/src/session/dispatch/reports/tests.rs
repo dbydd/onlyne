@@ -114,6 +114,7 @@ fn serving_slot(state: &DispatchState, task: &str, msg_id: &str) {
             read_only: false,
             tools_token: String::new(),
             delivered_roles: BTreeSet::new(),
+            resume_capable: false,
         },
     );
 }

@@ -5,8 +5,8 @@ use super::projection::{stored_task_state, task_state_of};
 use super::retire::stored_close_reason;
 use super::state::{
     ControlNote, ControlWord, DispatchInner, DispatchState, ToolsScope, ToolsSession,
-    due_control_settles, live_sessions, session_exited, slot_key_for_token, slot_key_named,
-    slot_key_serving_task, token_names_session, tools_session_of,
+    due_control_settles, live_sessions, session_exited, slot_exited, slot_key_for_token,
+    slot_key_named, slot_key_serving_task, token_names_session, tools_session_of,
 };
 use super::transport::names_session;
 
@@ -43,6 +43,7 @@ impl DispatchState {
                 topology: String::new(),
                 transports: HashMap::new(),
                 parked: Vec::new(),
+                declarations: Vec::new(),
                 standing: Vec::new(),
                 stall: crate::session::stall::StallWatch::new(),
                 revived: Vec::new(),
@@ -698,7 +699,7 @@ impl DispatchState {
         inner
             .sessions
             .get(&key)
-            .filter(|slot| !session_exited(&inner, &slot.session.task_id))
+            .filter(|slot| !slot_exited(&inner, slot))
             .map(|slot| slot.tools_token.clone())
     }
 

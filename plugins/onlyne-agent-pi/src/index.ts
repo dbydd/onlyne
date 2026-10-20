@@ -40,7 +40,17 @@
 // environment, and a sidechain that called `onlyne_complete` would settle the
 // parent's task. `session-scope.mjs` carries the rule, the guard behind it, and
 // what a call from a foreign session is told.
-
+//
+// One process also holds at most one resident claim. A resident pi is started
+// by hand rather than spawned by the client, so a `task` subagent's sidechain
+// inherits nothing that names a task and reaches the resident branch through a
+// second call of this factory with fresh closure state; the claim is what stops
+// it from opening a connection that impersonates the parent's resident alias
+// (`docs/v2.11-LIFECYCLE-IS-DECLARED-NOT-INFERRED.md` §4.2). Where the host
+// itself declares what the session is — omp marks every subagent context
+// `agent.kind === "sub"` — that declaration decides first, on both identity
+// paths, and the claim is the reading left for a host that declares nothing.
+//
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -49,7 +59,14 @@ import { ASSIGN_MESSAGE_TYPE, createAssignMessageComponent } from "./activity.mj
 import { loadConfig, residentIdentity, sessionIdentity } from "./config.mjs";
 import { resolveResidentSocketPath, resolveSocketPath } from "./socket.mjs";
 import { createSurface } from "./pi-surface.mjs";
-import { foreignSessionRefusal, mountsSession, ownsSession, sessionIdOf } from "./session-scope.mjs";
+import {
+  declaredSubagent,
+  foreignSessionRefusal,
+  isSessionReplacement,
+  mountsSession,
+  ownsSession,
+  sessionIdOf,
+} from "./session-scope.mjs";
 
 /**
  * Node's process globals, declared here so the package needs no `@types/node`
@@ -145,6 +162,18 @@ const textResult = (text: string, details?: unknown) => ({
   content: [{ type: "text" as const, text }],
   details,
 });
+
+/**
+ * The session this process has already taken as its resident, or `null` while
+ * no resident mount holds it.
+ *
+ * Module scope is the point: pi hosts a `task` subagent's sidechain in the same
+ * process by loading this extension again, so a guard that read the factory's
+ * own `boundSessionId` compared `null` against a name and let the child open a
+ * connection for the parent's resident alias
+ * (`docs/v2.11-LIFECYCLE-IS-DECLARED-NOT-INFERRED.md` §4.2).
+ */
+let residentClaim: string | null = null;
 
 export default function onlyne(pi: ExtensionAPI) {
   const env: Record<string, string | undefined> = typeof process === "undefined" ? {} : process.env;
@@ -353,9 +382,20 @@ export default function onlyne(pi: ExtensionAPI) {
    */
   const syncSessionContext = (_event: unknown, ctx: ExtensionContext) => {
     if (!agent) return;
+    // The same declaration the mount gate reads, on the other door: a context
+    // the host declares a subagent must not re-point this plugin's connection
+    // onto a child, whatever session id it carries.
+    if (declaredSubagent(ctx)) return;
     context = ctx;
     const currentId = sessionIdOf(ctx?.sessionManager);
     if (currentId) {
+      // `/new`, `/resume` and a tree jump replace the live session inside this
+      // process rather than starting a second resident, so the claim moves with
+      // it — but only the mount that holds the claim may move it. A factory that
+      // never mounted returned above, and one whose mount is not the claim
+      // holder leaves the claim where it is. The comparison reads the session
+      // this mount held until now, so it goes before the rebind.
+      if (boundSessionId === residentClaim) residentClaim = currentId;
       boundSessionId = currentId;
     }
     if (surface?.available.widget) {
@@ -369,6 +409,29 @@ export default function onlyne(pi: ExtensionAPI) {
     const resident = spawned ? null : residentIdentity(env, ctx.cwd);
     const identity = spawned ?? resident;
     if (!identity) return; // not an onlyne session: stay out of the way
+    const starting = sessionIdOf(ctx.sessionManager);
+    // The host's own declaration comes first, before either identity path: a
+    // session it declares a subagent — a `task` subagent, an `eval` child, a
+    // `/tan` clone, all re-bound through this factory in this process — is never
+    // the session a role's tools belong to, even when it inherits the client's
+    // environment or arrives with no session id at all
+    // (docs/v2.11-LIFECYCLE-IS-DECLARED-NOT-INFERRED.md §2 rule 2).
+    const subagent = declaredSubagent(ctx);
+    if (subagent) {
+      log(
+        `session ${starting} is subagent ${subagent.id ?? "?"} of ${subagent.parentId ?? "?"}; staying inert`
+      );
+      return;
+    }
+    // A resident plugin already holds its connection, so another session_start
+    // in this process is a re-point, not a mount: /new, /resume and /fork
+    // replace the live session, and pi can re-bind this same session's
+    // extensions. A subagent on a host that declares no agent identity re-binds
+    // with reason "startup" and a different id, and is refused below.
+    if (!spawned && agent !== null && (event.reason !== "startup" || starting === boundSessionId)) {
+      syncSessionContext(event, ctx);
+      return;
+    }
     // Only the session the client names may mount. A pi process runs more than
     // one session — a `task` subagent's sidechain, `/new` — and each of them
     // loads this extension with the same inherited environment, so without this
@@ -376,24 +439,30 @@ export default function onlyne(pi: ExtensionAPI) {
     // librarian task cfa73386). An unknown id means an older pi that does not
     // expose one; the env-bound mount is then the only candidate and stays the
     // behaviour, with no line to explain.
-    const starting = sessionIdOf(ctx.sessionManager);
-    // A resident plugin already holds its connection, so another session_start
-    // in this process is a re-point, not a mount: /new, /resume and /fork
-    // replace the live session, and pi can re-bind this same session's
-    // extensions. The sidechain a `task` subagent runs re-binds every extension
-    // with reason "startup" and a different id, and stays inert.
-    if (!spawned && agent !== null && (event.reason !== "startup" || starting === boundSessionId)) {
-      syncSessionContext(event, ctx);
-      return;
-    }
     if (spawned) {
       if (!mountsSession(spawned.sessionId, starting)) {
         log(`session ${starting} is not the onlyne session ${spawned.sessionId}; staying inert`);
         return;
       }
-    } else if (boundSessionId !== null && starting !== null && starting !== boundSessionId) {
-      log(`session ${starting} is not the resident onlyne session ${boundSessionId}; staying inert`);
-      return;
+    } else {
+      // The claim is process-wide, so it holds across factory calls: a `task`
+      // subagent's sidechain loads this extension again with fresh closure state
+      // and would otherwise mount the alias this process already serves. A
+      // `session_start` the host calls a replacement is the other reading: the
+      // live session is moving inside this process, so the claim moves with it
+      // instead of refusing the session that is now the resident. An older pi
+      // that names no session id is the one case with nothing to compare — it
+      // mounts as it did before, and claims nothing.
+      if (
+        residentClaim !== null &&
+        starting !== null &&
+        starting !== residentClaim &&
+        !isSessionReplacement(event)
+      ) {
+        log(`session ${starting} is not the resident session ${residentClaim}; staying inert`);
+        return;
+      }
+      if (starting !== null) residentClaim = starting;
     }
     const wireSessionId = identity.sessionId ?? starting;
     context = ctx;
@@ -491,6 +560,10 @@ export default function onlyne(pi: ExtensionAPI) {
     agent?.stop(`pi:${event.reason ?? "quit"}`);
     surface?.closeBackground?.();
     surface?.widget?.(undefined);
+    // Only the mount holding the claim may release it: a child factory that
+    // never mounted has no `boundSessionId` of its own, and its shutdown must
+    // leave the resident's claim where it is.
+    if (boundSessionId !== null && boundSessionId === residentClaim) residentClaim = null;
     agent = null;
     surface = null;
     registered = false;
