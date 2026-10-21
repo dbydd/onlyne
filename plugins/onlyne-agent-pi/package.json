@@ -1,6 +1,6 @@
 {
   "name": "pi-onlyne",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "Onlyne agent adapter for pi: the session lifecycle an onlyne role client expects from a pi host.",
   "type": "module",
   "license": "MIT",

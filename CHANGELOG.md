@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.4.1 (2026-10-21)
+
+- **Supervisor operations over admin socket.** Added `AdminOp::Ack` to the admin wire
+  protocol; the server routes admin ack/reject through `relay::ack`. Operators can now
+  clear blocked, stuck, or unroutable deliveries for offline/dead roles via `onlyne ack`
+  and `onlyne reject` targeting the server's admin socket (`--server-root`) without
+  requiring an active client workspace or running role daemon.
+- **Cluster-aware socket resolution and registration.** Registration files published by
+  servers and clients now carry `cluster` (the `[server] name`). The CLI's `onlyne ls`
+  displays a new `CLUSTER` column. The `pi-onlyne` adapter adds a `cluster` configuration
+  key in `.pi/onlyne.json` to unambiguously bind sandwiched agents (whose working body runs
+  under one tree while the role belongs to another cluster) to their declared serving cluster.
+- **Robust resident socket convergence and role prose recovery.** `pi-onlyne` strictly
+  narrows duplicate role names by tree containment and declared cluster, failing explicitly
+  with candidate listings rather than falling back to an unmonitored deterministic socket.
+  The adapter re-applies `latestProse` across session welcomes, reconnects, and surface
+  re-mounts, ensuring resumed long-running sessions retain their instruction context.
+  The `pi-onlyne` npm package is bumped to `2.4.0`.
+
 ## 2.4.0 (2026-10-19)
 
 - **Sessionless IM gateways receive note deliveries.** A role connection can declare

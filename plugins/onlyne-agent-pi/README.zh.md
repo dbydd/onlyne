@@ -112,6 +112,8 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | --- | --- | --- |
 | `enabled` | `true` | `false` 时该工作区禁用扩展 |
 | `watch.autoStart` | `true` | `false` 时注册工具但不建连接，需 `/onlyne connect` |
+| `workspace` | — | 角色工作区路径（当会话未在其中启动时生效；相对路径相对 pi 工作目录解析） |
+| `cluster` | — | 本会话要连接的集群名（对应服务端的 `[server] name`；未设时由工作区目录树决定） |
 
 文件缺失即取各自默认值。文件格式错误时打印一行警告，并保留默认值：一个笔误不该静默关掉一个
 role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 generate 期模板提示），所以
@@ -119,6 +121,11 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 
 其余无需配置。工作区 `spec.toml` 的 `session_command` 已经按任务拉起 `pi`
 （`["pi", "--session-id", "{session}"]`），client 负责注入本扩展识别的环境变量。
+
+`cluster` 专门解决“会话主体在一个集群的目录树下运行、但挂载的角色工作区属于另一个集群”的夹心代理场景：
+配置该键后，无论会话当前处于哪棵目录树下，都会优先连接该集群中为该角色注册的客户端。若同一集群内存在
+两个同名角色客户端，会直接显式报错拒绝，绝不随意选取。若未配置该键（或指定的集群未发现注册客户端），
+则优雅回退至原有的工作区目录树收敛规则。
 
 ## 2. 能力表
 
