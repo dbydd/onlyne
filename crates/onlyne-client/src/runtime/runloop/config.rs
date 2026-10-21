@@ -272,6 +272,13 @@ impl RunState {
         // under, so it is recorded with the rest of what the server says about
         // this role. `welcome.cluster` is the server's own `[server] name`.
         self.dispatch.set_topology(&welcome.cluster);
+        // The registration the bind wrote predates every fact in this welcome:
+        // its `cluster` is empty because the server had not named itself yet,
+        // and `install_runtime` above only republishes when the drive moves —
+        // which the first welcome of a default-drive role never does. A
+        // sandwiched workspace is exactly the one whose cluster cannot be read
+        // off its tree, so the name has to land here, on every welcome.
+        self.republish_registration();
         {
             let mut intents = self.intents.lock();
             if let Some(attempts) = welcome.intent_attempts {
@@ -347,12 +354,17 @@ impl RunState {
     /// field it carries is the default drive's backend. An external runtime's
     /// plugin reads that file to find the clients it serves, and a stale name
     /// there is the same class of fact this slice exists to stop trusting.
+    ///
+    /// `cluster` comes from the `welcome.cluster` this runloop already records:
+    /// it is the server's `[server] name`, so a workspace that sits outside the
+    /// server's domain still names the cluster it joined.
     fn republish_registration(&self) {
         if let Err(error) = crate::session::adapter_socket::republish_registration(
             &self.dispatch.workspace(),
             &self.dispatch.role(),
             self.dispatch.session_backend(),
             self.dispatch.placement_name(),
+            self.dispatch.cluster().as_deref(),
         ) {
             tracing::warn!(error = %error, "the client registration was not republished");
         }

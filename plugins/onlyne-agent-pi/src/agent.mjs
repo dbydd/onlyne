@@ -93,6 +93,7 @@ export class OnlyneAgent {
    *   helloTimeoutMs?: number,
    *   createConnection?: (path: string) => any,
    *   timer?: { set: (fn: () => void, ms: number) => any, clear: (handle: any) => void },
+   *   prose?: string,
    * }} options
    */
   constructor(options) {
@@ -171,6 +172,18 @@ export class OnlyneAgent {
      */
     this.injectedDeliveries = new Set();
     this.deliveredProse = new Set();
+    /**
+     * The newest role prose the client sent. `welcome` carries it and an
+     * `assign` names it again; it is kept here, not only in the surface,
+     * because a surface is replaced while this process keeps running — a
+     * `/new` or `/resume` re-binds the plugin onto a fresh one — and the prose
+     * is the role's instruction layer, not a message that could be replayed
+     * from the transcript.
+     */
+    this.latestProse = typeof options.prose === "string" ? options.prose : "";
+    // A surface handed over at construction is owed the prose this agent was
+    // started with: it holds none of its own yet.
+    if (this.latestProse) this.surface?.roleProse?.(this.latestProse);
     /** Pushes that arrived before the handshake finished; see `onFrame`. */
     this.handshaking = false;
     this.deferredPushes = [];
@@ -239,6 +252,21 @@ export class OnlyneAgent {
       activity: this.activity.events.slice(0, 5),
       stats: { ...this.stats },
     };
+  }
+
+  /**
+   * Hand the newest role prose to the current surface again.
+   *
+   * The surface keeps the prose for the instruction layer, and a surface made
+   * after the handshake — or after this process moved onto another session —
+   * starts with none of it. The delivery guard must not be the reason it stays
+   * empty, so whoever binds a surface calls this.
+   * @returns {boolean} whether there was prose to hand over
+   */
+  syncRoleProse() {
+    if (typeof this.latestProse !== "string" || this.latestProse.length === 0) return false;
+    this.surface?.roleProse?.(this.latestProse);
+    return true;
   }
 
   // ------------------------------------------------------------- transport
@@ -387,8 +415,13 @@ export class OnlyneAgent {
     });
     this.notice("state", `connected role=${welcome.role} gen=${welcome.generation} host=${welcome.hostCapabilities.join(",")}`);
     const prose = welcome.prose.trim();
-    if (prose && !this.deliveredProse.has(prose)) {
+    if (prose) {
+      this.latestProse = prose;
       this.deliveredProse.add(prose);
+      // Every welcome hands the prose over, not only the first one. A
+      // reconnect, a `--resume` and a surface re-created in this process all
+      // start empty, and the prose is a system-prompt section rather than a
+      // message, so writing it again duplicates nothing in the transcript.
       this.surface.roleProse?.(prose);
     }
 
@@ -818,9 +851,10 @@ export class OnlyneAgent {
     const attachmentPaths = Array.isArray(args.attachments) ? args.attachments : [];
     const prose = typeof args.prose === "string" ? args.prose.trim() : "";
     const proseIsNew = prose.length > 0 && !this.deliveredProse.has(prose);
-    if (proseIsNew) {
+    if (prose.length > 0) {
+      this.latestProse = prose;
       this.deliveredProse.add(prose);
-      this.surface.roleProse?.(prose);
+      if (proseIsNew) this.surface.roleProse?.(prose);
     }
 
     const kind = envelope.kind ?? "task";

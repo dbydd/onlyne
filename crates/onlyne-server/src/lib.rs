@@ -44,7 +44,7 @@ pub async fn serve(state: Arc<crate::state::State>) -> anyhow::Result<()> {
     let cert = tls::load_or_create(&layout.key_path(), &spec.server.name)?;
     let tls_config = tls::server_config(&cert)?;
     let listener = TcpListen::bind(&spec.server.listen).await?;
-    let run_socket = admin::bind(&state)?;
+    let run_socket = admin::bind(&state, &spec.server.name)?;
     let socket_state = state.clone();
     let socket_task = tokio::spawn(async move {
         if let Err(error) = admin::serve_socket(socket_state, run_socket).await {

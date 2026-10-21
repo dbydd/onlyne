@@ -96,6 +96,7 @@ test("residentIdentity resolves pre-started sessions from env, .pi/onlyne.json, 
     role: "supervisor",
     sessionId: null,
     taskId: null,
+    cluster: null,
     resident: true,
     workspaceRoot: dir,
   });
@@ -110,6 +111,27 @@ test("residentIdentity resolves pre-started sessions from env, .pi/onlyne.json, 
     role: "planner",
     sessionId: "planner-main",
     taskId: null,
+    cluster: null,
+    resident: true,
+    workspaceRoot: dir,
+  });
+});
+
+test("the switch file's cluster is trimmed, optional, and reaches residentIdentity", () => {
+  const dir = workspace(JSON.stringify({ role: "lazuli", cluster: "  workshop " }));
+  assert.equal(loadConfig(dir).cluster, "workshop");
+
+  // Absent, blank and non-string all mean no declaration, never a guess.
+  for (const body of [{ role: "lazuli" }, { role: "lazuli", cluster: "" }, { role: "lazuli", cluster: 42 }]) {
+    assert.equal(loadConfig(workspace(JSON.stringify(body))).cluster, null);
+  }
+
+  // The identity carries the declaration so the resolver can pass it through.
+  assert.deepEqual(residentIdentity({}, dir), {
+    role: "lazuli",
+    sessionId: null,
+    taskId: null,
+    cluster: "workshop",
     resident: true,
     workspaceRoot: dir,
   });

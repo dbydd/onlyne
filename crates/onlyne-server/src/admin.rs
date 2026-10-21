@@ -49,19 +49,24 @@ pub async fn run(init: ServerInit) -> anyhow::Result<()> {
 /// carries this process's pid, which is what `status` reads in place of the old
 /// `run/server.pid`.
 ///
+/// `cluster` is the spec's `[server] name`, the same name every `welcome`
+/// carries; the file names it so a reader that found this socket without the
+/// spec still knows which cluster's server it speaks to.
+///
 /// A refused registration fails the whole bind: a socket no reader can find is
 /// not the outcome the serving side asked for.
-pub fn bind(state: &State) -> anyhow::Result<LocalListener> {
+pub fn bind(state: &State, cluster: &str) -> anyhow::Result<LocalListener> {
     let root = state.root.as_path();
     let socket = socket_path(root).context("resolve the admin socket path")?;
     let listener = bind_socket_v2(root)
         .with_context(|| format!("bind the admin socket {}", socket.display()))?;
     let registration = registration_path(root);
-    write_registration(root, &RegistrationFile::server(root))
+    write_registration(root, &RegistrationFile::server(root).with_cluster(cluster))
         .with_context(|| format!("publish the admin registration {}", registration.display()))?;
     tracing::info!(
         socket = %socket.display(),
         registration = %registration.display(),
+        cluster = %cluster,
         "the run socket is open"
     );
     Ok(listener)

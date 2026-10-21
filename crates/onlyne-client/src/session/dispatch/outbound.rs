@@ -354,6 +354,15 @@ impl DispatchState {
         self.inner.lock().topology.clone()
     }
 
+    /// The topology name as a registration spells it: `None` before the first
+    /// `welcome`, and the server's `[server] name` after it.
+    pub fn cluster(&self) -> Option<String> {
+        match self.topology() {
+            name if name.is_empty() => None,
+            name => Some(name),
+        }
+    }
+
     /// Record the aggregate name once, so every report keeps the same value
     /// across a reconnect.
     pub fn set_cluster_ref(&self, aggregate: impl Into<String>) {

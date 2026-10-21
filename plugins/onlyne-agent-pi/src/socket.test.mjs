@@ -51,9 +51,11 @@ function registrationName(root) {
 }
 
 /** The registration of one client whose sessions run under `runtime`. */
-function client(root, runtimeName = "pi") {
-  // The writer's spelling is the canonical one (`RegistrationFile::new`).
-  return { kind: "client", role: "planner", root: canonicalRoot(root), pid: 4242, version: "0.2.0", runtime: runtimeName };
+function client(root, runtimeName = "pi", role = "planner", cluster = null) {
+  // The writer's spelling is the canonical one (`RegistrationFile::new`), and
+  // `cluster` is written only when the client's server names one.
+  const body = { kind: "client", role, root: canonicalRoot(root), pid: 4242, version: "0.2.0", runtime: runtimeName };
+  return cluster === null ? body : { ...body, cluster };
 }
 
 /** The env a client-spawned session carries, with the runtime directory pinned. */
@@ -260,5 +262,130 @@ test("resolveResidentSocketPath falls back to deterministic socket before client
   assert.equal(
     resolveResidentSocketPath(envFor(liveDir), clusterRoot, "supervisor"),
     socketPath(roleWs, envFor(liveDir)),
+  );
+});
+
+test("a role name two clusters share resolves to the client in this tree", () => {
+  const chamber = scratch("pi-onlyne-chamber-");
+  const workshop = scratch("pi-onlyne-workshop-");
+  const chamberRole = join(chamber, "lazuli");
+  const workshopRole = join(workshop, "lazuli");
+  mkdirSync(chamberRole, { recursive: true });
+  mkdirSync(workshopRole, { recursive: true });
+  const dir = runtime([
+    { name: registrationName(workshopRole), body: client(workshopRole, "pi", "lazuli") },
+    { name: registrationName(chamberRole), body: client(chamberRole, "pi", "lazuli") },
+  ]);
+
+  // The field report's shape: a resident started in the cluster root, its own
+  // role workspace below it, and another cluster's client of the same role
+  // elsewhere on the machine. The tree decides; two role matches no longer
+  // mean no answer.
+  assert.equal(resolveResidentSocketPath(envFor(dir), chamber, "lazuli"), socketPath(chamberRole, envFor(dir)));
+  // From inside the role workspace the same client answers: there the
+  // registered root contains this one.
+  assert.equal(resolveResidentSocketPath(envFor(dir), chamberRole, "lazuli"), socketPath(chamberRole, envFor(dir)));
+});
+
+test("a role no client in this tree serves is refused, never dialed on the deterministic path", () => {
+  const first = scratch("pi-onlyne-cluster-");
+  const second = scratch("pi-onlyne-cluster-");
+  const unrelated = scratch("pi-onlyne-ws-");
+  const firstRole = join(first, "lazuli");
+  const secondRole = join(second, "lazuli");
+  mkdirSync(firstRole, { recursive: true });
+  mkdirSync(secondRole, { recursive: true });
+  const elsewhere = runtime([
+    { name: registrationName(firstRole), body: client(firstRole, "pi", "lazuli") },
+    { name: registrationName(secondRole), body: client(secondRole, "pi", "lazuli") },
+  ]);
+
+  // Neither candidate is in this tree's chain in either direction, so which
+  // lazuli serves this session has no answer — and the deterministic path
+  // belongs to no client, which is the socket the report wrote into.
+  const error = refusal(() => resolveResidentSocketPath(envFor(elsewhere), unrelated, "lazuli"));
+  assert.match(error.message, /2 clients are registered as role lazuli/);
+  assert.match(error.message, /ambiguous/);
+  assert.equal(error.candidates.length, 2);
+  assert.ok(
+    !error.message.includes(socketPath(unrelated, envFor(elsewhere))),
+    "the refusal names the candidates, not the socket nothing binds",
+  );
+
+  // Several same-named clients inside one tree are the same question: no
+  // nearest root names a single client, so it is refused as well.
+  const parent = scratch("pi-onlyne-parent-");
+  const leftRole = join(parent, "left", "lazuli");
+  const rightRole = join(parent, "right", "lazuli");
+  mkdirSync(leftRole, { recursive: true });
+  mkdirSync(rightRole, { recursive: true });
+  const nested = runtime([
+    { name: registrationName(leftRole), body: client(leftRole, "pi", "lazuli") },
+    { name: registrationName(rightRole), body: client(rightRole, "pi", "lazuli") },
+  ]);
+  const nestedError = refusal(() => resolveResidentSocketPath(envFor(nested), parent, "lazuli"));
+  assert.match(nestedError.message, /2 of them are in this workspace's tree/);
+  assert.equal(nestedError.candidates.length, 2);
+});
+
+test("the declared cluster answers before the tree a sandwiched agent runs in", () => {
+  // The sandwiched agent: its body runs inside `chamber`'s tree, and the role
+  // workspace it serves lives in `workshop`. Tree containment answers with
+  // chamber's client, whose frames the workshop's client never sees, so the
+  // declaration has to outrank the tree.
+  const chamber = scratch("pi-onlyne-chamber-");
+  const workshop = scratch("pi-onlyne-workshop-");
+  const chamberRole = join(chamber, "lazuli");
+  const workshopRole = join(workshop, "lazuli");
+  mkdirSync(chamberRole, { recursive: true });
+  mkdirSync(workshopRole, { recursive: true });
+  const dir = runtime([
+    { name: registrationName(chamberRole), body: client(chamberRole, "pi", "lazuli", "chamber") },
+    { name: registrationName(workshopRole), body: client(workshopRole, "pi", "lazuli", "workshop") },
+  ]);
+
+  assert.equal(
+    resolveResidentSocketPath(envFor(dir), chamber, "lazuli", { cluster: "workshop" }),
+    socketPath(workshopRole, envFor(dir)),
+  );
+  // Declaring the cluster the tree already sits in changes nothing.
+  assert.equal(
+    resolveResidentSocketPath(envFor(dir), chamber, "lazuli", { cluster: "chamber" }),
+    socketPath(chamberRole, envFor(dir)),
+  );
+
+  // A cluster no client of this role registered, a blank declaration, and no
+  // declaration at all: each falls back to tree containment.
+  for (const options of [{ cluster: "nowhere" }, { cluster: "   " }, {}]) {
+    assert.equal(
+      resolveResidentSocketPath(envFor(dir), chamber, "lazuli", options),
+      socketPath(chamberRole, envFor(dir)),
+    );
+  }
+});
+
+test("two clients of the role in the declared cluster are refused by name", () => {
+  const cluster = scratch("pi-onlyne-cluster-");
+  const leftRole = join(cluster, "left", "lazuli");
+  const rightRole = join(cluster, "right", "lazuli");
+  const elsewhereRole = join(cluster, "elsewhere", "lazuli");
+  for (const role of [leftRole, rightRole, elsewhereRole]) mkdirSync(role, { recursive: true });
+  const dir = runtime([
+    { name: registrationName(leftRole), body: client(leftRole, "pi", "lazuli", "house") },
+    { name: registrationName(rightRole), body: client(rightRole, "pi", "lazuli", "house") },
+    { name: registrationName(elsewhereRole), body: client(elsewhereRole, "pi", "lazuli", "other") },
+  ]);
+
+  // The tree holds one of the two, which is not an answer: the declaration
+  // named a cluster serving this role twice, so the cluster is the fault.
+  const error = refusal(() =>
+    resolveResidentSocketPath(envFor(dir), cluster, "lazuli", { cluster: "house" }),
+  );
+  assert.match(error.message, /2 clients are registered as role lazuli in cluster house/);
+  assert.match(error.message, /ambiguous/);
+  assert.equal(error.candidates.length, 2);
+  assert.ok(
+    error.candidates.every((entry) => entry.cluster === "house"),
+    "the refusal names the cluster's own clients, not the other cluster's",
   );
 });

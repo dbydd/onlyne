@@ -1077,21 +1077,27 @@ fn ack_decision(flags: &GlobalFlags, args: AckArgs, accepted: bool, verb: &str, 
     let Some(target) = runtime::target(flags) else {
         return EXIT_NO_SOCKET;
     };
-    if target.surface != Surface::Client {
-        return runtime::usage_error(format!(
-            "onlyne: {verb} requires a role workspace or client socket"
-        ));
-    }
-    let request = Outbound::client(
-        new_id(),
-        ClientOp::Ack(ProtoAckArgs {
+    let request = ack_request(
+        target.surface,
+        ProtoAckArgs {
             msg_id: args.msg_id,
             op_id: args.op_id,
             accepted,
             reason: Some(args.reason),
-        }),
+        },
     );
     runtime::block_on(async { run_one(flags, &target, &request).await })
+}
+
+/// The op one `ack`/`reject` sends. The admin surface is where a supervisor
+/// settles a row a dead client cannot: that role's workspace holds no socket
+/// left to reach. `supervisor_gate` is what admits such a caller, so an ack
+/// arriving on admin is already the explicit supervisor act.
+fn ack_request(surface: Surface, ack: ProtoAckArgs) -> Outbound {
+    match surface {
+        Surface::Admin => Outbound::admin(new_id(), AdminOp::Ack(ack)),
+        Surface::Client => Outbound::client(new_id(), ClientOp::Ack(ack)),
+    }
 }
 
 pub fn who(flags: &GlobalFlags) -> i32 {
@@ -1281,4 +1287,63 @@ pub struct ControlVerbArgs {
     pub reason: Option<String>,
     pub op: ControlOp,
     pub supervisor: SupervisorArgs,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ack(accepted: bool) -> ProtoAckArgs {
+        ProtoAckArgs {
+            msg_id: "m-1".to_string(),
+            op_id: None,
+            accepted,
+            reason: Some("role client exited".to_string()),
+        }
+    }
+
+    /// The server's own socket speaks the admin vocabulary, which is the whole
+    /// point of the verb on that surface: the role's socket is gone.
+    #[test]
+    fn ack_on_admin_sends_the_admin_op() {
+        let sent = ack(false);
+        let request = ack_request(Surface::Admin, sent.clone());
+        // The mirror the CLI writes is its own type, so the bytes that reach
+        // the socket are checked here: `op` names the admin verb, and the args
+        // are the same shape `req_admin_ack` pins in `onlyne-proto`.
+        let json = serde_json::to_value(&request).expect("the frame as json");
+        assert_eq!(json["f"], "req");
+        assert_eq!(json["op"], "ack");
+        assert_eq!(json["args"]["msg_id"], "m-1");
+        assert_eq!(json["args"]["accepted"], false);
+        assert_eq!(json["args"]["reason"], "role client exited");
+
+        let Outbound::Admin(frame) = request else {
+            panic!("the admin surface must carry an admin frame");
+        };
+        match frame {
+            wire::AdminFrame::Req {
+                op: AdminOp::Ack(args),
+                ..
+            } => assert_eq!(args, sent),
+            other => panic!("the admin surface must carry AdminOp::Ack, got {other:?}"),
+        }
+    }
+
+    /// A live role workspace keeps the client vocabulary, so nothing about the
+    /// ordinary path moved.
+    #[test]
+    fn ack_on_a_role_workspace_sends_the_client_op() {
+        let sent = ack(true);
+        let Outbound::Client(frame) = ack_request(Surface::Client, sent.clone()) else {
+            panic!("a role workspace must carry a client frame");
+        };
+        match frame {
+            Frame::Req {
+                op: ClientOp::Ack(args),
+                ..
+            } => assert_eq!(args, sent),
+            other => panic!("a role workspace must carry ClientOp::Ack, got {other:?}"),
+        }
+    }
 }

@@ -143,6 +143,22 @@ for a role where one exists (`onlyne_send` for `send`, `onlyne_handoff` for `han
 `repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, `reload`, `shutdown`, and `status`
 carry no such flag. Both daemons run in the foreground; `onlyne server shutdown [--drain-secs <n>] [--reason <text>]` requests a graceful server shutdown over the admin socket.
 
+### Dispatching and introspecting `onlyne-im` gateways
+
+When a cluster includes an `onlyne-im` gateway role (e.g. `im` or `feishu-im`), never call raw
+platform HTTP APIs to send chat replies, cards, or files. Send through the gateway role with line 1
+set to `<chat:KEY>` (or `<chat:GATEWAY:CONVERSATION_ID>` for outbound first-contact auto-adoption),
+followed by optional header lines (`<msg:PREFIX>`, `<format:markdown>`,
+`<action:ID|LABEL|STYLE>`, `<image:/abs/path>`, `<file:/abs/path>`), a blank line, and the body.
+
+Any role or supervisor can query the live gateway's progressive built-in manual by sending `<help>`
+(`--note`) to the gateway role:
+- `<help>` — Level 0 overview, header syntax cheatsheet, live backend/chat count, and subtopics.
+- `<help:markers>`, `<help:chats>`, `<help:feishu>`, `<help:qqbot>`, `<help:mcp>`, `<help:examples>`
+  (plus Level 2 subtopics such as `<help:markers:action>` or `<help:feishu:card>`).
+The gateway ACKs the help query without sending anything to external chat platforms and replies to
+the sender role with a stateless `note` containing the requested manual page.
+
 **Material moves by path, not through the envelope.** A delivery's template renders an
 optional block quoting an upstream role's result, and nothing in the tree fills it —
 that is the decision, not a gap: moving material between roles is the roles' business
@@ -473,7 +489,10 @@ back to `operator close`. The ack side stays out of it: `onlyne ack --msg-id <id
 --force --yes-i-am-supervisor-not-other-role`
 settles the row through `mark_acked` and keeps a reason the row already carried, and
 `onlyne repair ack --fault-id <n> --reason <text>` writes its reason on the fault row alone. Both
-run against a role workspace or client socket, and both require `--reason`.
+require `--reason`. `onlyne ack` and `onlyne reject` reach the row through the admin socket when a
+role's client is gone: aim them at the server root (`--server-root <root>` plus the two supervisor
+flags) and the server settles the row itself, so clearing a dead role's deliveries needs no live
+sibling workspace. `onlyne repair ack` runs against a role workspace or client socket.
 
 ## Errors you will see
 

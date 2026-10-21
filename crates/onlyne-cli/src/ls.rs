@@ -33,7 +33,9 @@ reader rather than aborting the listing, and the count goes to stderr.
 
 `ROOT` is the canonical owner tree: pass it to `--server-root` or `--workspace`
 to address that surface. `RUNTIME` names the client's session backend, and
-`PLACEMENT` names where the machine displays it.";
+`PLACEMENT` names where the machine displays it. `CLUSTER` is the `[server]
+name` of the cluster the surface speaks to, blank for a registration written
+before that field existed.";
 
 /// One row of the listing, and the `--json` shape: the registration's own fields
 /// plus the two liveness facts and the socket path they describe.
@@ -41,6 +43,7 @@ to address that surface. `RUNTIME` names the client's session backend, and
 struct Row {
     kind: &'static str,
     role: Option<String>,
+    cluster: Option<String>,
     root: PathBuf,
     pid: u32,
     version: String,
@@ -104,6 +107,7 @@ fn row(path: &Path, reg: &RegistrationFile) -> Row {
             RegistrationKind::Client => "client",
         },
         role: reg.role.clone(),
+        cluster: reg.cluster.clone(),
         root: reg.root.clone(),
         pid: reg.pid,
         version: reg.version.clone(),
@@ -147,16 +151,23 @@ fn print_table(rows: &[Row]) {
         .map(|row| row.pid.to_string().len())
         .max()
         .unwrap_or(0);
+    let cluster_width = rows
+        .iter()
+        .map(|row| row.cluster.as_deref().unwrap_or("").chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("CLUSTER".len());
 
     println!(
-        "{:<6} {:<8} {:<root_width$}  {:>pid_width$}  {:<7} {:<7} {:<7} {:<9} VERSION",
-        "KIND", "ROLE", "ROOT", "PID", "SOCKET", "ALIVE", "RUNTIME", "PLACEMENT",
+        "{:<6} {:<8} {:<cluster_width$} {:<root_width$}  {:>pid_width$}  {:<7} {:<7} {:<7} {:<9} VERSION",
+        "KIND", "ROLE", "CLUSTER", "ROOT", "PID", "SOCKET", "ALIVE", "RUNTIME", "PLACEMENT",
     );
     for row in rows {
         println!(
-            "{:<6} {:<8} {:<root_width$}  {:>pid_width$}  {:<7} {:<7} {:<7} {:<9} {}",
+            "{:<6} {:<8} {:<cluster_width$} {:<root_width$}  {:>pid_width$}  {:<7} {:<7} {:<7} {:<9} {}",
             row.kind,
             cell(row.role.as_deref()),
+            row.cluster.as_deref().unwrap_or(""),
             row.root.display(),
             row.pid,
             yes_no(row.socket_exists),

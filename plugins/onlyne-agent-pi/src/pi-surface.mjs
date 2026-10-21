@@ -241,7 +241,9 @@ export function createSurface({ pi, log, context, sessionId = null }) {
   let warnedNoSections = false;
 
   /**
-   * Hand the role prose over once.
+   * Take the role prose this surface is to carry: handed over with the
+   * handshake, and again whenever a surface that holds none has to be filled
+   * for the run that is starting.
    * @param {string} text
    * @returns {boolean} whether there is prose to carry
    */
@@ -259,10 +261,17 @@ export function createSurface({ pi, log, context, sessionId = null }) {
    * pi's own examples does this). pi rebuilds those options for every run, so the
    * section is written again rather than once — the write is idempotent, and the
    * first run records it in the transcript's system message.
+   *
+   * `fallback` is the prose this surface was never handed: a surface made after
+   * the handshake (a session switch re-binds the plugin onto one) starts empty,
+   * and the run that is starting still owes the model the role spec, so the
+   * caller passes what the agent remembers of the last welcome.
    * @param {{ systemPromptOptions?: { sections?: Record<string, string> } } | null} event
+   * @param {string} [fallback]
    * @returns {boolean} whether a section was written
    */
-  const applyRoleProse = (event) => {
+  const applyRoleProse = (event, fallback = "") => {
+    if (roleProseText.length === 0 && typeof fallback === "string") roleProseText = fallback;
     if (roleProseText.length === 0) return false;
     const sections = event?.systemPromptOptions?.sections;
     if (!sections) {

@@ -260,6 +260,30 @@ test("a pi whose prompt options carry no sections reports it once and carries no
   assert.match(lines[0], /no instruction layer/);
 });
 
+test("a surface made after the handshake adopts the prose the agent remembers", () => {
+  const { surface } = fakeSurface();
+
+  // No `roleProse` call ever reached this surface — it was created after the
+  // welcome, by a session switch or a resumed mount — and the run that is
+  // starting is still owed the role spec.
+  const first = promptEvent();
+  assert.equal(surface.applyRoleProse(first, PROSE_TEXT), true);
+  assert.deepEqual(first.systemPromptOptions.sections, { [PROSE_SECTION]: PROSE_TEXT });
+
+  // The adopted text is the surface's own from then on: the next run carries it
+  // without the caller passing it again.
+  const second = promptEvent();
+  assert.equal(surface.applyRoleProse(second), true);
+  assert.deepEqual(second.systemPromptOptions.sections, { [PROSE_SECTION]: PROSE_TEXT });
+
+  // A fallback fills an empty surface only; prose the surface already holds is
+  // newer than what the agent last saw.
+  surface.roleProse("Answer in the log style.");
+  const third = promptEvent();
+  surface.applyRoleProse(third, PROSE_TEXT);
+  assert.deepEqual(third.systemPromptOptions.sections, { [PROSE_SECTION]: "Answer in the log style." });
+});
+
 /**
  * A surface over a fake pi that answers the two questions the phase is read
  * from, plus the cases where pi answers neither.

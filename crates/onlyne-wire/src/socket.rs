@@ -10,7 +10,7 @@
 //! - `<digest>.sock`: the socket [`bind_socket_v2`] binds and [`connect_local`]
 //!   reaches, `0600`.
 //! - `<digest>.json`: the [`RegistrationFile`] naming who serves it — kind,
-//!   role, root, pid, version, runtime. [`read_registration`],
+//!   role, cluster, root, pid, version, runtime. [`read_registration`],
 //!   [`registration_path`], and [`list_registrations`] are the discovery seam
 //!   the CLI, the test harness, and external-runtime plugins read instead of
 //!   walking workspace trees.
@@ -212,7 +212,8 @@ pub enum RegistrationKind {
 /// path and what a `state.db`/`client.db` guess answered for a surface: who
 /// serves this tree (`kind`, `role`), which tree it is (`root`), which process
 /// (`pid`), which wire version, and which runtime hosts the role's sessions
-/// (`runtime`, the field external-runtime plugins match to find their clients).
+/// (`runtime`, the field external-runtime plugins match to find their clients),
+/// and which cluster's server the socket speaks to (`cluster`).
 ///
 /// The writer's facts are the file's facts. A bind does not publish one on its
 /// own, because a bind does not know whether it belongs to an admin root or a
@@ -246,6 +247,17 @@ pub struct RegistrationFile {
     /// already resident (`external`).
     #[serde(default)]
     pub placement: Option<String>,
+    /// The `[server] name` of the cluster whose server this socket speaks to;
+    /// `None` for a private cluster, and for a registration written before the
+    /// field existed. `null` in JSON.
+    ///
+    /// A role workspace's root does not say which cluster it joined: a workspace
+    /// can sit in one domain while the server it dials lives in another, which is
+    /// the sandwiched role. The name comes from the server's `welcome.cluster`,
+    /// so a reader learns it from the daemon that connected rather than from the
+    /// tree the workspace happens to live in.
+    #[serde(default)]
+    pub cluster: Option<String>,
 }
 
 impl RegistrationFile {
@@ -269,6 +281,7 @@ impl RegistrationFile {
             version: WIRE_VERSION.to_string(),
             runtime: None,
             placement: None,
+            cluster: None,
         }
     }
 
@@ -287,6 +300,12 @@ impl RegistrationFile {
     /// Name the placement this machine displays the role's sessions in.
     pub fn with_placement(mut self, placement: impl Into<String>) -> Self {
         self.placement = Some(placement.into());
+        self
+    }
+
+    /// Name the cluster whose server this socket speaks to.
+    pub fn with_cluster(mut self, cluster: impl Into<String>) -> Self {
+        self.cluster = Some(cluster.into());
         self
     }
 }

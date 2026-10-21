@@ -39,12 +39,16 @@ impl AdapterSocket {
     /// `runtime` the session backend that hosts it, and `placement` where this
     /// machine displays that runtime — the machine-owned half of the pair an
     /// external runtime's plugin matches on to find the clients it serves.
+    /// `cluster` is the topology the server named in `welcome`, so a client
+    /// whose workspace sits outside its server's domain still names the server
+    /// it actually speaks to.
     pub fn registration(&self) -> RegistrationFile {
         client_registration(
             &self.workspace,
             &self.role,
             &self.dispatch.runtime_name(),
             self.dispatch.placement_name(),
+            self.dispatch.cluster().as_deref(),
         )
     }
 
@@ -143,13 +147,18 @@ pub fn client_registration(
     role: &str,
     runtime: &str,
     placement: Option<&str>,
+    cluster: Option<&str>,
 ) -> RegistrationFile {
     let root = RoleWorkspace::resolve(workspace);
     let registration = RegistrationFile::client(root.root())
         .with_role(role)
         .with_runtime(runtime);
-    match placement {
+    let registration = match placement {
         Some(name) => registration.with_placement(name),
+        None => registration,
+    };
+    match cluster {
+        Some(name) => registration.with_cluster(name),
         None => registration,
     }
 }
@@ -166,12 +175,13 @@ pub fn republish_registration(
     role: &str,
     runtime: &str,
     placement: Option<&str>,
+    cluster: Option<&str>,
 ) -> Result<()> {
     let root = RoleWorkspace::resolve(workspace);
     let path = registration_path(root.root());
     write_registration(
         root.root(),
-        &client_registration(workspace, role, runtime, placement),
+        &client_registration(workspace, role, runtime, placement, cluster),
     )
     .with_context(|| format!("republish the client registration {}", path.display()))
 }

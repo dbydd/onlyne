@@ -489,7 +489,10 @@ back to `operator close`. The ack side stays out of it: `onlyne ack --msg-id <id
 --force --yes-i-am-supervisor-not-other-role`
 settles the row through `mark_acked` and keeps a reason the row already carried, and
 `onlyne repair ack --fault-id <n> --reason <text>` writes its reason on the fault row alone. Both
-run against a role workspace or client socket, and both require `--reason`.
+require `--reason`. `onlyne ack` and `onlyne reject` reach the row through the admin socket when a
+role's client is gone: aim them at the server root (`--server-root <root>` plus the two supervisor
+flags) and the server settles the row itself, so clearing a dead role's deliveries needs no live
+sibling workspace. `onlyne repair ack` runs against a role workspace or client socket.
 
 ## Errors you will see
 

@@ -121,12 +121,22 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | --- | --- | --- |
 | `enabled` | `true` | `false` turns the extension off for this workspace |
 | `watch.autoStart` | `true` | `false` registers the tools but opens no socket until `/onlyne connect` |
+| `role` | — | the role this session serves when the client injected no `ONLYNE_ROLE`; also what makes the file a resident opt-in |
+| `workspace` | — | the role workspace, when the session did not start inside it; a relative path resolves against the pi working directory |
+| `cluster` | — | the cluster whose client this session dials — the serving server's `[server] name`; unset means the tree decides |
 
 A missing file means every default. A malformed file prints one warning on stderr and
 keeps the defaults: a typo must not silently disable a role. The client does not read
 this file (§11 of the plan downgraded the old readiness gates to generate-time template
 advice), so only this extension consumes it; the key shape stays the one the templates
 carry.
+
+`cluster` is the answer for a session whose body runs in one cluster's tree while the
+role workspace belongs to another: with the key set, the client registered for this role
+in that cluster is dialed first, whatever tree the session runs in. A cluster holding two
+clients of the role is refused by name rather than picked from. With the key absent — or
+naming a cluster no client has registered — resolution falls back to the tree, exactly as
+it did before the key existed.
 
 Nothing else is needed. The workspace's `session_command` in `spec.toml` already spawns
 `pi` per task (`["pi", "--session-id", "{session}"]`), and the client injects the

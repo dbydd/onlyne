@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * omp-live — real OMP acceptance for `v2.11 Lifecycle is declared, not inferred`.
+ * omp-live - real OMP acceptance for `v2.11 Lifecycle is declared, not inferred`.
  *
  * What this runs, in one resident host:
  *
  *   1. an `omp` process started in a *body* directory (`--cwd`) whose
  *      `.pi/onlyne.json` names a role, a resident session id and the role
- *      workspace that serves its socket — the deployed shape, where the agent
+ *      workspace that serves its socket - the deployed shape, where the agent
  *      body does not live inside the cluster tree;
  *   2. the plugin from *this checkout* loaded through the host's own extension
  *      loader (`--no-extensions -e <checkout>/plugins/onlyne-agent-pi/src`), so
@@ -53,7 +53,7 @@ const EXIT_FAILED = 1;
 /** Non-zero exit for a usage error, matching the repo's other scripts. */
 const EXIT_USAGE = 2;
 
-const USAGE = `omp-live — real OMP resident-parent acceptance (v2.11 lifecycle fix)
+const USAGE = `omp-live - real OMP resident-parent acceptance (v2.11 lifecycle fix)
 
 Topology (run.py owns these paths; every one may also come from --paths-json)
   --server-root <dir>     central server root (the onlyne --server-root)
@@ -615,7 +615,7 @@ function require(condition, message) {
 }
 
 /**
- * Poll a predicate that reads outside the host — a session row the server
+ * Poll a predicate that reads outside the host - a session row the server
  * writes after the process is gone, say. The host's own event loop stops when
  * it exits, so such a wait cannot ride frame or log events.
  */
@@ -636,7 +636,7 @@ async function pollUntil(label, predicate, timeoutMs, intervalMs = 2000) {
 
 /**
  * What a failing step leaves behind: the state of the host and the wire at the
- * moment it failed. Read from memory and the captured streams only — a failed
+ * moment it failed. Read from memory and the captured streams only - a failed
  * step must not start another process or CLI call.
  */
 function hostDiagnostics(host) {
@@ -688,8 +688,8 @@ async function main() {
   // ---- preflight ---------------------------------------------------------
   await step("preflight", async () => {
     const problems = [];
-    // The body root is this driver's own directory — it holds `.pi/onlyne.json`
-    // and the host's session files — so a missing one is created rather than
+    // The body root is this driver's own directory - it holds `.pi/onlyne.json`
+    // and the host's session files - so a missing one is created rather than
     // refused. Recorded either way, because a typo'd --cwd shows up here.
     let createdCwd = false;
     if (!existsSync(options.cwd)) {

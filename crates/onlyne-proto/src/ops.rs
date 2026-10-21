@@ -858,6 +858,10 @@ pub enum AdminOp {
     Control(AdminControl),
     /// File a session's report as `--from <role>`.
     Report(AdminReport),
+    /// Settle one delivery the way a role's own `ack` does. A role whose client
+    /// has exited owns no socket, so this is the only way an operator clears
+    /// the rows it left behind.
+    Ack(AckArgs),
     /// Read a session's reducer state without changing it.
     RepairInspect(RepairTarget),
     /// Attach an existing live resource to a session row.
@@ -897,6 +901,7 @@ impl AdminOp {
             AdminOp::Send(_) => "send",
             AdminOp::Control(_) => "control",
             AdminOp::Report(_) => "report",
+            AdminOp::Ack(_) => "ack",
             AdminOp::RepairInspect(_) => "repair_inspect",
             AdminOp::RepairAdopt(_) => "repair_adopt",
             AdminOp::RepairRebind(_) => "repair_rebind",

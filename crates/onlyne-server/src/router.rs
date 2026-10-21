@@ -706,6 +706,13 @@ pub async fn dispatch_admin(state: &Arc<State>, session: &mut Session, op: Admin
             projection::report_as_admin(state, &admin_report.from, &admin_report.report),
             &admin_report.report,
         ),
+        // The same settle the role's own connection runs, reachable once that
+        // connection is gone: a dead client cannot be asked to clear its rows.
+        AdminOp::Ack(args) => match relay::ack(state, &args) {
+            Ok(Ok(event)) => ResBody::ok(serde_json::to_value(event).unwrap_or_default()),
+            Ok(Err(reject)) => reject.body(),
+            Err(error) => internal(error),
+        },
         AdminOp::RepairInspect(_)
         | AdminOp::RepairAdopt(_)
         | AdminOp::RepairRebind(_)

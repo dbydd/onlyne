@@ -15,7 +15,8 @@
 // tree to fall back on: it has to find the client the way the plan says an
 // external runtime does (`docs/v2-PLAN.md` line 289), by reading the
 // registration files in the runtime directory — `<digest>.json`, one per live
-// endpoint, holding `kind`, `role`, `root`, `pid`, `version` and `runtime`.
+// endpoint, holding `kind`, `role`, `cluster`, `root`, `pid`, `version` and
+// `runtime`.
 //
 // So a hand-started pi reads those files and the order of its answers is:
 //
@@ -182,7 +183,7 @@ export function registrationPath(root, env, options = {}) {
  *
  * @param {Record<string, string | undefined>} env
  * @param {{ readFile?: (path: string) => string, readDir?: (path: string) => string[], realpath?: (path: string) => string, uid?: number | null }} [options]
- * @returns {{ path: string, root: string, kind: string | null, runtime: string | null }[]}
+ * @returns {{ path: string, root: string, kind: string | null, role: string | null, runtime: string | null, cluster: string | null }[]}
  */
 export function listClientRegistrations(env, options = {}) {
   const readDir = options.readDir ?? ((path) => readdirSync(path));
@@ -212,6 +213,7 @@ export function listClientRegistrations(env, options = {}) {
       kind: parsed.kind,
       role: typeof parsed.role === "string" && parsed.role !== "" ? parsed.role : null,
       runtime: typeof parsed.runtime === "string" && parsed.runtime !== "" ? parsed.runtime : null,
+      cluster: typeof parsed.cluster === "string" && parsed.cluster !== "" ? parsed.cluster : null,
     });
   }
   return found;
@@ -227,10 +229,28 @@ export function listClientRegistrations(env, options = {}) {
  * the moment `onlyne-client` binds the socket. When a client registration for
  * `role` appears in `<runtime_dir>`, it prefers that registration's socket.
  *
+ * A role name is per cluster, not per machine: two clusters on one machine both
+ * run `lazuli`, and the runtime directory carries one registration per client.
+ * The declared cluster answers first: when `options.cluster` names one, the
+ * registration of that role in that cluster is the answer, whatever tree this
+ * session runs in. That is the sandwiched agent — started from one cluster's
+ * root, its role workspace living in another — which the tree below would
+ * otherwise answer with the wrong client, and whose frames that client drops
+ * as another workspace's. Where one cluster holds several clients of the role,
+ * that is a fault of the cluster and refused by name.
+ *
+ * Without a usable declared cluster, the tree this session runs in decides
+ * between the role's clients, in either direction — `workspaceRoot` above the
+ * registered root (a resident started in the cluster root, its role workspace
+ * below) or below it. Where that leaves several, the resolution is refused
+ * rather than answered with the deterministic path: with a client of that role
+ * already running elsewhere, nothing binds that path, and every frame written
+ * to it is a silently dropped message (field report 2026-10-21, issue 1).
+ *
  * @param {Record<string, string | undefined>} env
  * @param {string} workspaceRoot
  * @param {string} role
- * @param {{ readFile?: (path: string) => string, readDir?: (path: string) => string[], realpath?: (path: string) => string, uid?: number | null, runtime?: string }} [options]
+ * @param {{ readFile?: (path: string) => string, readDir?: (path: string) => string[], realpath?: (path: string) => string, uid?: number | null, runtime?: string, cluster?: string | null }} [options]
  * @returns {string}
  */
 export function resolveResidentSocketPath(env, workspaceRoot, role, options = {}) {
@@ -240,17 +260,48 @@ export function resolveResidentSocketPath(env, workspaceRoot, role, options = {}
   const dir = runtimeDir(env, options);
   const here = canonicalRoot(workspaceRoot, options);
   const candidates = listClientRegistrations(env, options);
+  const socketOf = (entry) => join(dir, `${workspaceDigest(entry.root, options)}${SOCKET_SUFFIX}`);
+
+  // The cluster the session declares outranks the tree it happens to run in:
+  // a body in one cluster's workspace and a workspace in another's is exactly
+  // what tree containment gets wrong. An unknown cluster is not an error — it
+  // is a session whose file predates clustering, or names one whose client is
+  // not up yet — so it falls through to the tree rules below.
+  const cluster = typeof options.cluster === "string" && options.cluster.trim() !== "" ? options.cluster.trim() : null;
+  if (cluster) {
+    const byCluster = candidates.filter((entry) => entry.cluster === cluster && (!role || entry.role === role));
+    if (byCluster.length === 1) return socketOf(byCluster[0]);
+    if (byCluster.length > 1) {
+      throw new SocketResolutionError(
+        `onlyne: ${byCluster.length} clients are registered as role ${role ?? "?"} in cluster ${cluster} — ` +
+          `${describe(byCluster)} — so which one serves this session is ambiguous. ` +
+          "Start this workspace's client, or name the socket with ONLYNE_SOCKET",
+        byCluster,
+      );
+    }
+  }
 
   const coveringRole = candidates.filter((entry) => covers(entry.root, here) && (!role || !entry.role || entry.role === role));
   if (coveringRole.length > 0) {
     const nearest = coveringRole.reduce((best, entry) => (entry.root.length > best.root.length ? entry : best));
-    return join(dir, `${workspaceDigest(nearest.root, options)}${SOCKET_SUFFIX}`);
+    return socketOf(nearest);
   }
 
   if (role) {
     const byRole = candidates.filter((entry) => entry.role === role);
     if (byRole.length === 1) {
-      return join(dir, `${workspaceDigest(byRole[0].root, options)}${SOCKET_SUFFIX}`);
+      return socketOf(byRole[0]);
+    }
+    if (byRole.length > 1) {
+      const inTree = byRole.filter((entry) => covers(here, entry.root) || covers(entry.root, here));
+      if (inTree.length === 1) return socketOf(inTree[0]);
+      throw new SocketResolutionError(
+        `onlyne: ${byRole.length} clients are registered as role ${role} — ${describe(byRole)} — ` +
+          `and ${inTree.length === 0 ? "none of them is" : `${inTree.length} of them are`} ` +
+          `in this workspace's tree (${here}), so which one serves this session is ambiguous. ` +
+          "Start this workspace's client, or name the socket with ONLYNE_SOCKET",
+        inTree.length > 0 ? inTree : byRole,
+      );
     }
   }
 
@@ -322,9 +373,13 @@ function covers(root, here) {
   return root === here || here.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
 }
 
-/** `<path> (root <root>, runtime <runtime>)` per entry, for an error message. */
+/** `<path> (root <root>, runtime <runtime>, cluster <cluster>)` per entry, for an error message. */
 function describe(entries) {
   return entries
-    .map((entry) => `${entry.path} (root ${entry.root}, runtime ${entry.runtime ?? "-"})`)
+    .map(
+      (entry) =>
+        `${entry.path} (root ${entry.root}, runtime ${entry.runtime ?? "-"}` +
+        `${entry.cluster ? `, cluster ${entry.cluster}` : ""})`,
+    )
     .join(", ");
 }

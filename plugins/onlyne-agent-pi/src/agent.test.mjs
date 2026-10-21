@@ -1599,3 +1599,64 @@ test("a host without the widget keeps the footer line and the stderr line", asyn
   assert.ok(logs.some((line) => line.startsWith("in: task 11111111")), logs.join(" | "));
 });
 
+// The prose is a system-prompt section, not a message: rewriting it in a second
+// run duplicates nothing, so a reconnect hands it over again rather than
+// leaving the surface of a resumed session without the role spec.
+test("a reconnect hands the role prose to the surface again", async () => {
+  const { agent, host, surface } = await startAgent();
+  agent.start();
+  await waitFor(() => (host.of("report").length >= 1 ? true : null));
+  assert.deepEqual(surface.calls.prose, ["Read the incoming task"]);
+
+  const connections = host.connections;
+  agent.dropSocket();
+  await waitFor(() => (host.connections > connections ? true : null));
+  await waitFor(() => (surface.calls.prose.length === 2 ? true : null));
+  assert.deepEqual(surface.calls.prose, ["Read the incoming task", "Read the incoming task"]);
+  assert.equal(agent.latestProse, "Read the incoming task");
+});
+
+// A surface is replaced while the process keeps its session: the new one holds
+// no prose of its own, and what the last welcome carried is what fills it.
+test("a replaced surface is handed the prose the agent remembers", async () => {
+  const { agent, host } = await startAgent();
+  agent.start();
+  await waitFor(() => (host.of("report").length >= 1 ? true : null));
+
+  const replacement = fakeSurface();
+  agent.surface = replacement;
+  assert.equal(agent.syncRoleProse(), true);
+  assert.deepEqual(replacement.calls.prose, ["Read the incoming task"]);
+
+  // A surface a session switch never filled is still refilled before its first
+  // run, so an agent that remembers nothing yet answers without a throw.
+  const empty = new OnlyneAgent({
+    socketPath: join(tmpdir(), "pi-onlyne-unused-socket"),
+    cwd: tmpdir(),
+    role: "planner",
+    sessionId: SESSION_ID,
+    taskId: TASK_ID,
+    surface: fakeSurface(),
+  });
+  assert.equal(empty.syncRoleProse(), false);
+  assert.equal(empty.latestProse, "");
+});
+
+// The mount `index.ts` builds after a `/new` or a resumed session starts over
+// with a new surface, and the prose it was started with is what the new surface
+// carries from its first run.
+test("a mount built over a live session carries the prose into its surface", () => {
+  const surface = fakeSurface();
+  const agent = new OnlyneAgent({
+    socketPath: join(tmpdir(), "pi-onlyne-unused-socket"),
+    cwd: tmpdir(),
+    role: "planner",
+    sessionId: SESSION_ID,
+    taskId: TASK_ID,
+    surface,
+    prose: "Read the incoming task",
+  });
+  assert.deepEqual(surface.calls.prose, ["Read the incoming task"]);
+  assert.equal(agent.latestProse, "Read the incoming task");
+});
+

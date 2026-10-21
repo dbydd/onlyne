@@ -28,7 +28,7 @@ export const DEFAULT_CONFIG = Object.freeze({
  *
  * @param {string} cwd
  * @param {{ readFile?: (path: string) => string }} [options]
- * @returns {{ enabled: boolean, autoStart: boolean, path: string, warning: string | null, present: boolean }}
+ * @returns {{ enabled: boolean, autoStart: boolean, role: string | null, sessionId: string | null, workspace: string | null, cluster: string | null, resident: boolean, path: string, warning: string | null, present: boolean }}
  */
 export function loadConfig(cwd, options = {}) {
   const readFile = options.readFile ?? ((path) => readFileSync(path, "utf8"));
@@ -42,6 +42,7 @@ export function loadConfig(cwd, options = {}) {
       role: null,
       sessionId: null,
       workspace: null,
+      cluster: null,
       resident: false,
       path,
       warning: null,
@@ -57,6 +58,7 @@ export function loadConfig(cwd, options = {}) {
       role: null,
       sessionId: null,
       workspace: null,
+      cluster: null,
       resident: false,
       path,
       warning: `${path} is not valid JSON (${error instanceof Error ? error.message : String(error)}); using defaults`,
@@ -69,6 +71,7 @@ export function loadConfig(cwd, options = {}) {
       role: null,
       sessionId: null,
       workspace: null,
+      cluster: null,
       resident: false,
       path,
       warning: `${path} must hold a JSON object; using defaults`,
@@ -83,6 +86,7 @@ export function loadConfig(cwd, options = {}) {
     role: typeof parsed.role === "string" && parsed.role.trim() !== "" ? parsed.role.trim() : null,
     sessionId: typeof rawSessionId === "string" && rawSessionId.trim() !== "" ? rawSessionId.trim() : null,
     workspace: typeof parsed.workspace === "string" && parsed.workspace.trim() !== "" ? parsed.workspace.trim() : null,
+    cluster: typeof parsed.cluster === "string" && parsed.cluster.trim() !== "" ? parsed.cluster.trim() : null,
     resident: typeof parsed.resident === "boolean" ? parsed.resident : false,
     path,
     warning: null,
@@ -155,7 +159,7 @@ export function parseWorkspaceConfigToml(raw) {
  * @param {Record<string, string | undefined>} env
  * @param {string} cwd
  * @param {{ readFile?: (path: string) => string }} [options]
- * @returns {{ role: string, sessionId: string | null, taskId: string | null, resident: true, workspaceRoot: string } | null}
+ * @returns {{ role: string, sessionId: string | null, taskId: string | null, cluster: string | null, resident: true, workspaceRoot: string } | null}
  */
 export function residentIdentity(env, cwd, options = {}) {
   const readFile = options.readFile ?? ((path) => readFileSync(path, "utf8"));
@@ -241,6 +245,7 @@ export function residentIdentity(env, cwd, options = {}) {
     role,
     sessionId: envSessionId ?? config.sessionId ?? toml.sessionId ?? null,
     taskId: envTaskId,
+    cluster: config.cluster,
     resident: true,
     workspaceRoot,
   };

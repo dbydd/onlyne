@@ -107,7 +107,7 @@ interface PiSurface {
   };
   wakeUser(text: string, parts?: ImagePartInput[], meta?: unknown): boolean;
   roleProse(text: string): boolean;
-  applyRoleProse(event: { systemPromptOptions?: { sections?: Record<string, string> } }): boolean;
+  applyRoleProse(event: { systemPromptOptions?: { sections?: Record<string, string> } }, fallback?: string): boolean;
   customEntry(customType: string, data: unknown): boolean;
   widget(lines: string[] | undefined, activity?: unknown): void;
   status(text: string): void;
@@ -402,7 +402,11 @@ export default function onlyne(pi: ExtensionAPI) {
       surface.widget(agent.activity.lines(), agent.activity);
     }
     surface?.status(agent.activity.lines()[0]);
-  };
+    // A surface that was replaced starts with no prose of its own, and the run
+    // after a switch still owes the model the role spec: the agent remembers
+    // what the last welcome carried and hands it over here.
+    agent.syncRoleProse();
+  }
 
   pi.on("session_start", async (event, ctx) => {
     const spawned = sessionIdentity(env);
@@ -479,19 +483,24 @@ export default function onlyne(pi: ExtensionAPI) {
     // stays a plain pi session instead of retrying a path nothing serves.
     let socketPath: string | null = null;
     const targetWorkspace = resident ? resident.workspaceRoot : ctx.cwd;
+    const declaredCluster = resident ? resident.cluster : null;
     try {
       socketPath = resident
-        ? resolveResidentSocketPath(env, targetWorkspace, identity.role)
+        ? resolveResidentSocketPath(env, targetWorkspace, identity.role, { cluster: declaredCluster })
         : resolveSocketPath(env, ctx.cwd);
     } catch (error) {
       log(`socket unresolved: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (socketPath === null) return;
+    // The prose a mount of this process already holds: the agent is replaced
+    // below, and the surface made now starts empty, so what the last welcome
+    // carried moves with it rather than being lost until the next handshake.
+    const carriedProse = agent?.latestProse ?? "";
     surface = createSurface({ pi, log, context: () => context, sessionId: () => boundSessionId });
     agent = new OnlyneAgent({
       socketPath,
       resolveSocket: resident
-        ? () => resolveResidentSocketPath(env, targetWorkspace, identity.role)
+        ? () => resolveResidentSocketPath(env, targetWorkspace, identity.role, { cluster: declaredCluster })
         : undefined,
       cwd: ctx.cwd,
       role: identity.role,
@@ -500,6 +509,7 @@ export default function onlyne(pi: ExtensionAPI) {
       resident: Boolean(resident),
       surface,
       log,
+      prose: carriedProse,
     });
     log(`session ${wireSessionId ?? "resident"} role=${identity.role} socket=${socketPath}`);
     registerSurface();
@@ -530,7 +540,10 @@ export default function onlyne(pi: ExtensionAPI) {
   // to read as an utterance. Outside an onlyne session there is no surface and
   // nothing to add.
   pi.on("before_agent_start", async (event) => {
-    surface?.applyRoleProse(event);
+    // A surface created after the handshake holds no prose; the agent's copy of
+    // the last welcome is what the run that is starting carries instead of
+    // running without the role spec until the next connection.
+    surface?.applyRoleProse(event, agent?.latestProse ?? "");
   });
 
   pi.on("turn_start", async () => {
