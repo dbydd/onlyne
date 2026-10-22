@@ -220,6 +220,10 @@ export function describeActivityNode(state, events, shown = SHOW_EVENTS, collaps
 export function createAssignMessageComponent(details, messageContent, theme, collapsed = false) {
   const from = clean(details?.from) || "cluster";
   const kind = clean(details?.kind) || "task";
+  // Which layer handed this over. A single-mount session prints nothing extra;
+  // a session serving two clusters names the one the delivery came through, so
+  // the model can answer into the right ledger.
+  const cluster = clean(details?.cluster);
   const taskId = clean(details?.taskId);
   const shortId = taskId ? cut(taskId, 8, false) : "";
   const rawBody = clean(details?.bodyText)
@@ -231,7 +235,7 @@ export function createAssignMessageComponent(details, messageContent, theme, col
   const bodyLines = String(details?.bodyText ?? (typeof messageContent === "string" ? messageContent : rawBody))
     .replace(/\r\n/g, "\n")
     .split("\n");
-  const headLabel = `From ${from} · ${kind}${shortId ? ` · ${shortId}` : ""}`;
+  const headLabel = `From ${from} · ${kind}${shortId ? ` · ${shortId}` : ""}${cluster ? ` · via ${cluster}` : ""}`;
   const kindTone = kind === "note" ? "info" : kind === "nudge" ? "warning" : "accent";
   let cachedWidth = -1;
   let cachedRows = null;
@@ -246,6 +250,9 @@ export function createAssignMessageComponent(details, messageContent, theme, col
     ];
     if (shortId) {
       headSpans.push({ t: " · ", s: "dim" }, { t: shortId, s: "muted mono" });
+    }
+    if (cluster) {
+      headSpans.push({ t: " · via ", s: "dim" }, { t: cluster, s: "info mono" });
     }
     const mdText = String(details?.bodyText ?? (typeof messageContent === "string" ? messageContent : rawBody)).trim();
     return {

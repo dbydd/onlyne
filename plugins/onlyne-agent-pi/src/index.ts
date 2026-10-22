@@ -58,7 +58,9 @@ import { OnlyneAgent } from "./agent.mjs";
 import { ASSIGN_MESSAGE_TYPE, createAssignMessageComponent } from "./activity.mjs";
 import { loadConfig, residentIdentity, sessionIdentity } from "./config.mjs";
 import { resolveResidentSocketPath, resolveSocketPath } from "./socket.mjs";
-import { createSurface } from "./pi-surface.mjs";
+import { createSurface, PROSE_SECTION } from "./pi-surface.mjs";
+import { isAbsolute, resolve } from "node:path";
+import { handoffRole, mountLabel, resolveTarget, resolveTaskMount, soleActiveMount } from "./mounts.mjs";
 import {
   declaredSubagent,
   foreignSessionRefusal,
@@ -67,6 +69,21 @@ import {
   ownsSession,
   sessionIdOf,
 } from "./session-scope.mjs";
+
+/** One client link this process holds, under its own role and cluster. */
+interface Mount {
+  agent: OnlyneAgent;
+  cluster: string | null;
+  role: string;
+}
+
+/** What one mount has to dial, before any connection exists. */
+interface MountSpec {
+  role: string;
+  cluster: string | null;
+  workspace: string;
+  sessionId: string | null;
+}
 
 /**
  * Node's process globals, declared here so the package needs no `@types/node`
@@ -108,6 +125,11 @@ interface PiSurface {
   wakeUser(text: string, parts?: ImagePartInput[], meta?: unknown): boolean;
   roleProse(text: string): boolean;
   applyRoleProse(event: { systemPromptOptions?: { sections?: Record<string, string> } }, fallback?: string): boolean;
+  applyRoleProseSection(
+    event: { systemPromptOptions?: { sections?: Record<string, string> } },
+    key: string,
+    text: string
+  ): boolean;
   customEntry(customType: string, data: unknown): boolean;
   widget(lines: string[] | undefined, activity?: unknown): void;
   status(text: string): void;
@@ -178,7 +200,13 @@ let residentClaim: string | null = null;
 export default function onlyne(pi: ExtensionAPI) {
   const env: Record<string, string | undefined> = typeof process === "undefined" ? {} : process.env;
   let context: ExtensionContext | null = null;
-  let agent: OnlyneAgent | null = null;
+  /**
+   * One entry per client link this process holds. A resident plugin may serve
+   * the same role in more than one cluster (`docs/v2.12-ONE-SESSION-TWO-
+   * CLUSTERS.md`): every mount dials its own client, keeps its own session
+   * row and task table, and shares the one pi surface with the rest.
+   */
+  let mounts: Mount[] = [];
   let surface: PiSurface | null = null;
   let registered = false;
   /**
@@ -202,6 +230,14 @@ export default function onlyne(pi: ExtensionAPI) {
    */
   const refuseForeignSession = (caller: string | null): never => {
     throw new Error(foreignSessionRefusal(boundSessionId, caller));
+  };
+
+  /** Identity of a mount across a re-mount, for carrying its prose over. */
+  const mountKey = (cluster: string | null, role: string): string => `${cluster ?? ""}\u0000${role}`;
+
+  /** End the process once no mount is left; a shared process's last word. */
+  const exitWhenNoMountRemains = (reason: string) => {
+    if (mounts.every((mount) => !mount.agent.connected)) surface?.exit?.(reason);
   };
 
   /** Tools and the `/onlyne` command exist only inside an onlyne session. */
@@ -229,7 +265,10 @@ export default function onlyne(pi: ExtensionAPI) {
           "Use onlyne_send when something has to reach another role; the call returns once the message is queued.",
         ],
         parameters: Type.Object({
-          to: Type.String({ description: "target role name, e.g. builder" }),
+          to: Type.String({
+            description:
+              'target role, e.g. builder, or "cluster:role" when this session serves several clusters',
+          }),
           text: Type.String({ description: "message body" }),
           kind: Type.Optional(Type.String({ description: '"note" (default) or "task"' })),
           image: Type.Optional(Type.String({ description: "absolute path to a png/jpeg/gif/webp image to attach" })),
@@ -237,16 +276,26 @@ export default function onlyne(pi: ExtensionAPI) {
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
           const caller = sessionIdOf(ctx?.sessionManager);
           if (!ownsSession(boundSessionId, caller)) refuseForeignSession(caller);
-          if (!agent) throw new Error("onlyne: session is not connected");
-          const result = await agent.sendFromTool({
-            to: params.to,
+          if (mounts.length === 0) throw new Error("onlyne: session is not connected");
+          const { mount, to } = resolveTarget(mounts, params.to);
+          const result = await mount.agent.sendFromTool({
+            to,
             text: params.text,
             kind: params.kind,
             imagePath: params.image ?? null,
           });
-          // The recipient and nothing else: a tool result is model-visible, and
-          // there is no fact about this send the model needs beyond where it went.
-          return textResult(`sent to ${result.to}`, { to: result.to });
+          // Delivery and local parking are different facts and the model is told
+          // which one happened: a client with a dead link answers `queued`, and
+          // calling that "sent" is how a message that never left looked
+          // delivered (docs/v2.12-ONE-SESSION-TWO-CLUSTERS.md §7).
+          const queued = Boolean(result.data && result.data.queued);
+          const where = result.to;
+          return queued
+            ? textResult(`queued locally for ${where}; the client sends it when its link returns`, {
+                to: where,
+                queued: true,
+              })
+            : textResult(`sent to ${where}`, { to: where });
         },
       }));
     } catch (error) {
@@ -267,17 +316,25 @@ export default function onlyne(pi: ExtensionAPI) {
           summary: Type.String({ description: "one-line result summary" }),
           details: Type.Optional(Type.String({ description: "the full result, delivered as it stands" })),
           files: Type.Optional(Type.Array(Type.String(), { description: "absolute paths of the files the result names" })),
+          cluster: Type.Optional(Type.String({
+            description:
+              "the cluster this task came from, when this session serves several; the task's own mount answers without it",
+          })),
         }),
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
           const caller = sessionIdOf(ctx?.sessionManager);
           if (!ownsSession(boundSessionId, caller)) refuseForeignSession(caller);
-          if (!agent) throw new Error("onlyne: session is not connected");
+          if (mounts.length === 0) throw new Error("onlyne: session is not connected");
+          // The reply goes back where the work came from, never to "the first
+          // mount": two clusters in one process means two ledgers, and settling
+          // the wrong one leaves the real task open and the other falsely done.
+          const mount = resolveTaskMount(mounts, params.cluster);
           // The exit is not a tool-result flag: pi 0.85.1 has no tool-result
           // `terminate` handling. `agent.complete` asks the surface to shut the
           // process down once the client has acknowledged the report. A refusal
           // from the client throws out of here as a tool error, so the model
           // reads the host's own sentence.
-          const result = await agent.completeFromTool({
+          const result = await mount.agent.completeFromTool({
             outcome: params.outcome,
             summary: params.summary,
             details: params.details,
@@ -314,16 +371,27 @@ export default function onlyne(pi: ExtensionAPI) {
           "Use onlyne_handoff when this task's work goes on to another role; the receiving role continues it.",
         ],
         parameters: Type.Object({
-          to: Type.String({ description: "target role name, e.g. builder" }),
+          to: Type.String({
+            description:
+              'target role, e.g. builder; "cluster:role" is accepted only for the task\'s own cluster',
+          }),
           text: Type.String({ description: "handoff text for the receiving role" }),
           image: Type.Optional(Type.String({ description: "absolute path to a png/jpeg/gif/webp image to attach" })),
+          cluster: Type.Optional(Type.String({
+            description:
+              "the cluster this task came from, when this session serves several; the task's own mount answers without it",
+          })),
         }),
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
           const caller = sessionIdOf(ctx?.sessionManager);
           if (!ownsSession(boundSessionId, caller)) refuseForeignSession(caller);
-          if (!agent) throw new Error("onlyne: session is not connected");
-          const result = await agent.handoffFromTool({
-            to: params.to,
+          if (mounts.length === 0) throw new Error("onlyne: session is not connected");
+          // A handoff continues the task, so it stays in the task's cluster: the
+          // mount that holds the task is also the ledger the child is minted in.
+          const mount = resolveTaskMount(mounts, params.cluster);
+          const to = handoffRole(params.to, mount);
+          const result = await mount.agent.handoffFromTool({
+            to,
             text: params.text,
             imagePath: params.image ?? null,
           });
@@ -351,22 +419,30 @@ export default function onlyne(pi: ExtensionAPI) {
             );
             return;
           }
-          if (!agent) {
+          if (mounts.length === 0) {
             commandContext.ui.notify("onlyne: no session (ONLYNE_* env is absent)", "info");
             return;
           }
           const verb = String(argLine ?? "").trim();
           if (verb === "disconnect") {
-            agent.stop("operator");
+            for (const mount of mounts) mount.agent.stop("operator");
             commandContext.ui.notify("onlyne: detached", "info");
             return;
           }
           if (verb === "connect") {
-            agent.start();
-            commandContext.ui.notify(`onlyne: connecting to ${agent.status().socket}`, "info");
+            for (const mount of mounts) mount.agent.start();
+            commandContext.ui.notify(
+              `onlyne: connecting to ${mounts.map((mount) => mount.agent.status().socket).join(", ")}`,
+              "info"
+            );
             return;
           }
-          commandContext.ui.notify(`onlyne ${JSON.stringify(agent.status())}`, "info");
+          commandContext.ui.notify(
+            mounts.length === 1
+              ? `onlyne ${JSON.stringify(mounts[0].agent.status())}`
+              : `onlyne ${JSON.stringify(mounts.map((mount) => ({ mount: mountLabel(mount), ...mount.agent.status() })))}`,
+            "info"
+          );
         },
       });
     } catch (error) {
@@ -381,7 +457,7 @@ export default function onlyne(pi: ExtensionAPI) {
    * follow it instead of refusing every call as foreign.
    */
   const syncSessionContext = (_event: unknown, ctx: ExtensionContext) => {
-    if (!agent) return;
+    if (mounts.length === 0) return;
     // The same declaration the mount gate reads, on the other door: a context
     // the host declares a subagent must not re-point this plugin's connection
     // onto a child, whatever session id it carries.
@@ -398,20 +474,49 @@ export default function onlyne(pi: ExtensionAPI) {
       if (boundSessionId === residentClaim) residentClaim = currentId;
       boundSessionId = currentId;
     }
+    // The panel and the footer show the mount that owns the work, or the first
+    // one when none does: one status line cannot name two clusters, and the
+    // delivery card already carries the label the model needs.
+    const shown = soleActiveMount(mounts) ?? mounts[0];
     if (surface?.available.widget) {
-      surface.widget(agent.activity.lines(), agent.activity);
+      surface.widget(shown.agent.activity.lines(), shown.agent.activity);
     }
-    surface?.status(agent.activity.lines()[0]);
+    surface?.status(shown.agent.activity.lines()[0]);
     // A surface that was replaced starts with no prose of its own, and the run
-    // after a switch still owes the model the role spec: the agent remembers
-    // what the last welcome carried and hands it over here.
-    agent.syncRoleProse();
+    // after a switch still owes the model the role spec: every mount remembers
+    // what its own welcome carried and hands it over here.
+    for (const mount of mounts) mount.agent.syncRoleProse();
   }
 
   pi.on("session_start", async (event, ctx) => {
     const spawned = sessionIdentity(env);
+    const config = loadConfig(ctx.cwd);
+    const declared = Array.isArray(config.mounts) ? config.mounts : [];
     const resident = spawned ? null : residentIdentity(env, ctx.cwd);
-    const identity = spawned ?? resident;
+    /**
+     * A switch file that declares several mounts is the opt-in, and it names
+     * its own roles: no single `role` key has to exist for a two-cluster
+     * session to mount, and the first entry supplies the identity the session
+     * gate below compares.
+     */
+    const multi = !spawned && declared.length > 1;
+    const identity =
+      spawned ??
+      resident ??
+      (!spawned && declared.length > 0
+        ? {
+            role: declared[0].role,
+            sessionId: declared[0].sessionId,
+            taskId: null,
+            cluster: declared[0].cluster,
+            resident: true as const,
+            workspaceRoot: declared[0].workspace
+              ? isAbsolute(declared[0].workspace)
+                ? declared[0].workspace
+                : resolve(ctx.cwd, declared[0].workspace)
+              : ctx.cwd,
+          }
+        : null);
     if (!identity) return; // not an onlyne session: stay out of the way
     const starting = sessionIdOf(ctx.sessionManager);
     // The host's own declaration comes first, before either identity path: a
@@ -432,7 +537,7 @@ export default function onlyne(pi: ExtensionAPI) {
     // replace the live session, and pi can re-bind this same session's
     // extensions. A subagent on a host that declares no agent identity re-binds
     // with reason "startup" and a different id, and is refused below.
-    if (!spawned && agent !== null && (event.reason !== "startup" || starting === boundSessionId)) {
+    if (!spawned && mounts.length > 0 && (event.reason !== "startup" || starting === boundSessionId)) {
       syncSessionContext(event, ctx);
       return;
     }
@@ -471,55 +576,96 @@ export default function onlyne(pi: ExtensionAPI) {
     const wireSessionId = identity.sessionId ?? starting;
     context = ctx;
     boundSessionId = spawned ? spawned.sessionId : (starting ?? wireSessionId);
-    const config = loadConfig(ctx.cwd);
     if (config.warning) log(config.warning);
     if (!config.enabled) {
       log(`disabled by ${config.path}`);
       return;
     }
-    // The path the client injected, or the client the runtime directory's
-    // registration files name for this workspace (socket.mjs). A session with
-    // neither has no socket to dial, and saying so is the whole answer: this
-    // stays a plain pi session instead of retrying a path nothing serves.
-    let socketPath: string | null = null;
-    const targetWorkspace = resident ? resident.workspaceRoot : ctx.cwd;
-    const declaredCluster = resident ? resident.cluster : null;
-    try {
-      socketPath = resident
-        ? resolveResidentSocketPath(env, targetWorkspace, identity.role, { cluster: declaredCluster })
-        : resolveSocketPath(env, ctx.cwd);
-    } catch (error) {
-      log(`socket unresolved: ${error instanceof Error ? error.message : String(error)}`);
+    // One descriptor per client link. A spawned session holds exactly one; a
+    // resident plugin reads the switch file, and a file that declares none
+    // keeps the single-mount shape it always had.
+    const specs: MountSpec[] = multi
+      ? declared.map((entry) => ({
+          role: entry.role,
+          cluster: entry.cluster,
+          workspace: entry.workspace
+            ? isAbsolute(entry.workspace)
+              ? entry.workspace
+              : resolve(ctx.cwd, entry.workspace)
+            : resident
+              ? resident.workspaceRoot
+              : ctx.cwd,
+          sessionId: entry.sessionId,
+        }))
+      : [
+          {
+            role: identity.role,
+            cluster: resident ? resident.cluster : null,
+            workspace: resident ? resident.workspaceRoot : ctx.cwd,
+            sessionId: identity.sessionId ?? null,
+          },
+        ];
+    // The prose each mount of this process already holds: the agents are
+    // replaced below and the surface made now starts empty, so what a mount's
+    // last welcome carried moves with it rather than waiting for a handshake.
+    const carried: Record<string, string> = {};
+    for (const mount of mounts) {
+      carried[mountKey(mount.cluster, mount.role)] = mount.agent.latestProse ?? "";
     }
-    if (socketPath === null) return;
-    // The prose a mount of this process already holds: the agent is replaced
-    // below, and the surface made now starts empty, so what the last welcome
-    // carried moves with it rather than being lost until the next handshake.
-    const carriedProse = agent?.latestProse ?? "";
+    for (const mount of mounts) mount.agent.stop("remount");
     surface = createSurface({ pi, log, context: () => context, sessionId: () => boundSessionId });
-    agent = new OnlyneAgent({
-      socketPath,
-      resolveSocket: resident
-        ? () => resolveResidentSocketPath(env, targetWorkspace, identity.role, { cluster: declaredCluster })
-        : undefined,
-      cwd: ctx.cwd,
-      role: identity.role,
-      sessionId: wireSessionId,
-      taskId: identity.taskId,
-      resident: Boolean(resident),
-      surface,
-      log,
-      prose: carriedProse,
-    });
-    log(`session ${wireSessionId ?? "resident"} role=${identity.role} socket=${socketPath}`);
+    const next: Mount[] = [];
+    for (const spec of specs) {
+      // The path the client injected, or the client the runtime directory's
+      // registration files name for this workspace (socket.mjs). A mount with
+      // neither has no socket to dial; the rest still mount, and the line names
+      // which one could not.
+      let socketPath: string | null = null;
+      try {
+        socketPath = spawned
+          ? resolveSocketPath(env, ctx.cwd)
+          : resolveResidentSocketPath(env, spec.workspace, spec.role, { cluster: spec.cluster });
+      } catch (error) {
+        log(
+          `socket unresolved for ${spec.cluster ? `${spec.cluster}:` : ""}${spec.role}: ${error instanceof Error ? error.message : String(error)}`
+        );
+        continue;
+      }
+      if (socketPath === null) continue;
+      const agent = new OnlyneAgent({
+        socketPath,
+        resolveSocket: spawned
+          ? undefined
+          : () => resolveResidentSocketPath(env, spec.workspace, spec.role, { cluster: spec.cluster }),
+        cwd: ctx.cwd,
+        role: spec.role,
+        sessionId: spec.sessionId ?? wireSessionId,
+        taskId: identity.taskId,
+        resident: !spawned,
+        surface,
+        log,
+        prose: carried[mountKey(spec.cluster, spec.role)] ?? "",
+        cluster: spec.cluster,
+        sharedProcess: specs.length > 1,
+        recycleHandler: specs.length > 1 ? exitWhenNoMountRemains : undefined,
+      });
+      next.push({ agent, cluster: spec.cluster, role: spec.role });
+      log(
+        `session ${wireSessionId ?? "resident"} role=${spec.role}${spec.cluster ? ` cluster=${spec.cluster}` : ""} socket=${socketPath}`
+      );
+    }
+    if (next.length === 0) return;
+    mounts = next;
     registerSurface();
     if (!surface.available.wakeUser) {
       // Without an injection surface the payload travels through config_get,
       // and the hello capability list has to say so.
       log("no wakeUser surface: dropping the inject capability");
-      agent.capabilities = agent.capabilities.filter((name) => name !== "inject");
+      for (const mount of mounts) {
+        mount.agent.capabilities = mount.agent.capabilities.filter((name) => name !== "inject");
+      }
     }
-    if (config.autoStart) agent.start();
+    if (config.autoStart) for (const mount of mounts) mount.agent.start();
   });
 
   // `session_switch` and `session_branch` name the same transitions in the omp
@@ -540,44 +686,61 @@ export default function onlyne(pi: ExtensionAPI) {
   // to read as an utterance. Outside an onlyne session there is no surface and
   // nothing to add.
   pi.on("before_agent_start", async (event) => {
-    // A surface created after the handshake holds no prose; the agent's copy of
-    // the last welcome is what the run that is starting carries instead of
-    // running without the role spec until the next connection.
-    surface?.applyRoleProse(event, agent?.latestProse ?? "");
+    if (!surface) return;
+    if (mounts.length <= 1) {
+      // A surface created after the handshake holds no prose; the agent's copy
+      // of the last welcome is what the run that is starting carries instead of
+      // running without the role spec until the next connection.
+      surface.applyRoleProse(event, mounts[0]?.agent.latestProse ?? "");
+      return;
+    }
+    // Two layers, two role specs. Identical prose from both mounts is written
+    // once — one fact repeated is not two facts — and different prose is
+    // written once per cluster under its own key, so neither spec silently
+    // replaces the other (docs/v2.12-ONE-SESSION-TWO-CLUSTERS.md §6).
+    const written = new Set<string>();
+    for (const mount of mounts) {
+      const prose = mount.agent.latestProse ?? "";
+      if (prose.length === 0 || written.has(prose)) continue;
+      written.add(prose);
+      const key = written.size === 1 ? PROSE_SECTION : `${PROSE_SECTION}.${mount.cluster ?? mount.role}`;
+      surface.applyRoleProseSection(event, key, prose);
+    }
   });
 
   pi.on("turn_start", async () => {
-    agent?.onTurnStart();
+    for (const mount of mounts) mount.agent.onTurnStart();
   });
 
   pi.on("turn_end", async (event) => {
     const failure = failureOf(event.message);
-    if (failure) agent?.onTurnError(failure);
-    else agent?.onTurnEnd();
+    for (const mount of mounts) {
+      if (failure) mount.agent.onTurnError(failure);
+      else mount.agent.onTurnEnd();
+    }
   });
 
   pi.on("message_end", async (event) => {
     const failure = failureOf(event.message);
-    if (failure) {
-      agent?.onTurnError(failure);
-      return;
+    for (const mount of mounts) {
+      if (failure) mount.agent.onTurnError(failure);
+      else mount.agent.noteAssistantText(assistantTextOf(event.message));
     }
-    agent?.noteAssistantText(assistantTextOf(event.message));
   });
 
   pi.on("agent_settled", async () => {
-    agent?.onSettled();
+    for (const mount of mounts) mount.agent.onSettled();
   });
 
   pi.on("session_shutdown", async (event) => {
-    agent?.stop(`pi:${event.reason ?? "quit"}`);
+    for (const mount of mounts) mount.agent.stop(`pi:${event.reason ?? "quit"}`);
     surface?.closeBackground?.();
     surface?.widget?.(undefined);
     // Only the mount holding the claim may release it: a child factory that
     // never mounted has no `boundSessionId` of its own, and its shutdown must
     // leave the resident's claim where it is.
     if (boundSessionId !== null && boundSessionId === residentClaim) residentClaim = null;
-    agent = null;
+    mounts = [];
     surface = null;
     registered = false;
     context = null;

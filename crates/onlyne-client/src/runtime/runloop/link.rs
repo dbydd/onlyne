@@ -259,8 +259,9 @@ pub(super) async fn flush_intents(link: &ClientLink, state: &RunState) {
                 let machine = state.intents.lock();
                 match machine.attempt(&row, Some(&body)) {
                     Ok(crate::runtime::intent::IntentResult::Dropped(code, reason)) => {
-                        // Dropping is terminal for the row, so the reason stays in
-                        // the log rather than only in the deleted row (plan §6).
+                        // Dropping is terminal for the row; the intent machine has
+                        // already written an `intent_dropped` fault, and the log
+                        // line keeps the same reason beside the op it belonged to.
                         tracing::warn!(
                             op_id = %row.op_id,
                             ?code,

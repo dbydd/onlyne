@@ -192,6 +192,7 @@ export function createSurface({ pi, log, context, sessionId = null }) {
             display: true,
             details: {
               role: meta.role ?? null,
+              cluster: meta.cluster ?? null,
               taskId: meta.taskId ?? null,
               kind: meta.kind ?? "task",
               from: meta.from ?? null,
@@ -285,6 +286,34 @@ export function createSurface({ pi, log, context, sessionId = null }) {
     return true;
   };
 
+  /**
+   * Write one mount's role prose under its own section.
+   *
+   * A session with several mounts carries several role specs, and the text is
+   * the client's bytes exactly — no prefix, no heading, no reformatting. The
+   * section key is the caller's, so two specs cannot overwrite each other and
+   * a repeated spec (the same prose from two mounts) is written once by the
+   * caller rather than twice under two keys.
+   *
+   * @param {{ systemPromptOptions?: { sections?: Record<string, string> } } | null} event
+   * @param {string} key
+   * @param {string} text
+   * @returns {boolean} whether a section was written
+   */
+  const applyRoleProseSection = (event, key, text) => {
+    if (typeof text !== "string" || text.length === 0) return false;
+    const sections = event?.systemPromptOptions?.sections;
+    if (!sections) {
+      if (!warnedNoSections) {
+        warnedNoSections = true;
+        log("before_agent_start carries no prompt sections; the role prose reached no instruction layer");
+      }
+      return false;
+    }
+    sections[key] = text;
+    return true;
+  };
+
   const customEntry = (customType, data) => {
     if (!available.customEntry) return false;
     try {
@@ -302,6 +331,7 @@ export function createSurface({ pi, log, context, sessionId = null }) {
     wakeUser,
     roleProse,
     applyRoleProse,
+    applyRoleProseSection,
     customEntry,
     widget,
     status,

@@ -113,7 +113,8 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | `enabled` | `true` | `false` 时该工作区禁用扩展 |
 | `watch.autoStart` | `true` | `false` 时注册工具但不建连接，需 `/onlyne connect` |
 | `workspace` | — | 角色工作区路径（当会话未在其中启动时生效；相对路径相对 pi 工作目录解析） |
-| `cluster` | — | 本会话要连接的集群名（对应服务端的 `[server] name`；未设时由工作区目录树决定） |
+| `cluster` | — | 本会话要连接的集群名（对应服务端的 `[server]` 的 `name`；未设时由工作区目录树决定） |
+| `mounts` | — | 同时挂载多个集群：`{role, cluster, workspace, sessionId}` 数组；出现时取代单值键 |
 
 文件缺失即取各自默认值。文件格式错误时打印一行警告，并保留默认值：一个笔误不该静默关掉一个
 role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 generate 期模板提示），所以
@@ -126,6 +127,24 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 配置该键后，无论会话当前处于哪棵目录树下，都会优先连接该集群中为该角色注册的客户端。若同一集群内存在
 两个同名角色客户端，会直接显式报错拒绝，绝不随意选取。若未配置该键（或指定的集群未发现注册客户端），
 则优雅回退至原有的工作区目录树收敛规则。
+
+`mounts` 用于“同一进程在两个集群里是同一个角色”的情况——既向中心汇报、又服务本地组的代表角色。
+每个条目连接自己的客户端，各自维护会话行与任务表，并共享同一个 pi 会话：两层派发的任务都会落到这里，
+回复则回到该任务来源的那一层。`onlyne_send` 支持 `cluster:role` 写法；裸角色名会路由到当前有任务在飞的
+挂载，若存在多义则报错并列出全部挂载。投递卡片会标明该投递来自哪个集群。多挂载只适用于常驻插件：
+由客户端拉起的会话只持有一条 socket，因为它只被一个客户端启动。
+
+```json
+{
+  "mounts": [
+    { "role": "lazuli", "cluster": "daily-workbench", "workspace": "/srv/daily-workbench/lazuli" },
+    { "role": "lazuli", "cluster": "research-chamber", "workspace": "/srv/ResearchChamber/lazuli" }
+  ]
+}
+```
+
+多挂载会话的完成不会结束进程；各客户端仍按自身策略 recycle 或 suspend，直到最后一个挂载消失。每个挂载的
+role prose 作为独立章节进入指令层，两份不同的角色规范不会互相覆盖；两份完全相同则只写一次。
 
 ## 2. 能力表
 

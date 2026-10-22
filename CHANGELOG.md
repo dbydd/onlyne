@@ -17,7 +17,24 @@
   with candidate listings rather than falling back to an unmonitored deterministic socket.
   The adapter re-applies `latestProse` across session welcomes, reconnects, and surface
   re-mounts, ensuring resumed long-running sessions retain their instruction context.
-  The `pi-onlyne` npm package is bumped to `2.4.0`.
+- **One session, two clusters.** `pi-onlyne` gains `mounts` in `.pi/onlyne.json`: an array of
+  `{role, cluster, workspace, sessionId}`, one client link each, sharing one pi session. A
+  delivery from either layer reaches the session and its card names the cluster it came
+  through; `onlyne_complete` and `onlyne_handoff` return to the mount that delivered the
+  task, and `onlyne_send` accepts `cluster:role`. A shared process never ends on a
+  completion, each mount keeps its own role-prose section, and an ambiguous bare role is
+  refused with the mount list rather than guessed. The single-value keys still mean a
+  one-element list, so an existing switch file reads exactly as before
+  (`docs/v2.12-ONE-SESSION-TWO-CLUSTERS.md`). The `pi-onlyne` npm package is bumped to
+  `2.5.0`.
+- **A permanently refused intent leaves a fault.** The client deleted an intent row whose
+  send the server permanently refused (`acl_denied`, `unknown_role`, `forbidden`, and the
+  other `PERMANENT_ERRORS`) and recorded only a log line, so a message that never arrived
+  left no trace an operator could read. It now writes an `intent_dropped` fault carrying the
+  task, the code and the server's message before deleting the row, and appends the same
+  `Report::Fault` event an exhausted intent does. `pi-onlyne` also stops calling a locally
+  parked send "sent": its tool result now says `queued locally` for the client's
+  `{queued: true}` answer and passes the server's own refusal through as an error.
 
 ## 2.4.0 (2026-10-19)
 

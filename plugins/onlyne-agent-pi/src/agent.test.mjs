@@ -267,8 +267,8 @@ function fakeSurface(options = {}) {
       registerTool: true,
       registerCommand: true,
     },
-    wakeUser: (text, parts = []) => {
-      calls.wakeUser.push({ text, parts });
+    wakeUser: (text, parts = [], meta = null) => {
+      calls.wakeUser.push({ text, parts, meta });
       return true;
     },
     roleProse: (text) => {
@@ -296,6 +296,9 @@ async function startAgent({
   surface = fakeSurface(),
   capabilities,
   options = {},
+  cluster = null,
+  sharedProcess = false,
+  recycleHandler = null,
   coalesceAssign = null,
   holdCompletion = false,
   failSend = false,
@@ -314,6 +317,9 @@ async function startAgent({
     role: "planner",
     sessionId: SESSION_ID,
     taskId: TASK_ID,
+    cluster,
+    sharedProcess,
+    ...(recycleHandler ? { recycleHandler } : {}),
     surface,
     log: (line) => logs.push(line),
     ladder: [20, 40, 80],
@@ -538,6 +544,32 @@ test("an assign is injected once, acked, and a redelivery changes nothing", asyn
   const second = await waitFor(() => (host.of("assign_ack").length >= 2 ? host.of("assign_ack") : null));
   assert.equal(surface.calls.wakeUser.length, 1);
   assert.deepEqual(second[1], { task_id: TASK_ID, accepted: true, reason: "duplicate" });
+});
+
+// A session that serves two clusters sees two layers hand work over, and the
+// card is what tells them apart: the mount's own cluster travels with the
+// delivery so the model can name it when it replies
+// (`docs/v2.12-ONE-SESSION-TWO-CLUSTERS.md` §4). A mount that declares no
+// cluster stays unnamed rather than borrowing a neighbour's, and a process
+// holding a single mount prints what it always printed even when that mount
+// names its cluster.
+test("a shared mount hands its cluster to the card; a lone mount adds no line", async () => {
+  for (const [cluster, sharedProcess, expected] of [
+    ["workshop", true, "workshop"],
+    [null, true, null],
+    ["workshop", false, null],
+  ]) {
+    const { agent, host, surface } = await startAgent({ cluster, sharedProcess });
+    agent.start();
+    await waitFor(() => host.of("report").length >= 1);
+    host.notify("assign", assignArgs());
+    const [woke] = await waitFor(() => (surface.calls.wakeUser.length === 1 ? surface.calls.wakeUser : null));
+    const label = `${cluster ?? "a mount with no cluster"}${sharedProcess ? " shared" : " alone"}`;
+    assert.equal(woke.meta.cluster, expected, `${label}: the card names the layer`);
+    assert.equal(woke.meta.role, "planner", `${label}: the role still travels beside it`);
+    assert.equal(woke.meta.taskId, TASK_ID);
+    assert.equal(woke.meta.kind, "task");
+  }
 });
 
 // A note is communication, not work: the session is woken and the delivery is
@@ -1140,6 +1172,43 @@ test("recycle settles the task, detaches and asks pi to exit", async () => {
   const connections = host.connections;
   await new Promise((resolve) => setTimeout(resolve, 120));
   assert.equal(host.connections, connections, "a recycled agent must not reconnect");
+});
+
+// A multi-mount session shares one pi process, so a completion from one mount
+// must not end the process the sibling's session lives in
+// (`docs/v2.12-ONE-SESSION-TWO-CLUSTERS.md` §5). The single-mount rule is
+// unchanged: an `oneshot` delivery takes the process with it.
+test("a shared process stays after a completion while a lone mount still leaves", async () => {
+  for (const [sharedProcess, exits, why] of [
+    [true, [], "the sibling mount's session lives in this process"],
+    [false, ["done"], "a lone oneshot delivery leaves"],
+  ]) {
+    const { agent, host, surface } = await startAgent({ sharedProcess });
+    agent.start();
+    await waitFor(() => host.of("report").length >= 1);
+    host.notify("assign", assignArgs());
+    await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+
+    await agent.completeFromTool({ outcome: "done", summary: "finished" });
+    assert.deepEqual(surface.calls.exits, exits, why);
+  }
+});
+
+// A mount that shares its process hands the recycle decision up: the router
+// keeps the other mounts alive and ends the process only when none is left, so
+// the mount itself never calls the surface's exit.
+test("a recycle hands the exit decision to the router when one is supplied", async () => {
+  const reasons = [];
+  const { agent, host, surface } = await startAgent({ recycleHandler: (reason) => reasons.push(reason) });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+
+  host.notify("recycle", { task_id: TASK_ID, reason: "operator", outcome: "cancelled" });
+  await waitFor(() => (host.of("detach").length >= 1 && reasons.length === 1 ? true : null));
+  assert.deepEqual(reasons, ["operator"], "the router hears the reason this mount stopped");
+  assert.deepEqual(surface.calls.exits, [], "the mount never ends the shared process on its own");
 });
 
 // The scope an assignment carries decides whether this process outlives the

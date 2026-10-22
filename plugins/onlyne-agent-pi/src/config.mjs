@@ -24,11 +24,73 @@ export const DEFAULT_CONFIG = Object.freeze({
 });
 
 /**
+ * Normalize one `mounts` entry, or name why it cannot be used.
+ *
+ * @param {unknown} entry
+ * @returns {{ role: string, cluster: string | null, workspace: string | null, sessionId: string | null } | null}
+ */
+function normalizeMount(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+  const role = typeof entry.role === "string" && entry.role.trim() !== "" ? entry.role.trim() : null;
+  if (!role) return null;
+  return {
+    role,
+    cluster: typeof entry.cluster === "string" && entry.cluster.trim() !== "" ? entry.cluster.trim() : null,
+    workspace:
+      typeof entry.workspace === "string" && entry.workspace.trim() !== "" ? entry.workspace.trim() : null,
+    sessionId:
+      typeof entry.sessionId === "string" && entry.sessionId.trim() !== "" ? entry.sessionId.trim() : null,
+  };
+}
+
+/**
+ * The mounts a switch file declares, with the single-value keys as a
+ * one-element list. A malformed entry is skipped by name so one typo cannot
+ * take a working link down; an empty list is no declaration at all, so the
+ * single-value keys still mount.
+ *
+ * @param {Record<string, unknown>} parsed
+ * @param {{ role: string | null, cluster: string | null, workspace: string | null, sessionId: string | null }} single
+ * @returns {{ mounts: Array<{ role: string, cluster: string | null, workspace: string | null, sessionId: string | null }>, warning: string | null }}
+ */
+export function declaredMounts(parsed, single) {
+  // An absent key and an empty array mean the same thing: this file declares no
+  // list, so the single-value keys are the mount. Only a non-empty list is a
+  // declaration, and a list whose entries are all unusable falls back too.
+  if (!Array.isArray(parsed.mounts) || parsed.mounts.length === 0) {
+    if (!single.role) return { mounts: [], warning: null };
+    return {
+      mounts: [
+        {
+          role: single.role,
+          cluster: single.cluster,
+          workspace: single.workspace,
+          sessionId: single.sessionId,
+        },
+      ],
+      warning: null,
+    };
+  }
+  const mounts = [];
+  const problems = [];
+  parsed.mounts.forEach((entry, index) => {
+    const mount = normalizeMount(entry);
+    if (mount) mounts.push(mount);
+    else problems.push(`mounts[${index}] names no role`);
+  });
+  if (problems.length > 0) {
+    const usable = mounts.length > 0 ? mounts : declaredMounts({ ...parsed, mounts: undefined }, single).mounts;
+    return { mounts: usable, warning: `${problems.join("; ")}; the usable entries still mount` };
+  }
+  return { mounts, warning: null };
+}
+
+/**
  * Read `.pi/onlyne.json`.
  *
  * @param {string} cwd
  * @param {{ readFile?: (path: string) => string }} [options]
- * @returns {{ enabled: boolean, autoStart: boolean, role: string | null, sessionId: string | null, workspace: string | null, cluster: string | null, resident: boolean, path: string, warning: string | null, present: boolean }}
+ * @returns {{ enabled: boolean, autoStart: boolean, role: string | null, sessionId: string | null, workspace: string | null, cluster: string | null, mounts: Array<{ role: string, cluster: string | null, workspace: string | null, sessionId: string | null }>, resident: boolean, path: string, warning: string | null, present: boolean }}
  */
 export function loadConfig(cwd, options = {}) {
   const readFile = options.readFile ?? ((path) => readFileSync(path, "utf8"));
@@ -43,6 +105,7 @@ export function loadConfig(cwd, options = {}) {
       sessionId: null,
       workspace: null,
       cluster: null,
+      mounts: [],
       resident: false,
       path,
       warning: null,
@@ -59,6 +122,7 @@ export function loadConfig(cwd, options = {}) {
       sessionId: null,
       workspace: null,
       cluster: null,
+      mounts: [],
       resident: false,
       path,
       warning: `${path} is not valid JSON (${error instanceof Error ? error.message : String(error)}); using defaults`,
@@ -72,6 +136,7 @@ export function loadConfig(cwd, options = {}) {
       sessionId: null,
       workspace: null,
       cluster: null,
+      mounts: [],
       resident: false,
       path,
       warning: `${path} must hold a JSON object; using defaults`,
@@ -80,16 +145,21 @@ export function loadConfig(cwd, options = {}) {
   }
   const watch = parsed.watch && typeof parsed.watch === "object" ? parsed.watch : {};
   const rawSessionId = parsed.sessionId ?? parsed.session_id ?? parsed.session_alias;
-  return {
-    enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : DEFAULT_CONFIG.enabled,
-    autoStart: typeof watch.autoStart === "boolean" ? watch.autoStart : DEFAULT_CONFIG.autoStart,
+  const single = {
     role: typeof parsed.role === "string" && parsed.role.trim() !== "" ? parsed.role.trim() : null,
     sessionId: typeof rawSessionId === "string" && rawSessionId.trim() !== "" ? rawSessionId.trim() : null,
     workspace: typeof parsed.workspace === "string" && parsed.workspace.trim() !== "" ? parsed.workspace.trim() : null,
     cluster: typeof parsed.cluster === "string" && parsed.cluster.trim() !== "" ? parsed.cluster.trim() : null,
+  };
+  const declared = declaredMounts(parsed, single);
+  return {
+    enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : DEFAULT_CONFIG.enabled,
+    autoStart: typeof watch.autoStart === "boolean" ? watch.autoStart : DEFAULT_CONFIG.autoStart,
+    ...single,
+    mounts: declared.mounts,
     resident: typeof parsed.resident === "boolean" ? parsed.resident : false,
     path,
-    warning: null,
+    warning: declared.warning,
     present: true,
   };
 }

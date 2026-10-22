@@ -94,6 +94,9 @@ export class OnlyneAgent {
    *   createConnection?: (path: string) => any,
    *   timer?: { set: (fn: () => void, ms: number) => any, clear: (handle: any) => void },
    *   prose?: string,
+   *   cluster?: string | null,
+   *   sharedProcess?: boolean,
+   *   recycleHandler?: (reason: string) => void,
    * }} options
    */
   constructor(options) {
@@ -101,6 +104,20 @@ export class OnlyneAgent {
     this.resolveSocket = typeof options.resolveSocket === "function" ? options.resolveSocket : null;
     this.cwd = options.cwd;
     this.role = options.role;
+    /**
+     * The cluster this mount serves, when the plugin holds more than one. It
+     * labels the delivery card and nothing else: routing decisions read the
+     * mount list, and a mount whose cluster is unknown stays unnamed rather
+     * than borrowing a neighbour's.
+     */
+    this.cluster = typeof options.cluster === "string" && options.cluster !== "" ? options.cluster : null;
+    /**
+     * More than one mount shares this process, so this agent never ends it: a
+     * completion would take the sibling's session with it, and a recycle from
+     * one client is not an instruction about the other.
+     */
+    this.sharedProcess = Boolean(options.sharedProcess);
+    this.recycleHandler = typeof options.recycleHandler === "function" ? options.recycleHandler : null;
     this.sessionId = options.sessionId;
     this.envTaskId = options.taskId;
     this.resident = Boolean(options.resident);
@@ -862,6 +879,11 @@ export class OnlyneAgent {
     const fromLabel = describePrincipal(envelope.from);
     const wakeMeta = {
       role: this.role,
+      // Only a process holding several mounts names the layer it arrived
+      // through: a single-mount session prints exactly what it printed before,
+      // and the label only earns its line when there is another one to tell it
+      // apart from.
+      cluster: this.sharedProcess ? this.cluster : null,
       taskId,
       kind,
       from: fromLabel,
@@ -1016,7 +1038,10 @@ export class OnlyneAgent {
       }).catch((error) => this.log(`recycle completion refused: ${error.message}`));
     }
     this.stop(`recycle:${args.reason ?? "operator"}`);
-    this.exitSession(args.reason ?? "recycle");
+    // A mount that shares its process hands the decision up: the router keeps
+    // the other mounts alive and ends the process only when none is left.
+    if (this.recycleHandler) this.recycleHandler(args.reason ?? "recycle");
+    else this.exitSession(args.reason ?? "recycle");
   }
 
   // ------------------------------------------------------------ pi → plugin
@@ -1160,7 +1185,11 @@ export class OnlyneAgent {
     // kill, and a runtime killed mid-teardown loses whatever it had not yet
     // written: pi flushes its session file as it shuts down, so the graceful exit
     // is the only one that keeps the completion entry.
-    const exitProcess = options.exitProcess ?? !this.keepsSession();
+    // A shared process never leaves on a completion: the sibling mount's
+    // session lives in the same pi process, and the scope of this one delivery
+    // says nothing about that one. Its client still recycles or suspends it,
+    // and a `oneshot` client's recycle ends this mount alone.
+    const exitProcess = this.sharedProcess ? false : (options.exitProcess ?? !this.keepsSession());
     const details = typeof options.details === "string" && options.details.length > 0 ? options.details : null;
     const files = Array.isArray(options.files) ? options.files : [];
     const normalized = normalizeOutcome(outcome);

@@ -136,3 +136,66 @@ test("the switch file's cluster is trimmed, optional, and reaches residentIdenti
     workspaceRoot: dir,
   });
 });
+
+// One resident plugin can serve the same role in several clusters
+// (`docs/v2.12-ONE-SESSION-TWO-CLUSTERS.md` §2): `mounts` is the list, the
+// single-value keys are a one-element list, and an entry that cannot be used is
+// skipped by index so one typo does not take a working link down.
+
+test("a mounts array parses with every field trimmed", () => {
+  const dir = workspace(
+    JSON.stringify({
+      mounts: [
+        { role: "  lazuli ", cluster: " workshop ", workspace: " /work/lazuli ", sessionId: " s-1 " },
+        { role: "planner" },
+      ],
+    }),
+  );
+  const config = loadConfig(dir);
+  assert.deepEqual(config.mounts, [
+    { role: "lazuli", cluster: "workshop", workspace: "/work/lazuli", sessionId: "s-1" },
+    { role: "planner", cluster: null, workspace: null, sessionId: null },
+  ]);
+  assert.equal(config.warning, null);
+  assert.equal(config.present, true);
+});
+
+test("a malformed mount is skipped by index while the usable entries still mount", () => {
+  const dir = workspace(
+    JSON.stringify({
+      mounts: [{ role: "lazuli" }, { cluster: "workshop" }, null, "planner"],
+    }),
+  );
+  const config = loadConfig(dir);
+  assert.deepEqual(config.mounts, [{ role: "lazuli", cluster: null, workspace: null, sessionId: null }]);
+  assert.match(
+    config.warning,
+    /mounts\[1\] names no role; mounts\[2\] names no role; mounts\[3\] names no role; the usable entries still mount/,
+  );
+});
+
+test("without a mounts key the single values are a one-element list", () => {
+  const dir = workspace(
+    JSON.stringify({ role: " lazuli ", cluster: " workshop ", workspace: " /work ", sessionId: " s-1 " }),
+  );
+  assert.deepEqual(loadConfig(dir).mounts, [
+    { role: "lazuli", cluster: "workshop", workspace: "/work", sessionId: "s-1" },
+  ]);
+});
+
+test("a mounts key wins over the single values", () => {
+  const dir = workspace(
+    JSON.stringify({
+      role: "single-role",
+      cluster: "single-cluster",
+      mounts: [{ role: " mounted ", cluster: " mounted-cluster " }],
+    }),
+  );
+  const config = loadConfig(dir);
+  assert.deepEqual(config.mounts, [
+    { role: "mounted", cluster: "mounted-cluster", workspace: null, sessionId: null },
+  ]);
+  // The single keys stay reported as written; the mount list is what the
+  // plugin mounts from.
+  assert.equal(config.role, "single-role");
+});

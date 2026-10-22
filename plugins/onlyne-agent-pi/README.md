@@ -124,6 +124,7 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | `role` | — | the role this session serves when the client injected no `ONLYNE_ROLE`; also what makes the file a resident opt-in |
 | `workspace` | — | the role workspace, when the session did not start inside it; a relative path resolves against the pi working directory |
 | `cluster` | — | the cluster whose client this session dials — the serving server's `[server] name`; unset means the tree decides |
+| `mounts` | — | several clusters at once: an array of `{role, cluster, workspace, sessionId}`; when present it replaces the single-value keys |
 
 A missing file means every default. A malformed file prints one warning on stderr and
 keeps the defaults: a typo must not silently disable a role. The client does not read
@@ -137,6 +138,29 @@ in that cluster is dialed first, whatever tree the session runs in. A cluster ho
 clients of the role is refused by name rather than picked from. With the key absent — or
 naming a cluster no client has registered — resolution falls back to the tree, exactly as
 it did before the key existed.
+
+`mounts` is the answer when one process is the same role in two clusters — a representative
+that reports to a centre and also serves its own house. Every entry dials its own client,
+keeps its own session row and its own task table, and all of them share one pi session:
+deliveries from either layer arrive here, and a reply goes back to the layer the task came
+from. `onlyne_send` accepts `cluster:role`; a bare role resolves to the mount holding the
+work in flight, and is refused with the mount list when that is ambiguous. The delivery
+card names the cluster it arrived through. Multi-mount applies to a resident plugin: a
+session the client spawned holds one socket, because one client spawned it.
+
+```json
+{
+  "mounts": [
+    { "role": "lazuli", "cluster": "daily-workbench", "workspace": "/srv/daily-workbench/lazuli" },
+    { "role": "lazuli", "cluster": "research-chamber", "workspace": "/srv/ResearchChamber/lazuli" }
+  ]
+}
+```
+
+A session with several mounts never ends its process on a completion; each client still
+recycles or suspends its own mount, and the process leaves when the last one is gone. Each
+mount's role prose reaches the instruction layer as its own section, so two different role
+specs cannot overwrite each other; identical prose from two mounts is written once.
 
 Nothing else is needed. The workspace's `session_command` in `spec.toml` already spawns
 `pi` per task (`["pi", "--session-id", "{session}"]`), and the client injects the

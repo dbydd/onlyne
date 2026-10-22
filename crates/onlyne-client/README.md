@@ -184,6 +184,7 @@ Every outbound envelope lands in `client.db` `intents` before the first socket w
 | `retrying` | waiting for a later attempt | `accepted`, `retrying`, `exhausted` |
 | `accepted` | receipt stored | terminal |
 | `exhausted` | attempt ceiling reached with a recorded fault | terminal |
+| `dropped` | a permanent refusal deleted the row after recording a fault | terminal |
 
 The role spec sets the attempt ceiling in `intent.attempts` and the delay between attempts in `intent.backoff_ms`. The queue lives in the client database, so a restart resumes it.
 
@@ -191,10 +192,10 @@ The role spec sets the attempt ceiling in `intent.attempts` and the delay betwee
 | --- | --- |
 | `ok = true` | store the receipt, mark `accepted` |
 | `duplicate` | replay the stored receipt from the first attempt |
-| `acl_denied`, `invalid`, `conflict`, `forbidden`, `unknown_role`, `not_admin`, `bad_frame`, `frame_too_large`, `protocol_version` | drop the row without a retry |
-| `internal`, connection loss | count the attempt and retry after the ladder |
+| `acl_denied`, `conflict`, `forbidden`, `unknown_role`, `not_admin`, `bad_frame`, `frame_too_large`, `protocol_version` | record fault kind `intent_dropped`, then drop the row without a retry |
+| `invalid`, `internal`, connection loss | count the attempt and retry after the ladder |
 
-Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind:"fault"}` once the server link exists. An exhausted row is never dropped silently.
+Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind:"fault"}` once the server link exists. A permanent refusal records `intent_dropped` with the code and the server's message before the row goes. Neither row is ever dropped silently.
 
 ## Role prose
 
@@ -357,6 +358,7 @@ Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind
 | `retrying` | 等待后续尝试 | `accepted`、`retrying`、`exhausted` |
 | `accepted` | 已存储回执 | 终态 |
 | `exhausted` | 达到尝试次数上限并记录故障 | 终态 |
+| `dropped` | 永久性拒绝已记录故障后删除该行 | 终态 |
 
 角色 spec 通过 `intent.attempts` 设置尝试次数上限，通过 `intent.backoff_ms` 设置尝试之间的延迟。队列位于客户端数据库中，因此重启后会恢复。
 
@@ -364,10 +366,10 @@ Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind
 | --- | --- |
 | `ok = true` | 存储回执，标记为 `accepted` |
 | `duplicate` | 重放首次尝试时存储的回执 |
-| `acl_denied`、`invalid`、`conflict`、`forbidden`、`unknown_role`、`not_admin`、`bad_frame`、`frame_too_large`、`protocol_version` | 删除该行，不重试 |
-| `internal`、连接丢失 | 计入此次尝试，并按阶梯延迟后重试 |
+| `acl_denied`、`conflict`、`forbidden`、`unknown_role`、`not_admin`、`bad_frame`、`frame_too_large`、`protocol_version` | 先记录 `intent_dropped` 故障，再删除该行，不重试 |
+| `invalid`、`internal`、连接丢失 | 计入此次尝试，并按阶梯延迟后重试 |
 
-达到上限会记录 `intent_exhausted` 故障类型，并在服务器链接存在后发送一次 `report{kind:"fault"}`。已耗尽的行绝不会被静默丢弃。
+达到上限会记录 `intent_exhausted` 故障类型，并在服务器链接存在后发送一次 `report{kind:"fault"}`。永久性拒绝会在删除该行之前记录 `intent_dropped`，并带上错误码与服务端的原话。两者都不会被静默丢弃。
 
 ## 角色 prose
 

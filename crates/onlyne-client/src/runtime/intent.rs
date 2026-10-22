@@ -53,6 +53,8 @@ impl IntentState {
 pub enum IntentResult {
     Accepted(Option<Receipt>),
     Retryable(ErrorCode, String),
+    /// A refusal in [`PERMANENT_ERRORS`] ended the row: its `intent_dropped`
+    /// fault is recorded before the intent is deleted.
     Dropped(ErrorCode, String),
     Exhausted,
     /// The frame reached a connection whose routed `hello` has not landed yet.
@@ -156,7 +158,7 @@ impl IntentMachine {
         let failures = row.attempt.max(0) as u32 + 1;
         if failures >= MAX_LOCAL_FAILURES {
             self.store.exhaust_intent(&row.op_id, reason)?;
-            self.record_exhausted(&row.env_json, row.attempt, reason)?;
+            self.record_intent_fault(&row.env_json, "intent_exhausted", reason)?;
             return Ok(IntentResult::Exhausted);
         }
         let due = Utc::now() + self.next_delay(failures);
@@ -174,7 +176,11 @@ impl IntentMachine {
             if next >= self.attempts {
                 self.store
                     .exhaust_intent(op_id, "intent attempts exhausted")?;
-                self.record_exhausted(&row.env_json, row.attempt, "intent attempts exhausted")?;
+                self.record_intent_fault(
+                    &row.env_json,
+                    "intent_exhausted",
+                    "intent attempts exhausted",
+                )?;
                 return Ok(IntentResult::Exhausted);
             }
             let due = Utc::now() + self.next_delay(next);
@@ -238,13 +244,20 @@ impl IntentMachine {
             return Ok(IntentResult::NotAuthenticated);
         }
         if PERMANENT_ERRORS.contains(&error.code) {
+            // The row leaves the queue for good, so this fault is the only record
+            // of the refusal that outlives the process (plan §7).
+            self.record_intent_fault(
+                &row.env_json,
+                "intent_dropped",
+                &format!("{}: {}", error.code, error.message),
+            )?;
             self.delete_intent(&row.op_id)?;
             return Ok(IntentResult::Dropped(error.code, error.message.clone()));
         }
         let next = row.attempt.saturating_add(1) as u32;
         if next >= self.attempts {
             self.store.exhaust_intent(&row.op_id, &error.message)?;
-            self.record_exhausted(&row.env_json, row.attempt, &error.message)?;
+            self.record_intent_fault(&row.env_json, "intent_exhausted", &error.message)?;
             Ok(IntentResult::Exhausted)
         } else {
             let due = Utc::now() + self.next_delay(next);
@@ -258,26 +271,25 @@ impl IntentMachine {
         Ok(())
     }
 
-    fn record_exhausted(&self, env: &Value, attempt: i64, reason: &str) -> Result<()> {
+    /// Record a terminal intent as a fault: a local `faults` row plus the
+    /// `report{kind:"fault"}` event the runloop forwards once the link is up.
+    ///
+    /// Both terminal kinds share this shape — `intent_exhausted` and
+    /// `intent_dropped` differ only in the kind they name — so one helper keeps
+    /// the task it is keyed by and the reason it carries identical for each.
+    fn record_intent_fault(&self, env: &Value, kind: &str, reason: &str) -> Result<()> {
         let task = env
             .get("causality")
             .and_then(|v| v.get("task"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        let _ = crate::reconcile::record_fault(
-            &self.store,
-            task,
-            "intent_exhausted",
-            "intent",
-            reason,
-        )?;
-        let _ = attempt;
+        let _ = crate::reconcile::record_fault(&self.store, task, kind, "intent", reason)?;
         let report = Report::Fault {
             task_id: Some(task.to_string()),
             session_id: None,
             generation: None,
             seq: None,
-            kind: "intent_exhausted".into(),
+            kind: kind.into(),
             reason: reason.into(),
             desired: None,
             observed: None,
@@ -334,4 +346,74 @@ pub fn completion_task_id(row: &IntentRow) -> Option<String> {
 
 pub fn permanent_error(code: ErrorCode) -> bool {
     PERMANENT_ERRORS.contains(&code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onlyne_proto::{Body, Causality, MsgKind, Principal, new_envelope};
+    use onlyne_store::SessionLedger;
+    use tempfile::tempdir;
+
+    /// The task both the envelope and its fault row are keyed by.
+    const TASK: &str = "3f1d6f4e-1a2b-4c3d-8e9f-0a1b2c3d4e5f";
+
+    /// One task envelope whose causality names the task its fault row will carry.
+    fn delivery(task: &str) -> Envelope {
+        new_envelope(
+            MsgKind::Task,
+            Principal::role("planner"),
+            Principal::role("qa"),
+            Body::text("work"),
+            Some(Causality::root(task)),
+        )
+        .expect("task envelope")
+    }
+
+    #[test]
+    fn a_permanent_refusal_records_the_dropped_intent() {
+        let dir = tempdir().expect("tempdir");
+        let store = ClientStore::open(dir.path().join("client.db")).expect("client store");
+        let machine = IntentMachine::new(store.clone(), 3, vec![10]);
+        assert!(machine.enqueue(&delivery(TASK)).expect("enqueue"));
+        let row = machine
+            .pending()
+            .expect("the due queue")
+            .into_iter()
+            .next()
+            .expect("the queued row");
+
+        let body = ResBody::err(
+            ErrorCode::AclDenied,
+            "role planner may not address qa",
+            None,
+        );
+        let result = machine
+            .attempt(&row, Some(&body))
+            .expect("the refusal is handled");
+
+        assert_eq!(
+            result,
+            IntentResult::Dropped(
+                ErrorCode::AclDenied,
+                "role planner may not address qa".into()
+            )
+        );
+        let fault = store
+            .list_faults(TASK)
+            .expect("stored faults")
+            .into_iter()
+            .find(|fault| fault.kind == "intent_dropped")
+            .expect("the drop left a fault row");
+        assert_eq!(fault.task_id, TASK);
+        assert_eq!(fault.intent, "intent");
+        assert_eq!(fault.reason, "acl_denied: role planner may not address qa");
+        assert!(
+            store
+                .due_intents(Utc::now() + chrono::Duration::hours(1), 8)
+                .expect("the queue")
+                .is_empty(),
+            "the refused intent is gone from the queue"
+        );
+    }
 }
