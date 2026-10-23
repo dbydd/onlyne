@@ -1,5 +1,13 @@
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type NodeId = string;
+export type DomainId = string;
+export interface DomainMembership {
+  domain_id: DomainId; node_id: NodeId; state: 'active' | 'left'; revision: string;
+}
+export interface DomainMutation extends Mutation { expected_revision?: string }
+export interface DomainDiscovery {
+  domain_id: DomainId; members: DomainMembership[]; unavailable: NodeId[];
+}
 export interface ThreadRef { owner: NodeId; id: string }
 export interface MessageRef { sender: NodeId; id: string }
 export interface ResourceRef { owner: NodeId; id: string }
@@ -109,6 +117,7 @@ export interface Transport {
 }
 export interface MsgInput { delivery_kind: string; msg: string; meta?: Record<string, Json> }
 export type Action =
+  | { kind: 'domain'; op: 'create' | 'join' | 'leave' | 'list' | 'describe' | 'discover'; domain_id?: DomainId; expected_revision?: string }
   | { kind: 'send'; to: NodeId; thread?: ThreadRef; context?: string; in_reply_to?: MessageRef; relation?: 'reply' | 'followup'; mentions?: NodeId[]; response: DeliveryPlan['response']; execution: DeliveryPlan['execution'] }
   | { kind: 'read'; scope: 'directory' | 'threads' | 'inbox' | 'messages' | 'message' | 'evidence'; thread?: ThreadRef; message?: MessageRef; seq?: string; cursor?: string; page_size?: number; attention?: 'inbox' | 'thread' }
   | { kind: 'thread'; op: 'create' | 'close' | 'list' | 'describe' | 'member_add' | 'member_remove'; thread?: ThreadRef; to?: NodeId; title?: string }
@@ -118,6 +127,12 @@ export interface Runtime {
   /** Returns only after the host has observed consumption in the named context. */
   inject(entry: Entry, context?: string, plan?: DeliveryPlan): Promise<{ context: string; consumed: boolean }>;
   todo?(entry: Entry, context: string): Promise<void>;
+  /**
+   * Called by the host once it observes that the model consumed an `await` tool result
+   * (RFC 0008 §5). The library records that as the shared consumption for the entry's
+   * `(context, ThreadRef, seq)`, so the automatic fragment does not present it again.
+   */
+  confirmToolResult?(entry: Entry, context: string): Promise<void>;
 }
 export interface ResourceDriver {
   validate(resource: Resource, operation: string, data: Json | undefined): Promise<void>;
@@ -135,6 +150,7 @@ export interface Plugins {
   mayAdmit?(actor: NodeId, thread: ThreadRef): Promise<boolean>;
   mayHandover?(resource: Resource, initiator: NodeId, target: NodeId): Promise<boolean>;
   directory?(): Promise<Json>;
+  domainCandidates?(domain_id: DomainId): Promise<NodeId[]>;
   /** Resolves a thread-local mention alias to the member node it names. */
   mention?(alias: string, thread: ThreadRef): Promise<NodeId>;
 }

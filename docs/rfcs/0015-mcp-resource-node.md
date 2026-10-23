@@ -45,13 +45,14 @@ MCP 的结果分成功和 `isError: true` 两种。Onlyne 必须区分这两类�
 | MCP 返回 | Onlyne 记录 |
 |---|---|
 | `result.content` 且 `isError` 为 false 或缺省 | `committed`，正文进 `data` |
-| `isError: true` 且正文描述业务失败 | `aborted`，`error.code` 取 `invalid_request` 或 `unsupported_delivery`，原文进 `details.source` |
-| JSON-RPC 协议错误（`-32602` 等） | `aborted`，按 RFC 0001 §4 映射 |
+| `isError: true` 且已确证未产生外部副作用（如只读工具或执行前被拒绝） | `aborted`，`error.code` 取 `invalid_request` 或 `unsupported_delivery`，原文进 `details.source` |
+| `isError: true` 且无法确证无外部副作用（有副作用工具执行中失败） | `unknown`，保留错误码与原文进 `details.source`，供调用方或人工策略决策 |
+| JSON-RPC 协议错误（`-32602` 等，确证未执行） | `aborted`，按 RFC 0001 §4 映射 |
 | 传输层失败、超时、连接断开 | `unknown`，保留 `operation_id` 可查回 |
 
 `isError: true` 表示工具执行器报告了失败。它不区分参数错误、权限拒绝和资源内部故障。Onlyne 按正文和错误码推断，推断不出时用 `unavailable` 并保留原文，不猜一个具体的码。
 
-`aborted` 只表示这次调用被明确拒绝或中止。它不表示远端没有执行过任何副作用。调用方需要区分「没有发生」与「不知道是否发生」时，以 `unknown` 为准。
+`aborted` 遵循 RFC 0006 的统一定义：表示 endpoint 已确证本次调用未产生任何外部副作用。工具报告失败本身不能证明未发生副作用。凡无法确证未执行副作用的失败，必须记录为 `unknown`，并在 `details.source` 中保留原始报错文本与业务错误信息。调用方需要区分「确定未发生」与「结果未知（可能已发生）」时，以 `unknown` 为准。
 
 `resources/read` 的返回是 `contents` 数组，每项带 `uri` 和 `mimeType`。Onlyne 把它作为资源数据保存，不升级为消息，也不写入任何 thread。
 

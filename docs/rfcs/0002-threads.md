@@ -10,7 +10,7 @@ Thread 属于单一 owner。同一 ThreadRef 只有一个持有者。其他节�
 
 Thread 是消息的唯一存盘容器。投递、@ 关注和引用回复都不改变存盘位置：一条消息进一个 thread，分配一个 seq。@ 只决定谁收到主动关注，不产生第二份记录。
 
-Thread 可以跨域。owner 的域决定谁持有这份列表，不决定谁能进入它。成员可以是其他域的节点，投递、读取和回复都按成员表判断，与成员所属域无关。协议不存在「thread 只在域内有效」的规则。
+Thread 可以跨域。域成员关系不决定谁持有或进入这份列表。成员可以是其他域的节点，投递、读取和回复都按成员表判断，与成员所属域无关。协议不存在「thread 只在域内有效」的规则。跨域资源的读写和交接仍走资源 owner 的 endpoint 或既有 ingress，连通性保持原状。
 
 一条消息只归属一个 thread。双向往来都记在这个 thread 里，按 owner 分配的 seq 排。其他节点不持有这份列表，也没有第二份 thread 条目。
 
@@ -31,7 +31,7 @@ Thread 可以显式创建，或按 owner 策略自动创建。默认 thread 是�
 }
 ```
 
-`state` 取 `open` 或 `closed`。closed thread 不接收新消息，历史条目保留可读。关闭 thread 不取消工作，不产生任何工作事件。关闭后，已提交且未确认的关注义务继续出现在成员的关注清单里，直到成员确认或 owner 按保留策略给出明确处置。
+`state` 取 `open` 或 `closed`。closed thread 不接收新消息，历史条目保留可读。关闭 thread 不取消工作，不产生任何工作事件。关闭后，已提交且未确认的关注义务继续出现在成员的关注清单里（接口见 RFC 0004 §1），直到成员确认或 owner 按保留策略给出明确处置。
 
 Thread 元数据可由 owner 更新。`next_seq` 是只读投影，不是可以客户端写入的序号。
 
@@ -97,7 +97,7 @@ Thread 的成员表决定谁可以投递、谁可以读取。进入 thread 的�
 
 ### 服务必须验证 owner
 
-路径与 ThreadRef 中的 owner 是同一身份。权威服务 MUST 校验 `thread_ref.owner` 是自己服务的身份，或是一个已把服务权委托给它、委托仍有效的节点。两者都不满足时返回 `invalid_request` 或 `forbidden`，不做本地查找、不回退默认 thread、不代理转发该请求。委托规则见 [发现与自治域](0011-discovery-and-domains.md)。
+路径与 ThreadRef 中的 owner 是同一身份。权威服务 MUST 校验 `thread_ref.owner` 是自己服务的身份，或是一个已把服务权委托给它、委托仍有效的节点。两者都不满足时返回 `invalid_request` 或 `forbidden`，不做本地查找、不回退默认 thread、不代理转发该请求。委托规则见 [节点发现与域](0011-discovery-and-domains.md)。
 
 thread id 在 owner 内唯一。关闭或清除历史后，该 id MUST NOT 重新分配给另一个 thread。owner 身份改变时，旧 ThreadRef 不继承新身份的权限。
 
@@ -152,7 +152,7 @@ owner 或明确授权的代表可以添加、激活、拒绝、修改 access 或
 - 默认位置解析 MUST 是 owner 本地动作，并在接纳事务内完成一次。提交结果 MUST 记录解析出的 ThreadRef。重投返回该已记录结果，不重新解析。
 - 首次接触投递需要 owner 的显式入站策略授予投递许可。默认位置被发现不授予许可。
 - 关闭当前默认 thread 时，省略目标的新投递 MUST 被拒绝，或由 owner 原子指定另一个 open 默认 thread。协议 MUST 明确所选行为，不允许静默切换。
-- ThreadRef 指向不存在或未授权公开的 thread 时返回 `not_found`，已关闭时返回 `thread_closed`。已公开 thread 上缺少投递成员资格时返回 `not_a_member`，其他权限拒绝返回 `forbidden`。MUST NOT 回退到默认 thread。
+- ThreadRef 指向不存在、或调用方没有读取权的 thread 时返回 `not_found`，已关闭时返回 `thread_closed`。读取权指成员表授予的 read 权限，或一条针对调用方的有效回复许可。调用方有读取权但缺少投递成员资格时返回 `not_a_member`，其他权限拒绝返回 `forbidden`。MUST NOT 回退到默认 thread。
 - owner 可以拒绝默认 thread 投递，此时返回明确错误。
 
 请求没有明确 ThreadRef 时，消息落在 owner 的默认 thread，投递许可仍按成员表判断。

@@ -1,19 +1,26 @@
 import type { Context } from './core.js';
 import { canonical, decimal, fail, key, requireValue, utc } from './core.js';
 import type {
-  Action, Attention, Auth, DeliveryPlan, Entry, ErrorCode, Failure, Json, LocalAttention,
+  Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Json, LocalAttention,
   Message, MessageQuery, MsgInput, Mutation, Outbound, Page, PageOptions, SendRequest,
   Thread, ThreadRef, Transport,
 } from './types.js';
 import type { MessageService } from './messages.js';
 import type { ResourceService } from './resources.js';
 import type { ThreadService } from './threads.js';
+import type { DomainService } from './domains.js';
 
 /** Result of one delivery: `admission` is what the peer recorded, `wait` is what this caller observed. */
 export interface SendOutcome {
   receipt?: Outbound['receipt'];
   admission: Outbound['state'];
   reply?: Entry;
+  /**
+   * Whether the reply body is safe to render. `withheld` means the same body is already
+   * confirmed consumed in this context through another path (RFC 0008 §5), so the caller
+   * renders the arrival facts and the original message reference only.
+   */
+  reply_body?: 'included' | 'withheld';
   wait?: 'answered' | 'timed_out' | 'cancelled';
   error?: Failure;
 }
@@ -99,6 +106,14 @@ function isReply(original: Pick<Message, 'sender' | 'id'>, entry: Entry): boolea
 const outboundKey = (sender: string, id: string) => key('outbound', sender, id);
 const inboxKey = (obligation_id: string) => key('inbox', obligation_id);
 const replyKey = (original: Pick<Message, 'sender' | 'id'>) => key('reply', original.sender, original.id);
+/** One consumption slot per `(context, ThreadRef, seq)`, shared by every delivery path (RFC 0004 §5). */
+const consumptionKey = (context: string, thread_ref: ThreadRef, seq: string) => key('consumed', context, thread_ref.owner, thread_ref.id, seq);
+
+/** Confirmed consumption for one slot, written by whichever path the host confirmed. */
+interface ConsumptionRecord {
+  context: string; thread_ref: ThreadRef; seq: string;
+  confirmed: boolean; via: 'tool_result' | 'fragment'; at: string;
+}
 
 /** The durable part of an obligation: identity and owner-attested facts, body optional. */
 function attentionOf(entry: Entry, obligation_id: string, recipient: string): Attention {
@@ -115,15 +130,20 @@ export class OnlyneClient {
   readonly #messages: MessageService;
   readonly #threads: ThreadService;
   readonly #resources: ResourceService;
+  readonly #domains: DomainService;
   /** Live waiters, keyed by the original message; an entry lives only while its `send` runs. */
   readonly #waiters = new Map<string, Waiter>();
 
-  constructor(ctx: Context, transport: Transport, messages: MessageService, threads: ThreadService, resources: ResourceService) {
+  constructor(
+    ctx: Context, transport: Transport, messages: MessageService, threads: ThreadService,
+    resources: ResourceService, domains: DomainService,
+  ) {
     this.#ctx = ctx;
     this.#transport = transport;
     this.#messages = messages;
     this.#threads = threads;
     this.#resources = resources;
+    this.#domains = domains;
   }
 
   // ---- delivery ---------------------------------------------------------------
@@ -374,7 +394,7 @@ export class OnlyneClient {
       if (failure.code !== 'decision_unavailable' && failure.code !== 'unavailable') throw error;
       fail('decision_unavailable', failure.message);
     }
-    if (action == null || typeof action !== 'object' || !['send', 'read', 'thread', 'resource'].includes(action.kind)) {
+    if (action == null || typeof action !== 'object' || !['send', 'read', 'thread', 'resource', 'domain'].includes(action.kind)) {
       await this.#ctx.storage.transaction(tx => tx.put(key('decision', decision_id), {
         input, at,
         error: { code: 'decision_unavailable' as ErrorCode, message: 'The decision is not an executable action.', retryable: true },
@@ -464,6 +484,51 @@ export class OnlyneClient {
    * delivery, so a still-open record stays open for recovery.
    */
   async #await(record: StoredOutbound, waiter: Waiter, signal: AbortSignal | undefined): Promise<SendOutcome> {
+    const reply = await this.#awaitOutcome(record, waiter, signal);
+    if (reply.reply === undefined) return reply;
+    // A body already confirmed consumed in this context is rendered as arrival facts only
+    // (RFC 0008 §5). The plan's context wins; otherwise the context the fragment path
+    // consumed in is the same consumer, and with neither the awaiting node is it.
+    const context = record.request.plan.context
+      ?? await this.#fragmentContextFor(reply.reply)
+      ?? this.#ctx.options.node_id;
+    // A fragment already confirmed the body, so this tool result reports arrival facts only.
+    const consumed = await this.#alreadyConsumed(reply.reply, context);
+    // Returning the body does not by itself write the record: RFC 0008 §5 forbids advancing
+    // consumption on a submitted tool result. The host calls `confirmToolResult` once it has
+    // observed the model consume the result.
+    return { ...reply, ...(consumed ? { reply_body: 'withheld' as const } : {}) };
+  }
+
+  /**
+   * The host's confirmation that the model consumed an awaited tool result in `context`
+   * (RFC 0008 §5). This is the only writer of a tool-result consumption record: submitting
+   * a result, releasing a waiter and a void host return all prove nothing.
+   */
+  async confirmToolResult(entry: Entry, context?: string): Promise<void> {
+    const where = context ?? this.#ctx.options.node_id;
+    await this.#ctx.storage.transaction(async tx => {
+      const slot = consumptionKey(where, entry.thread_ref, entry.seq);
+      const stored = await tx.get<ConsumptionRecord>(slot);
+      if (stored?.confirmed !== true) {
+        await tx.put<ConsumptionRecord>(slot, {
+          context: where, thread_ref: entry.thread_ref, seq: entry.seq,
+          confirmed: true, via: 'tool_result', at: new Date(this.#ctx.now()).toISOString(),
+        });
+      }
+      // The same context's obligation is delivered by this rendering, in the same commit.
+      for (const row of await tx.scan<LocalAttention>(key('inbox') + '/')) {
+        const local = row.value;
+        const held = local.attention.entry;
+        if (held === undefined || local.injected) continue;
+        if (held.thread_ref.owner !== entry.thread_ref.owner || held.thread_ref.id !== entry.thread_ref.id) continue;
+        if (held.seq !== entry.seq) continue;
+        await tx.put(row.key, { ...local, injected: true, context: local.context ?? where });
+      }
+    });
+  }
+
+  async #awaitOutcome(record: StoredOutbound, waiter: Waiter, signal: AbortSignal | undefined): Promise<SendOutcome> {
     // The request and the wait start together: a reply that is already durable here, or that
     // lands while the request is still in flight, answers this call without waiting for the
     // response. The request keeps running and records its admission when it lands.
@@ -641,15 +706,47 @@ export class OnlyneClient {
     const runtime = this.#ctx.options.plugins.runtime;
     if (runtime === undefined || record.injected) return;
     const requested = record.context ?? record.attention.plan?.context ?? this.#ctx.options.node_id;
+    // The entry may already be confirmed consumed in that context through an awaited tool
+    // result; presenting it again as a fragment is the duplicate RFC 0008 §5 forbids. The
+    // shared record is then the only thing left to write.
+    if (await this.#alreadyConsumed(entry, requested)) {
+      await this.#settleConsumed(entry, record, requested, 'tool_result');
+      return;
+    }
     const { context, consumed } = await runtime.inject(entry, requested, record.attention.plan);
     if (!consumed) return;
-    await this.#ctx.storage.transaction(async tx => {
+    // One transaction: the shared consumption record and this obligation's delivered state
+    // become visible together, so no reader sees a delivered entry without its record.
+    await this.#settleConsumed(entry, record, context, 'fragment');
+    await runtime.todo?.(entry, context);
+  }
+
+  /**
+   * Records one confirmed consumption for a `(context, ThreadRef, seq)` slot and marks the
+   * obligation delivered in the same transaction (RFC 0004 §5, 0008 §5). Only a host
+   * confirmation reaches here; a submitted call or a void return proves nothing.
+   */
+  #settleConsumed(entry: Entry, record: LocalAttention, context: string, via: ConsumptionRecord['via']): Promise<void> {
+    return this.#ctx.storage.transaction(async tx => {
+      const slot = consumptionKey(context, entry.thread_ref, entry.seq);
+      const consumed = await tx.get<ConsumptionRecord>(slot);
+      if (consumed?.confirmed !== true) {
+        await tx.put<ConsumptionRecord>(slot, {
+          context, thread_ref: entry.thread_ref, seq: entry.seq,
+          confirmed: true, via, at: new Date(this.#ctx.now()).toISOString(),
+        });
+      }
       const stored = await tx.get<LocalAttention>(inboxKey(record.attention.obligation_id));
       if (stored !== undefined && !stored.injected) {
         await tx.put(inboxKey(record.attention.obligation_id), { ...stored, injected: true });
       }
     });
-    await runtime.todo?.(entry, context);
+  }
+
+  /** Whether the named context already confirmed this entry through any delivery path. */
+  async #alreadyConsumed(entry: Entry, context: string): Promise<boolean> {
+    const stored = await this.#ctx.storage.transaction(tx => tx.get<ConsumptionRecord>(consumptionKey(context, entry.thread_ref, entry.seq)));
+    return stored?.confirmed === true;
   }
 
   /** Every owner + thread this node knows, from accepted grant notices plus its own threads. */
@@ -828,6 +925,23 @@ export class OnlyneClient {
       return fail('invalid_request', 'Unknown thread operation.');
     }
     if (action.kind === 'resource') return this.#operateResource(action, options);
+    if (action.kind === 'domain') {
+      const domainMutation = (): DomainMutation => ({
+        idempotency_key: this.#ctx.id(),
+        retry_until: this.#window(undefined),
+        ...(action.expected_revision === undefined ? {} : { expected_revision: action.expected_revision }),
+      });
+      switch (action.op) {
+        case 'create': return this.#domains.create(auth, mutation());
+        case 'join': return this.#domains.join(auth, requireValue(action.domain_id, 'invalid_request'), domainMutation());
+        case 'leave': return this.#domains.leave(auth, requireValue(action.domain_id, 'invalid_request'), domainMutation());
+        case 'list': return this.#domains.list(auth);
+        case 'describe': return this.#domains.describe(auth, requireValue(action.domain_id, 'invalid_request'));
+        case 'discover':
+          return this.#domains.discover(auth, requireValue(action.domain_id, 'invalid_request'), options.signal);
+      }
+      return fail('invalid_request', 'Unknown domain operation.');
+    }
     return fail('invalid_request', 'Unknown action.');
   }
 
@@ -922,13 +1036,28 @@ export class OnlyneClient {
   }
 
   /** Local facts read without a peer: this node's identity, description, threads and inbox. */
-  async #directory(): Promise<{ node: string; description: Json; threads: Page<Thread>; inbox: Page<LocalAttention> }> {
+  async #directory(): Promise<{
+    node: string; description: Json; threads: Page<Thread>; inbox: Page<LocalAttention>;
+    domains: Page<DomainMembership>;
+  }> {
     const plugins = this.#ctx.options.plugins;
     return {
       node: this.#ctx.options.node_id,
       description: plugins.directory === undefined ? null : await plugins.directory(),
       threads: await this.#threads.list(this.#auth(), { page_size: 100 }),
       inbox: await this.#messages.inbox(this.#auth(), { page_size: 100 }),
+      domains: await this.#domains.list(this.#auth(), { page_size: 100 }),
     };
   }
+  /** The context a prior fragment consumed this entry in, if any. */
+  async #fragmentContextFor(entry: Entry): Promise<string | undefined> {
+    const rows = await this.#ctx.storage.transaction(async tx =>
+      (await tx.scan<ConsumptionRecord>(key('consumed') + '/'))
+        .filter(row => row.value.confirmed === true
+          && row.value.thread_ref.owner === entry.thread_ref.owner
+          && row.value.thread_ref.id === entry.thread_ref.id
+          && row.value.seq === entry.seq));
+    return rows.length > 0 ? rows[0]!.value.context : undefined;
+  }
 }
+

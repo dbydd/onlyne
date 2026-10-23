@@ -161,6 +161,7 @@ Onlyne 绑定必须在发送前检查这些能力，不能把不支持的操作�
 4. 原始 A2A 服务未声明持久接纳扩展时，Onlyne 报告 `binding-defined`。
 5. A2A 的 push 与流式更新按事件送达运行时。丢失后，`GetTask` 或 `ListTasks` 只能恢复任务当前状态和可用产物；规范不保证补回全部事件或历史 Message（`docs/specification.md:760-764`）。
 6. A2A 不定义 IM 会话所有权转移。资源交接使用 RFC 0006 的资源操作，不借用 Task。
+7. 传输层无响应或超时时，Onlyne 记录 `admission.state: unknown`，保留原 `messageId` 供查回；不得写成拒绝，也不得写成 `binding-defined` 的成功。
 
 ## 10. 绑定验收
 

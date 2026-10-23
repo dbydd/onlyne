@@ -330,12 +330,67 @@ async function phaseNet(): Promise<void> {
   check('net.send.receipt', outcome.receipt?.seq === '2' && outcome.receipt?.guarantee === 'binding-defined'
     ? '' : `unexpected receipt ${JSON.stringify(outcome.receipt)}`);
 
+  // The host confirms the tool result it rendered; only that confirmation advances the shared
+  // record, never the submission itself (RFC 0008 §5).
+  if (outcome.reply !== undefined && outcome.reply_body === undefined) {
+    await nodeA.client.confirmToolResult(outcome.reply, awaitPlan.context);
+  }
+  await nodeA.client.reconcile();
+
+  // RFC 0008 §5: the awaited reply body and the automatic fragment share one consumption
+  // record. The first await renders the body; the fragment that follows must not render it
+  // a second time, so the entry is recorded consumed without a second injection.
+  const awaitedReplySeq = outcome.reply?.seq ?? '';
+  const fragmentRow = (await nodeA.messages.inbox(authA)).items
+    .find(row => row.attention.seq === awaitedReplySeq && row.attention.entry !== undefined);
+  const injectedOnce = netA.shared.injected
+    .filter(entry => entry.seq === awaitedReplySeq && entry.thread_ref.id === ref.id).length;
+  // Whichever path confirmed first owns the single rendering: the tool result when the body
+  // came back inline, the fragment when it had already been consumed. The invariant is one.
+  const inlineBody = outcome.reply_body === undefined ? 1 : 0;
+  check('net.send.await.body_once', injectedOnce + inlineBody === 1
+    ? '' : `the reply body was rendered ${injectedOnce + inlineBody} times (fragment=${injectedOnce}, tool=${inlineBody})`);
+  check('net.send.await.no_second_body', fragmentRow?.injected === true
+    ? '' : 'the reply obligation never reached a delivered state');
+
+  // The reverse order: the automatic fragment consumes the body first, so the awaited tool
+  // result that follows reports the arrival facts instead of rendering the body a second time.
+  const askAgain = {
+    id: 'net-06', sender: lazuliNode, delivery_kind: '第二次请求', msg: '再确认一次。',
+    meta: { thread: ref, mentions: ['@all'] },
+  };
+  // A plan that names no context leaves the consumer to the awaiting node, so the fragment
+  // record and the tool result record resolve to the same slot.
+  const secondPending = nodeA.client.send(dpdpNode, askAgain, { ...awaitPlan, context: undefined });
+  await waitFor(async () =>
+    (await nodeB.messages.list(authB, ref, { attention: 'thread' })).items.some(entry => entry.message.id === 'net-06'));
+  await nodeB.messages.admit(authB, {
+    idempotency_key: crypto.randomUUID(), retry_until: future(),
+    message: { id: 'net-07', sender: dpdpNode, delivery_kind: '答复第二次', msg: '第二次确认完成。', meta: { thread: ref, in_reply_to: { sender: lazuliNode, id: 'net-06' }, relation: 'reply' } },
+    target_endpoint: dpdpNode, plan,
+  });
+  // The fragment path consumes it first: the reply obligation is stored locally, then the
+  // runtime consumes it as a fragment, and only then does the awaited call resolves.
+  await nodeA.client.reconcile();
+  const storedReply = await waitFor(async () =>
+    (await nodeA.messages.inbox(authA)).items.some(row => row.attention.entry?.message.id === 'net-07'));
+  check('net.send.await.fragment_stored', storedReply ? '' : 'the reply obligation never landed locally');
+  const fragmentConsumed = await waitFor(async () => {
+    const row = (await nodeA.messages.inbox(authA)).items.find(item => item.attention.entry?.message.id === 'net-07');
+    return row?.injected === true;
+  });
+  const secondReply = await polling(secondPending, () => nodeA.client.reconcile());
+  const fragmentFirst = netA.shared.injected.some(entry => entry.message.id === 'net-07');
+  check('net.send.await.withheld_after_fragment', secondReply.wait === 'answered'
+    && secondReply.reply?.message.id === 'net-07' && secondReply.reply_body === 'withheld' && fragmentFirst && fragmentConsumed
+    ? '' : `the tool result repeated a body the fragment had shown: body=${secondReply.reply_body ?? 'none'} fragmentFirst=${fragmentFirst} fragmentConsumed=${fragmentConsumed}`);
+
   const replayed = await nodeA.client.send(dpdpNode, ask, plan);
   check('net.send.replay', replayed.admission === 'accepted' && replayed.receipt?.receipt_id === outcome.receipt?.receipt_id
     && replayed.receipt?.seq === outcome.receipt?.seq
     ? '' : `a re-drive produced ${JSON.stringify(replayed.receipt)} instead of ${JSON.stringify(outcome.receipt)}`);
   const afterReplay = await nodeB.threads.describe(authB, ref);
-  check('net.send.replay.no_append', afterReplay.thread.next_seq === '4' ? '' : `the re-drive appended an entry: next_seq ${afterReplay.thread.next_seq}`);
+  check('net.send.replay.no_append', afterReplay.thread.next_seq === '6' ? '' : `the re-drive appended an entry: next_seq ${afterReplay.thread.next_seq}`);
 
   // An obligation queued before the thread closes still reaches the member afterwards.
   netA.shared.allow = false;
@@ -360,7 +415,7 @@ async function phaseNet(): Promise<void> {
   const nodeA2 = netA.recreate();
   const authA2: Auth = { actor: lazuliNode };
   const carried = await nodeA2.messages.inbox(authA2);
-  check('net.recreate.inbox', carried.items.length === 4 && carried.items.some(row => row.attention.message_ref.id === 'net-04')
+  check('net.recreate.inbox', carried.items.length === 6 && carried.items.some(row => row.attention.message_ref.id === 'net-04')
     ? '' : `the recreated node saw ${carried.items.length} obligations: ${carried.items.map(row => row.attention.message_ref.id).join(',')}`);
   const injectedBefore = netA.shared.injected.length;
   await nodeA2.client.maintain();
@@ -369,7 +424,7 @@ async function phaseNet(): Promise<void> {
     ? '' : 'maintain did not re-inject the entry the runtime never consumed');
   await nodeA2.client.reconcile();
   const rows = (await nodeA2.messages.inbox(authA2)).items;
-  check('net.recreate.all_acked', rows.length === 4 && rows.every(row => row.attention.acked)
+  check('net.recreate.all_acked', rows.length === 6 && rows.every(row => row.attention.acked)
     ? '' : `${rows.filter(row => !row.attention.acked).length} of ${rows.length} obligations stayed unacked`);
 }
 
@@ -542,6 +597,22 @@ async function phaseResources(): Promise<void> {
   check('resources.handover.after_expiry', returned.state === 'committed'
     && (await node.resources.describe(authK, ref)).assignee === keeperNode
     ? '' : `handover after an expiry sweep did not commit: ${JSON.stringify(returned)}`);
+
+  // RFC 0006 §6 / 0012 §5: a first-recipient ack arriving after retention expiry keeps its
+  // receipt evidence, clears any leftover once, and never revives the expired obligation.
+  const afterExpiry = await node.resources.receive(authK, ref, {
+    source_id: 'platform-3', data: { text: '过期之后到达的确认' }, expires_at: new Date(clock.value - 1_000).toISOString(),
+  });
+  await node.resources.recover();
+  const terminal = await node.resources.event(authK, ref, afterExpiry.event_id);
+  check('resources.expire.terminal', terminal.expired === true ? '' : 'retention left the obligation without a terminal disposition');
+  const lateAck = await node.resources.ack(authK, ref, afterExpiry.event_id, mut());
+  check('resources.expire.late_ack_evidence', lateAck.expired === true && lateAck.acknowledged.includes(keeperNode)
+    ? '' : `a late ack lost its receipt evidence: ${JSON.stringify(lateAck)}`);
+  const repeat = await node.resources.ack(authK, ref, afterExpiry.event_id, mut());
+  check('resources.expire.late_ack_idempotent',
+    repeat.acknowledged.filter(actor => actor === keeperNode).length === 1
+      ? '' : `a repeated ack recorded the receipt twice: ${JSON.stringify(repeat.acknowledged)}`);
 
   // One operation id executes once; the replay reads back the recorded result.
   const request = { ...mut(), operation_id: crypto.randomUUID(), operation: 'read' };

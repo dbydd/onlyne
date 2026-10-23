@@ -2,20 +2,20 @@
 
 ```vdm
 module Binding
+imports
+  from Identity types NodeId renamed NodeId
 exports
-  types NodeId; Revision; EventId; struct Prepare
+  types Revision; EventId; struct Prepare
   operations
     Receive: EventId ==> ();
     Handover: NodeId * Revision ==> ();
     Commit: () ==> ();
     Abort: () ==> ();
-    Ack: EventId ==> ();
+    Ack: EventId * NodeId ==> ();
+    Expire: EventId ==> ();
     Recipient: EventId ==> NodeId
 definitions
 types
-  -- 节点身份；模型只比较相等，不读内部结构
-  NodeId = token;
-
   -- 版本；每次提交获得从未使用的值，旧值不复用
   Revision = nat;
 
@@ -27,16 +27,17 @@ types
     target : NodeId  -- 接受接手的节点
     expected : Revision;  -- 发起时看到的版本
 
-  -- 绑定面：当前归属、当前版本、首次归属、已确认事件与未终结准备
+  -- 绑定面：当前归属、版本、事件处置与未终结准备
 state BindingState of
   assignee : NodeId  -- 当前有权处理新事件的节点
   revision : Revision  -- 当前绑定版本
   firstOwner : map EventId to NodeId  -- 每条事件首次接收时的归属
   acked : set of EventId  -- 接收者已持久保存的事件
+  expired : set of EventId  -- 保留期已清除投递义务的事件
   prepare : [Prepare]  -- 尚未终结的交接准备
-  inv mk_BindingState(-, r, f, a, p) ==
-    (p = nil or p.expected = r) and a subset dom f
-  init r == r = mk_BindingState(mk_token(1), 0, {|->}, {}, nil)
+  inv mk_BindingState(-, r, f, a, x, p) ==
+    (p = nil or p.expected = r) and (a union x) subset dom f
+  init r == r = mk_BindingState(mk_token(1), 0, {|->}, {}, {}, nil)
 end
 
 operations
@@ -53,11 +54,11 @@ operations
   pre expected = revision and prepare = nil
   post prepare = mk_Prepare(target, expected);
 
-  -- 提交交接准备；存在未确认事件时拒绝
+  -- 交接生效边界；仍欠投递责任时不得更换处理者
   Commit()
-  ext rd firstOwner rd acked wr assignee wr revision wr prepare
+  ext rd firstOwner rd acked rd expired wr assignee wr revision wr prepare
   pre prepare <> nil and prepare.expected = revision
-      and dom firstOwner subset acked
+      and dom firstOwner subset (acked union expired)
   post assignee = prepare~.target
        and revision = revision~ + 1
        and prepare = nil;
@@ -69,10 +70,16 @@ operations
   post prepare = nil;
 
   -- 接收者确认已持久保存该事件；确认只清积压，不改归属
-  Ack(e: EventId)
+  Ack(e: EventId, actor: NodeId)
   ext rd firstOwner wr acked
-  pre e in set dom firstOwner
+  pre e in set dom firstOwner and actor = firstOwner(e)
   post acked = acked~ union {e};
+
+  -- 保留期到达时终结投递义务；重复到达不产生新处置
+  Expire(e: EventId)
+  ext rd firstOwner wr expired
+  pre e in set dom firstOwner
+  post expired = expired~ union {e};
 
   -- 取事件的投送接收者；取首次归属
   Recipient(e: EventId) r: NodeId

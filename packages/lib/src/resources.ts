@@ -504,10 +504,15 @@ export function createResourceService(ctx: Context): ResourceService {
         if (!event.recipients.includes(auth.actor) && !mayRead(resource, auth.actor)) fail('not_found', 'The requested event is unavailable.');
         if (event.recipients[0] !== auth.actor) fail('forbidden', 'Only the first recipient acknowledges this event.');
         const pending = await tx.get<PendingEvent[]>(pendingKey(ref));
-        // Expired is a terminal state written by the retention sweep; acknowledging it clears the leftover rather than reviving it.
+        // Expired is a terminal state written by the retention sweep. A first-recipient ack
+        // arriving afterwards keeps its receipt evidence and clears any leftover, but it
+        // never revives the obligation or writes a second removal (0006 §6, 0012 §5).
         if (event.expired) {
           if (pending) await tx.put(pendingKey(ref), pending.filter(item => item.event.event_id !== id));
-          return event;
+          if (event.acknowledged.includes(auth.actor)) return event;
+          const evidenced: ResourceEvent = { ...event, acknowledged: [...event.acknowledged, auth.actor] };
+          await tx.put(eventKey(ref, id), evidenced);
+          return evidenced;
         }
         if (event.acknowledged.includes(auth.actor)) return event;
         const updated: ResourceEvent = { ...event, acknowledged: [...event.acknowledged, auth.actor] };

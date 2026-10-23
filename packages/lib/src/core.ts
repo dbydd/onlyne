@@ -66,6 +66,8 @@ export interface Context {
   deadline(retry_until: string): void;
   mutate<T>(auth: Auth, operation: string, mutation: Mutation, body: unknown, work: (tx: Transaction) => Promise<T>): Promise<T>;
 }
+
+
 export function createContext(options: NodeOptions): Context {
   const ctx: Context = {
     node: options.node_id, baseUrl: options.base_url, storage: options.plugins.storage, options,

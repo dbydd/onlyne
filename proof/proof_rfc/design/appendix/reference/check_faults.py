@@ -20,6 +20,9 @@ MODULES = [
     "attention_feed_race",
     "ack_authority_race",
     "backlog_expiry_liveness",
+    "effect_overlap",
+    "todo_effect_overlap",
+    "reply_exposure_overlap",
 ]
 
 

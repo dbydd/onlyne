@@ -4,6 +4,7 @@ import { ThreadService } from './threads.js';
 import { MessageService } from './messages.js';
 import { createResourceService } from './resources.js';
 import type { ResourceService } from './resources.js';
+import { DomainService } from './domains.js';
 import { OnlyneClient } from './client.js';
 import { FetchTransport } from './transport.js';
 import { createHttpHandler } from './http.js';
@@ -12,6 +13,7 @@ export class OnlyneNode {
   readonly threads: ThreadService;
   readonly messages: MessageService;
   readonly resources: ResourceService;
+  readonly domains: DomainService;
   readonly client: OnlyneClient;
   readonly fetch: (request: Request) => Promise<Response>;
   readonly auth: Auth;
@@ -23,7 +25,10 @@ export class OnlyneNode {
     this.messages = new MessageService(ctx);
     this.resources = createResourceService(ctx);
     const transport = options.plugins.transport ?? new FetchTransport(options.plugins.resolve);
-    this.client = new OnlyneClient(ctx, transport, this.messages, this.threads, this.resources);
-    this.fetch = createHttpHandler({ ctx, threads: this.threads, messages: this.messages, resources: this.resources });
+    this.domains = new DomainService(ctx, transport);
+    this.client = new OnlyneClient(ctx, transport, this.messages, this.threads, this.resources, this.domains);
+    this.fetch = createHttpHandler({
+      ctx, threads: this.threads, messages: this.messages, resources: this.resources, domains: this.domains,
+    });
   }
 }

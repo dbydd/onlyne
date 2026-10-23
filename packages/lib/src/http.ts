@@ -1,12 +1,14 @@
 import { OnlyneError, canonical, fail, same } from './core.js';
 import type { Context } from './core.js';
 import type {
-  Auth, DeliveryPlan, Event, Grant, Json, Member, Message, MessageQuery, Mutation, PageOptions,
+  Auth, DeliveryPlan, DomainMutation, Event, Grant, Json, Member, Message, MessageQuery, Mutation, PageOptions,
   OperationRequest, ReadScope, Resource, ResourceEvent, SendRequest,
 } from './types.js';
 import type { ThreadService } from './threads.js';
 import type { MessageService } from './messages.js';
 import type { ResourceService } from './resources.js';
+import type { DomainService } from './domains.js';
+import { validateDomainId } from './domains.js';
 
 const PREFIX = '/onlyne/v3';
 const DEFAULT_BYTES = 1_048_576;
@@ -18,6 +20,7 @@ export interface HttpServices {
   threads: ThreadService;
   messages: MessageService;
   resources: ResourceService;
+  domains: DomainService;
 }
 
 function record(value: unknown, field: string): Record<string, unknown> {
@@ -291,17 +294,21 @@ function eventBody(value: unknown): { source_id: string; data: Json; expires_at?
   };
 }
 
-function description(ctx: Context, auth: Auth | null): Json {
+async function description(ctx: Context, auth: Auth | null, domains: DomainService): Promise<Json> {
+  const active = auth === null
+    ? undefined
+    : (await domains.list(auth, { page_size: 100 })).items.find(membership => membership.state === 'active');
   return {
     protocol: 'onlyne/3',
     node_id: ctx.node,
     base_url: ctx.baseUrl,
-    domain: null,
-    ingress: false,
-    features: ['threads', 'messages', 'events', 'resources'],
+    features: ['threads', 'messages', 'events', 'resources', 'domains'],
     // The binding never names a scheme its authenticator did not choose; an authenticated
     // caller may learn the identity its own credential maps to, and nothing else.
     authentication: auth === null ? [] : [`actor:${auth.actor}`],
+    // Domain membership is a private fact of this node, so only an authenticated caller sees it.
+    // A node belongs to at most one domain; threads and ingress are what cross domains.
+    ...(auth === null ? {} : { domain: active?.domain_id ?? null }),
     discovery: { resolvable: false },
     limits: { request_bytes: ctx.options.request_bytes ?? DEFAULT_BYTES },
     idempotency_max_seconds: Math.floor((ctx.options.retry_max_ms ?? 86_400_000) / 1000),
@@ -334,7 +341,7 @@ function expect(request: Request, allowed: string): void {
 }
 
 /** Maps `/onlyne/v3` HTTP requests onto the services. The caller owns the server lifecycle. */
-export function createHttpHandler({ ctx, threads, messages, resources }: HttpServices): (request: Request) => Promise<Response> {
+export function createHttpHandler({ ctx, threads, messages, resources, domains }: HttpServices): (request: Request) => Promise<Response> {
   const limit = ctx.options.request_bytes ?? DEFAULT_BYTES;
 
   async function authenticate(request: Request): Promise<Auth> {
@@ -473,7 +480,7 @@ export function createHttpHandler({ ctx, threads, messages, resources }: HttpSer
         expect(request, 'GET');
         let auth: Auth | null = null;
         try { auth = await ctx.options.plugins.authenticate(request); } catch { auth = null; }
-        return respond(description(ctx, auth));
+        return respond(await description(ctx, auth, domains));
       }
 
       const auth = await authenticate(request);
@@ -528,6 +535,42 @@ export function createHttpHandler({ ctx, threads, messages, resources }: HttpSer
         expect(request, 'POST');
         const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until']);
         return respond(await threads.ackGrant(auth, path[1]!, mutation(request, raw)));
+      }
+
+      if (path.length === 1 && path[0] === 'domains') {
+        if (request.method === 'GET') return respond(await domains.list(auth, pageOptions(params)));
+        if (request.method === 'POST') {
+          const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until']);
+          // Membership belongs to the node that holds it; a peer's credential never mutates it.
+          ctx.owner(auth.actor);
+          return respond(await domains.create(auth, mutation(request, raw)), 201);
+        }
+        fail('not_found', 'Unknown route.');
+      }
+
+      if (path.length === 2 && path[0] === 'domains') {
+        expect(request, 'GET');
+        return respond(await domains.describe(auth, validateDomainId(path[1])));
+      }
+
+      if (path.length === 3 && path[0] === 'domains') {
+        const id = validateDomainId(path[1]);
+        if (path[2] === 'members') {
+          expect(request, 'GET');
+          return respond(await domains.discover(auth, id, request.signal));
+        }
+        if (path[2] === 'join' || path[2] === 'leave') {
+          expect(request, 'POST');
+          const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until', 'expected_revision']);
+          const expected = optionalString(raw.expected_revision, 'expected_revision');
+          ctx.owner(auth.actor);
+          const change: DomainMutation = {
+            ...mutation(request, raw),
+            ...(expected === undefined ? {} : { expected_revision: expected }),
+          };
+          return respond(await (path[2] === 'join' ? domains.join(auth, id, change) : domains.leave(auth, id, change)));
+        }
+        fail('not_found', 'Unknown route.');
       }
 
       if (path.length >= 3 && path[0] === 'threads') {

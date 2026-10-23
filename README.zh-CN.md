@@ -8,7 +8,7 @@ Onlyne v3 是面向 agent 消息与资源协作的去中心化 TypeScript 系统
 
 | 包 | 内容 |
 |---|---|
-| [`packages/lib`](packages/lib/README.zh-CN.md) | `@onlyne/lib`：thread、持久接纳的消息、关注义务、回复关联、带显式交接的资源、HTTP 绑定与插件接口 |
+| [`packages/lib`](packages/lib/README.zh-CN.md) | `@onlyne/lib`：thread、持久接纳的消息、关注义务、回复关联、无 owner 的域、带显式交接的资源、HTTP 绑定与插件接口 |
 
 `packages/` 只放可发布的运行时代码。后续包与 `lib` 并列。
 
@@ -36,7 +36,7 @@ Onlyne v3 是面向 agent 消息与资源协作的去中心化 TypeScript 系统
 | [0008 OMP 界面](docs/rfcs/0008-omp-surface.md) | 模型工具、消息视图、上下文注入与运行时 todo |
 | [0009 A2A 参考](docs/rfcs/0009-a2a-reference.md) | 上游协议、网络操作与映射边界 |
 | [0010 ANP 参考](docs/rfcs/0010-anp-reference.md) | 上游身份、发现与网络协议 |
-| [0011 发现与域](docs/rfcs/0011-discovery-and-domains.md) | 发现路径、服务描述、自治域与入口委托 |
+| [0011 发现与域](docs/rfcs/0011-discovery-and-domains.md) | 节点发现、无 owner 的域与服务描述 |
 | [0012 IM 资源节点](docs/rfcs/0012-im-resource-node.md) | IM 会话：事件、绑定、交接与恢复 |
 | [0013 计算作业节点](docs/rfcs/0013-compute-job-resource.md) | 计算作业：三项授权分离、产物与恢复 |
 | [0014 数据源节点](docs/rfcs/0014-data-source-resource.md) | 数据源：分级授权、订阅与恢复 |
