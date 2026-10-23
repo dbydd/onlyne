@@ -1,9 +1,12 @@
 # Onlyne
 
+`v3.0` 分支用于开发 Onlyne 3.0。v2 实现位于 [`archive/`](archive/)，以下文档描述 v2。
+设计文档保留在 [`docs/`](docs/)。v2 源码命令从 `archive/` 执行，例如 `cargo build --workspace`。
+
 ![Onlyne — 面向 Coding-Agent 团队的本地优先消息路由与会话传输层](assets/promo/onlyne-hero.svg)
 
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![rust](https://img.shields.io/badge/rust-1.85%2B-orange)](Cargo.toml)
+[![rust](https://img.shields.io/badge/rust-1.85%2B-orange)](archive/Cargo.toml)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#安装)
 
 **[English README](README.md)** · **[Wiki 首页](docs/wiki/Home.md)** · **[快速上手](docs/wiki/Quickstart.md)** · **[CLI 速查](docs/wiki/CLI-Reference.md)** · **[IM 网关](docs/wiki/IM-Gateway.md)** · **[System One 决策反射弧](docs/wiki/System-One-Decider.md)**

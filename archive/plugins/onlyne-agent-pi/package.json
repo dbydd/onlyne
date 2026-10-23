@@ -7,12 +7,12 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dbydd/onlyne.git",
-    "directory": "plugins/onlyne-agent-pi"
+    "directory": "archive/plugins/onlyne-agent-pi"
   },
   "bugs": {
     "url": "https://github.com/dbydd/onlyne/issues"
   },
-  "homepage": "https://github.com/dbydd/onlyne/tree/main/plugins/onlyne-agent-pi#readme",
+  "homepage": "https://github.com/dbydd/onlyne/tree/main/archive/plugins/onlyne-agent-pi#readme",
   "files": [
     "src",
     "onlyne.json.example"

@@ -1,9 +1,13 @@
 # Onlyne
 
+The `v3.0` branch prepares Onlyne 3.0. The v2 implementation lives in [`archive/`](archive/).
+The documentation below describes v2. Its design documents remain in [`docs/`](docs/).
+Run v2 source commands from `archive/`, including `cargo build --workspace` and `cargo run -p onlyne-cli -- --help`.
+
 ![Onlyne — Local-first message routing and session layer for coding-agent teams](assets/promo/onlyne-hero.svg)
 
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![rust](https://img.shields.io/badge/rust-1.85%2B-orange)](Cargo.toml)
+[![rust](https://img.shields.io/badge/rust-1.85%2B-orange)](archive/Cargo.toml)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#install)
 
 **[中文文档](README.zh-CN.md)** · **[Wiki](docs/wiki/Home.md)** · **[Quickstart](docs/wiki/Quickstart.md)** · **[CLI Reference](docs/wiki/CLI-Reference.md)** · **[IM Gateway](docs/wiki/IM-Gateway.md)** · **[System One Decider](docs/wiki/System-One-Decider.md)**

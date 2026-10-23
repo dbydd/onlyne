@@ -1,5 +1,12 @@
 # Onlyne Execution Contract (v2)
 
+## Branch and archive scope
+
+The `v3.0` branch prepares Onlyne 3.0. The v2 implementation lives under `archive/`.
+This contract and `docs/v2*` describe the archived implementation. Resolve source paths and run v2 build commands from `archive/`.
+Root documentation remains available for reference. The v3 design will be settled separately.
+The user's branch instruction authorizes work on `v3.0` in this checkout.
+
 This repository builds a **small, Rust-based channel and routing layer for agents, scoped to a workspace**.
 
 Read this file before changing anything. `docs/v2-PLAN.md` is the settled design and this file's source; where the two disagree, the plan wins and this file is stale.

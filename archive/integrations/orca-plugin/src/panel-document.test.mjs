@@ -5,10 +5,12 @@
 // own script keeps the ages honest.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 import { collectBoard } from "./board.mjs";
@@ -27,6 +29,7 @@ import {
 import { committedText, fakeOnlyne, fakeOrca, roleRow, sessionRow, tabRow } from "./testing.mjs";
 
 const ROOT = "/srv/cluster";
+const PANEL_FILE = fileURLToPath(new URL("../panel.html", import.meta.url));
 
 async function boardFixture({ tabs = [tabRow()], sessions = [sessionRow()], roles = [roleRow()], failures = {}, roots = [ROOT], tabFailure = null } = {}) {
   return collectBoard({
@@ -42,6 +45,23 @@ function embeddedPayload(html) {
   );
   assert.ok(block, "the document must embed the snapshot");
   return JSON.parse(block[1].replace(/\\u003c/g, "<"));
+}
+
+/**
+ * The panel file's path relative to the git toplevel, or null when this copy is
+ * not a git checkout at all. `git show HEAD:<path>` reads from the toplevel, so
+ * the path must be spelled from there wherever the checkout itself sits.
+ */
+function committedPanelPath() {
+  try {
+    const toplevel = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: dirname(PANEL_FILE),
+      encoding: "utf8",
+    }).trim();
+    return relative(toplevel, PANEL_FILE);
+  } catch {
+    return null;
+  }
 }
 
 test("the document shows the summary, the role groups and the stray tabs", async () => {
@@ -321,8 +341,9 @@ test("the committed placeholder is the packaged-install degradation", () => {
   // A vendored copy that is not a git checkout keeps the shipped file, so it is
   // asserted from there; in the repository the answer comes from git, because a
   // dev install rewrites the working copy by design (this whole module).
-  const committed = committedText("integrations/orca-plugin/panel.html");
-  const html = committed ?? readFileSync(new URL("../panel.html", import.meta.url), "utf8");
+  const path = committedPanelPath();
+  const committed = path === null ? null : committedText(path);
+  const html = committed ?? readFileSync(PANEL_FILE, "utf8");
 
   assert.match(html, new RegExp(PANEL_PLACEHOLDER_MARKER));
   assert.equal(html.includes(PANEL_GENERATED_MARKER), false);
