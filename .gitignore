@@ -1,13 +1,13 @@
 target*
 .omx
-# Pi editor and agent state at the repository root only: a nested .pi/ is deliberately outside this rule, because docs/v1-PLAN.md §11 line 374 lists <role>/.pi/settings.json and .pi/onlyne.json as role template content truth that a versioned template tree must track.
+# Root agent state is local. Archived role templates remain trackable.
 /.pi/
 /.pi*/
 # Runtime Onlyne trees stay out of the index: <server-root>/.onlyne/ and <workspace>/.onlyne/.
 .onlyne/
 # omp's own agent state at the repository root (memory, receipts).
 /.omp/
-# Role template content truth carries one .onlyne/config.toml local-override fragment per role (docs/v1-PLAN.md §11 line 374), so a .onlyne directory below a templates path stays trackable.
+# Archived role templates include versioned client configuration fragments.
 !**/templates/**/.onlyne/
 __pycache__/
 *.pyc
@@ -19,3 +19,5 @@ archive/.omp/
 # Operator credentials for the IM gateway example: filled in locally, never
 # committed. `.env.example` beside `.env` is the tracked template.
 .env
+node_modules/
+dist/

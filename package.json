@@ -1,0 +1,13 @@
+{
+  "name": "onlyne",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "check": "bun run --filter '@onlyne/lib' check",
+    "test": "bun run --filter '@onlyne/lib' test"
+  }
+}

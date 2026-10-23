@@ -1,0 +1,19 @@
+{
+  "name": "@onlyne/lib",
+  "version": "3.0.0",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts",
+    "./memory": "./src/memory.ts"
+  },
+  "files": ["src", "README.md", "LICENSE"],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun tests/verify.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}
