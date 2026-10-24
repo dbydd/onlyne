@@ -20,14 +20,17 @@ From a role directory, for example `regions/research-chamber/lazuli`:
 
 ```sh
 omp --no-extensions --no-skills --no-rules \
-  -e ~/.omp/plugins/node_modules/omp-todo-more/index.ts \
   -e ../../../../../packages/omp-onlyne/index.ts
 ```
 
-`--no-extensions` disables discovery; the two `-e` flags are the complete
+`--no-extensions` disables discovery; the single `-e` flag is the complete
 extension set. `--no-skills` and `--no-rules` keep the test free of the machine's
 usual agent configuration. OMP must start in the role directory so its project
 config lives in that directory.
+
+If `omp-todo-more` is installed and you want its richer todo surface, add
+`-e ~/.omp/plugins/node_modules/omp-todo-more/index.ts` before the plugin flag.
+The plugin works without it and falls back to OMP's native todo.
 
 Run `/onlyne init`. The form asks for:
 
