@@ -363,6 +363,24 @@ export class OnlyneClient {
     if (failures.length > 1) throw new AggregateError(failures, 'Some owed records could not be settled; the rest were.');
   }
 
+  /**
+   * Whether any durable record still needs a local pass: an unacked grant notice, an
+   * owed todo, an uninjected inbox row, or an outbound stuck pending/unknown. A scheduler
+   * consults this before running `maintain`, so an idle node costs no rounds; anything
+   * that flips this on (an admission, an ack, a failed delivery) also wakes the host.
+   */
+  async hasPendingWork(): Promise<boolean> {
+    return this.#ctx.storage.transaction(async tx => {
+      const inbox = await tx.scan<LocalAttention>(key('inbox') + '/');
+      if (inbox.some(row => !row.value.attention.acked || !row.value.injected && row.value.attention.entry !== undefined && row.value.attention.disposition !== 'expired')) return true;
+      const todos = await tx.scan<PendingTodo>(key('todo') + '/');
+      if (todos.some(row => !row.value.done)) return true;
+      const outbound = await tx.scan<StoredOutbound>(key('outbound') + '/');
+      if (outbound.some(row => row.value.digest !== undefined && (row.value.state === 'pending' || row.value.state === 'unknown'))) return true;
+      return false;
+    });
+  }
+
   /** Replays todos that are owed but whose hook has not succeeded, in thread order. */
   async #replayTodos(signal: AbortSignal | undefined, failures: unknown[]): Promise<void> {
     const owed = await this.#ctx.storage.transaction(async tx =>

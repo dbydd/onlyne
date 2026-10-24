@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type ExtensionAPI, type ExtensionContext, z } from "@oh-my-pi/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, type SessionEntry, z } from "@oh-my-pi/pi-coding-agent";
 import type { Json, MsgInput, SendOutcome } from "@onlyne/lib";
 import { runDecision } from "./decider.ts";
 import { observeToolResult } from "./messages.ts";
@@ -7,6 +7,8 @@ import { getRuntime } from "./runtime.ts";
 
 /** Custom entry naming a reply an `await` returned, left pending for the host bridge to confirm. */
 export const AWAIT_RESULT = "onlyne.await-result";
+/** The custom entry type naming an await result the model has actually read. */
+export const AWAIT_CONSUMED = "onlyne.await-consumed";
 
 const parameters = z.object({
 	delivery_kind: z.string().min(1).describe("The delivery intent in natural language"),
@@ -91,6 +93,30 @@ function recordAwaitResult(pi: ExtensionAPI, toolCallId: string, result: unknown
 		state: "pending",
 		at: new Date().toISOString(),
 	});
+}
+
+/**
+ * Marks every pending await result on the active branch as consumed. The
+ * `before_provider_request` scan only sees entries still in `pending`, so a
+ * consumed one costs nothing and cannot fire twice. The marker is durable:
+ * after a restart the pending entry is re-armed only if no marker names it.
+ */
+export function markAwaitConsumed(pi: ExtensionAPI, branch: readonly SessionEntry[]): void {
+	const pendingResults = branch.filter((entry): entry is SessionEntry & { customType: typeof AWAIT_RESULT; data: Record<string, unknown> } =>
+		entry.type === "custom" && entry.customType === AWAIT_RESULT
+		&& (entry.data as { state?: unknown } | undefined)?.state === "pending");
+	for (const entry of pendingResults) {
+		const data = entry.data as { tool_call_id?: unknown };
+		if (typeof data.tool_call_id !== "string") continue;
+		pi.appendEntry(AWAIT_CONSUMED, {
+			tool_call_id: data.tool_call_id,
+			ref: (entry.data as { ref?: unknown }).ref,
+			thread_ref: (entry.data as { thread_ref?: unknown }).thread_ref,
+			seq: (entry.data as { seq?: unknown }).seq,
+			context: (entry.data as { context?: unknown }).context,
+			at: new Date().toISOString(),
+		});
+	}
 }
 
 function failure(text: string): AgentToolResult<{ result: unknown }> {

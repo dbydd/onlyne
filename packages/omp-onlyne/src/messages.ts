@@ -6,6 +6,7 @@ import { Text } from "@oh-my-pi/pi-tui";
 import type { JudgeDecider } from "./decider.ts";
 import type { ContextRegistry } from "./store.ts";
 import type { ContextRecord } from "./types.ts";
+import { markAwaitConsumed } from "./tool.ts";
 import { applyMessageTodo, type TodoPlanner } from "./todo.ts";
 import { getRuntime } from "./runtime.ts";
 
@@ -51,6 +52,7 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 			};
 			await applyMessageTodo(entry, context, planner);
 		},
+		wake: () => getRuntime()?.wake(),
 	};
 }
 
@@ -74,6 +76,14 @@ export function observeToolResult(toolCallId: string, entry: Entry, context: str
 }
 export function registerProviderBoundary(pi: ExtensionAPI): void {
 	pi.on("before_provider_request", (event, ctx) => {
+		// The model is about to run with the tool result in context: that turn is the
+		// consumption. Marking here is durable, so a restart cannot re-arm an old result,
+		// and the marker keeps the scan from confirming the same result twice.
+		try {
+			markAwaitConsumed(pi, ctx.sessionManager.getBranch());
+		} catch (error) {
+			pi.logger.warn("onlyne await-result marking failed", { error: error instanceof Error ? error.message : String(error) });
+		}
 		const text = typeof event.payload === "string" ? event.payload : JSON.stringify(event.payload);
 		const found: string[] = [];
 		for (const token of pending.keys()) if (text.includes(token)) found.push(token);

@@ -59,6 +59,7 @@ export class MessageService {
       }
     });
     if ('error' in outcome) throw new OnlyneError(outcome.error.code, outcome.error.message, outcome.error.details);
+    this.ctx.options.plugins.runtime?.wake?.();
     return requireValue(outcome.receipt);
   }
 

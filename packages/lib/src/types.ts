@@ -139,6 +139,8 @@ export interface Runtime {
   /** Submission returns consumed:false; an observed request boundary may confirm it later. */
   inject(entry: Entry, context?: string, plan?: DeliveryPlan): Promise<{ context: string; consumed: boolean }>;
   todo?(entry: Entry, context: string): Promise<void>;
+  /** The host may drop to an idle cadence; an admission or a settled reply flips it back. */
+  wake?(): void;
   /**
    * Called by the host once it observes that the model consumed an `await` tool result
    * (RFC 0008 §5). The library records that as the shared consumption for the entry's

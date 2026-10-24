@@ -22,6 +22,8 @@ export interface PluginRuntime {
 	snapshot(): Promise<ViewerSnapshot>;
 	status(): Promise<OnlyneStatus>;
 	onChange(listener: () => void): () => void;
+	/** Flip the maintenance loop back to its active cadence after an inbound or a send. */
+	wake(): void;
 	contact(endpoint: string): Promise<void>;
 	refreshDiscovery(): Promise<void>;
 	updateConfig(next: OnlyneConfig): Promise<void>;
@@ -46,6 +48,10 @@ export async function stopRuntime(): Promise<void> { await active?.close(); }
 
 /** How often the discovery catalog is re-observed; well inside the library's 120 s freshness window. */
 const DISCOVERY_REFRESH_MS = 30_000;
+/** The idle floor between maintenance passes once no durable work is pending. */
+const IDLE_MAINTAIN_MS = 30_000;
+/** The active interval while a pass found pending work or an inbound just landed. */
+const ACTIVE_MAINTAIN_MS = 2_000;
 
 class OmpRuntime implements PluginRuntime {
 	readonly contexts: ContextRegistry;
@@ -57,6 +63,8 @@ class OmpRuntime implements PluginRuntime {
 	private server?: ReturnType<typeof Bun.serve>;
 	private network?: NetworkDiscovery;
 	private timer?: ReturnType<ExtensionContext["setInterval"]>;
+	private timerMs = ACTIVE_MAINTAIN_MS;
+	private idle = false;
 	private maintenance?: Promise<void>;
 	private discoveryError?: string;
 	/** Last time the discovery catalog was re-observed; a record expires after 120 s. */
@@ -120,8 +128,19 @@ class OmpRuntime implements PluginRuntime {
 		try { await this.network.start(); } catch (error) { this.pi.logger.warn("onlyne DNS-SD discovery is unavailable", { error: errorText(error) }); }
 		await this.contexts.ensureMain();
 		await this.node.client.recover(this.controller.signal);
-		this.timer = this.main.setInterval(() => this.maintain(), 2_000);
+		this.timer = this.main.setInterval(() => this.maintain(), this.timerMs);
 		this.pi.logger.info("onlyne listening", { endpoint: this.endpoint, node: this.config.node.id, region: this.config.region });
+	}
+	/** An inbound admission or a send flips the loop back to its active cadence. */
+	wake(): void {
+		if (this.timerMs !== ACTIVE_MAINTAIN_MS) {
+			this.timerMs = ACTIVE_MAINTAIN_MS;
+			if (this.timer !== undefined) {
+				this.main.clearTimer(this.timer);
+				this.timer = this.main.setInterval(() => this.maintain(), this.timerMs);
+			}
+		}
+		this.changed();
 	}
 	private maintain(): void {
 		if (this.closed || this.maintenance) return;
@@ -139,9 +158,31 @@ class OmpRuntime implements PluginRuntime {
 			for (const step of steps) {
 				try { await step(); } catch (error) { if (!this.closed) this.pi.logger.warn("onlyne maintenance failed", { error: errorText(error) }); }
 			}
-			this.changed();
+			void this.rearm();
 		})();
 		this.maintenance = pass.finally(() => { this.maintenance = undefined; });
+	}
+	/**
+	 * After a pass, the next tick's cadence follows the durable ledger: pending work keeps
+	 * the active interval; an idle node drops to the idle floor, so an empty cluster runs
+	 * no judge and no network rounds until something lands. `hasPendingWork` is one local
+	 * SQLite scan, never a model call.
+	 */
+	private async rearm(): Promise<void> {
+		if (this.closed) return;
+		let pending = true;
+		try { pending = await this.node.client.hasPendingWork(); }
+		catch { /* unknown state keeps the active cadence */ }
+		const next = pending || !this.idle ? ACTIVE_MAINTAIN_MS : IDLE_MAINTAIN_MS;
+		this.idle = !pending;
+		if (next !== this.timerMs) {
+			this.timerMs = next;
+			if (this.timer !== undefined) {
+				this.main.clearTimer(this.timer);
+				this.timer = this.main.setInterval(() => this.maintain(), this.timerMs);
+			}
+		}
+		this.changed();
 	}
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
 	private changed(): void { for (const listener of this.listeners) listener(); }
