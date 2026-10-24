@@ -306,16 +306,21 @@ export class OnlyneViewer implements Component {
 	}
 
 	private messageRow(message: ViewerMessage, selected: boolean): BodyRow {
+		const marker = message.direction === "out" ? "→" : "←";
+		const relation = message.relation === undefined ? "" : ` · ${message.relation}`;
 		return {
-			left: [
-				[selected ? "> " : "  ", "muted"],
-				[this.messageHead(message), "strong"],
-				[` · ${oneLine(message.text)}`, "muted"],
+			left: [[marker, message.direction === "out" ? "accent" : "muted"]],
+			right: [
+				[`${clockText(message.at)} · ${message.author.split(":").pop() ?? message.author}${relation}`, "muted"],
+				[` · ${oneLine(message.text)}`, ""],
 			],
 			selected,
 			act: `onlyne.message:${message.seq}`,
 			key: message.seq,
-			card: { head: this.messageHead(message), description: oneLine(message.text) },
+			card: {
+				head: `${marker} ${clockText(message.at)} · ${message.author.split(":").pop() ?? message.author}${relation}`,
+				description: oneLine(message.text),
+			},
 		};
 	}
 
@@ -558,7 +563,7 @@ export class OnlyneViewer implements Component {
 			return node(
 				"card",
 				{
-					variant: "bare",
+					...(row.selected === true ? {} : { variant: "bare" as const }),
 					selected: row.selected === true,
 					...(actions === undefined ? {} : { actions: { click: actions } }),
 					...(actions === undefined ? {} : { title: asCard.head }),
@@ -579,7 +584,7 @@ export class OnlyneViewer implements Component {
 			{ gap: "sm", align: "start" },
 			[
 				node("card", {
-					variant: "bare",
+					...(row.selected === true ? {} : { variant: "bare" as const }),
 					selected: row.selected === true,
 					...(row.leftAct === undefined ? {} : { actions: { click: row.leftAct } }),
 				}, [textNode(this.spans(row.left), { wrap: "none", truncate: "end" })], `${row.key ?? index}/left`),

@@ -1,8 +1,8 @@
 import { dirname, join } from "node:path";
-import { FetchTransport, OnlyneError, type DiscoveryCandidate, type DiscoveryRecord, type Entry, type LocalAttention, type OnlyneNode, type Outbound, type Page, type Thread } from "@onlyne/lib";
+import { FetchTransport, OnlyneError, type DiscoveryCandidate, type DiscoveryRecord, type Entry, type LocalAttention, type OnlyneNode, type Outbound, type Page, type Thread, type ThreadRef } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { currentDecision, JudgeDecider } from "./decider.ts";
-import { ConfigError, loadConfig, saveConfig } from "./config.ts";
+import { ConfigError, loadConfig, saveConfig, shortNodeId } from "./config.ts";
 import { createRuntimeBridge } from "./messages.ts";
 import { advertisedHost, createOnlyneNode } from "./node.ts";
 import { NetworkDiscovery } from "./network.ts";
@@ -226,15 +226,35 @@ class OmpRuntime implements PluginRuntime {
 		const contexts = await this.contexts.list();
 		const records = await this.node.discovery.listRecords();
 		const inbox = await allPages(cursor => this.node.messages.inbox(this.node.auth, { page_size: 100, cursor }));
-		const threads = await allPages(cursor => this.node.threads.list(this.node.auth, { page_size: 100, cursor }));
 		const views: ViewerThread[] = [];
-		for (const thread of threads) {
-			const entries = await allPages(cursor => this.node.messages.list(this.node.auth, thread.thread_ref, { attention: "thread", page_size: 100, cursor }));
-			views.push({ alias: thread.thread_ref.id, title: thread.title, state: thread.state,
-				unread: inbox.filter(item => !item.injected && item.attention.thread_ref.owner === thread.thread_ref.owner && item.attention.thread_ref.id === thread.thread_ref.id).length,
+		// Hosted threads are read locally. A thread this node only belongs to lives on its
+		// owner, so it is shown from the attention rows already held here; the viewer never
+		// reaches across the network.
+		const hosted = new Set<string>();
+		for (const thread of await allPages(cursor => this.node.threads.list(this.node.auth, { page_size: 100, cursor }))) {
+			const ref = thread.thread_ref;
+			hosted.add(`${ref.owner}/${ref.id}`);
+			const entries = await allPages(cursor => this.node.messages.list(this.node.auth, ref, { attention: "thread", page_size: 100, cursor }));
+			views.push({ alias: ref.id, title: thread.title, state: thread.state,
+				unread: inbox.filter(item => !item.injected && item.attention.thread_ref.owner === ref.owner && item.attention.thread_ref.id === ref.id).length,
 				last_seq: entries.at(-1)?.seq ?? "0", messages: entries.map(entry => ({ seq: entry.seq, direction: entry.message.sender === this.config.node.id ? "out" : "in", author: entry.authenticated_author, at: entry.at, text: entry.message.msg, relation: entry.message.meta?.relation })),
 			});
 		}
+		const seen = new Map<string, ViewerThread>();
+		for (const item of inbox) {
+			const ref = item.attention.thread_ref;
+			const key = `${ref.owner}/${ref.id}`;
+			if (hosted.has(key)) continue;
+			const view = seen.get(key) ?? { alias: ref.id, title: `来自 ${shortNodeId(ref.owner)} 的线程`, state: "open", unread: 0, last_seq: "0", messages: [] };
+			seen.set(key, view);
+			if (!item.injected) view.unread++;
+			const entry = item.attention.entry;
+			if (entry !== undefined) {
+				view.messages.push({ seq: entry.seq, direction: entry.message.sender === this.config.node.id ? "out" : "in", author: entry.authenticated_author, at: entry.at, text: entry.message.msg, relation: entry.message.meta?.relation });
+				view.last_seq = entry.seq;
+			}
+		}
+		views.push(...seen.values());
 		const outbound = await this.storage.transaction(tx => tx.scan<Outbound>("outbound/"));
 		const queue: QueueItem[] = inbox.filter(item => !item.injected).map(item => ({ id: `inbound:${item.attention.obligation_id}`, kind: "inbound", label: `${item.attention.thread_ref.id}/${item.attention.seq}`, detail: `${item.attention.authenticated_author} · pending consumption`, at: item.attention.entry?.at }));
 		queue.push(...contexts.filter(record => record.state === "running" || record.state === "unbound").map(record => ({ id: `context:${record.alias}`, kind: "context" as const, label: record.alias, detail: `${record.summary} · ${record.state}`, at: record.created_at })));
