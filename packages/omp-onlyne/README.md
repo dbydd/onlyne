@@ -65,6 +65,11 @@ Subagent sessions may read only the context slice attached to their own agent
 identity and may not send; the main agent owns the node identity and the reply
 path.
 
+`AGENTS.sample.md` is the agent-facing half of that surface. Copy it into the
+host project's `AGENTS.md`: it states that `msg` is the only entry, that a send's
+`admission` is the delivery fact rather than the wait, and that replies arrive as
+inbound messages so a send needs no polling.
+
 ## Run
 
 ```sh

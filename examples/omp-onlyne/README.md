@@ -14,6 +14,11 @@ empty: the first run creates the project config through `/onlyne init`. There is
 no central server and no fake peer. A thread is created by the first message;
 the example predefines none.
 
+`AGENTS.md` in this directory is the contract every role session reads: `msg` is
+the only entry, a send's `admission` is the delivery fact, and a reply arrives on
+its own as an inbound message. OMP loads it from a parent directory, so starting
+any role below this path is enough; `--no-rules` disables rule files, not this.
+
 ## Launch one role
 
 From a role directory, for example `regions/research-chamber/lazuli`:
