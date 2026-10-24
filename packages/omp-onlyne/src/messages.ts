@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { Text } from "@oh-my-pi/pi-tui";
-import type { JudgeDecider } from "./decider.ts";
+import type { InboundDecision, JudgeDecider } from "./decider.ts";
 import type { ContextRegistry } from "./store.ts";
 import type { ContextRecord } from "./types.ts";
 import { AWAIT_CONSUMED, pendingAwaitResults } from "./tool.ts";
@@ -21,6 +21,20 @@ export interface BridgeDeps {
 	contexts: ContextRegistry;
 	nodeId: string;
 }
+/**
+ * One inbound entry is judged once per process. A retry replays the recorded decision
+ * and, at most, the delivery it names; asking the judge again would turn the
+ * maintenance tick into a model poll (RFC 0005 §1: one message gets one action).
+ */
+interface InboundAttempt {
+	decision: InboundDecision;
+	landed?: string;
+}
+const inboundAttempts = new Map<string, InboundAttempt>();
+
+function inboundKey(entry: Entry): string {
+	return `${entry.thread_ref.owner}/${entry.thread_ref.id}/${entry.seq}`;
+}
 export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 	return {
 		async supports(plan: DeliveryPlan): Promise<boolean> {
@@ -28,9 +42,19 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 			return taskTool(deps.main) !== undefined;
 		},
 		async inject(entry: Entry, context?: string, plan?: DeliveryPlan) {
-			const decision = plan?.execution === "new" ? { action: "new_subagent" as const } : await deps.decider.decideInbound(deps.main, entry);
+			if (plan?.execution === "new") return { context: await startSubagent(deps, entry), consumed: true };
+			const key = inboundKey(entry);
+			const attempt = inboundAttempts.get(key) ?? { decision: await deps.decider.decideInbound(deps.main, entry) };
+			inboundAttempts.set(key, attempt);
+			const { decision } = attempt;
 			if (decision.action === "queue") return { context: context ?? deps.main.agent.id, consumed: false };
-			if (decision.action === "new_subagent") return { context: await startSubagent(deps, entry), consumed: true };
+			if (decision.action === "new_subagent") {
+				attempt.landed ??= await startSubagent(deps, entry);
+				return { context: attempt.landed, consumed: true };
+			}
+			// The body is already where the decision put it; re-sending it would append a
+			// second copy that the cursor can only confirm once.
+			if (attempt.landed !== undefined) return { context: attempt.landed, consumed: false };
 			if (decision.action === "context") {
 				const alias = decision.context;
 				if (alias === undefined) throw new OnlyneError("decision_unavailable", "The inbound decision named no context.");
@@ -38,21 +62,28 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				if (record?.agent_id === undefined) throw new OnlyneError("not_found", `No live context is registered as ${alias}.`);
 				const token = registerPending(entry, record.agent_id, "fragment");
 				await deliverToContext(record.agent_id, payload(entry, SUPPLEMENT, token), record.state === "running");
+				attempt.landed = record.agent_id;
 				return { context: record.agent_id, consumed: false };
 			}
-			if (decision.action === "wait_result") return { context: context ?? deps.main.agent.id, consumed: false };
 			const token = registerPending(entry, deps.main.agent.id, "fragment");
 			if (decision.action === "wake") deps.pi.sendMessage(payload(entry, INBOUND, token), { triggerTurn: true });
 			else deps.pi.sendMessage(payload(entry, INBOUND, token), { deliverAs: "nextTurn" });
+			attempt.landed = deps.main.agent.id;
 			return { context: deps.main.agent.id, consumed: false };
 		},
 		todo: async (entry, context) => {
+			inboundAttempts.delete(inboundKey(entry));
 			const planner: TodoPlanner = {
 				decideTodo: (incoming, current) => deps.decider.decideTodo(deps.main, incoming, current),
 			};
 			await applyMessageTodo(entry, context, planner);
 		},
-		wake: () => getRuntime()?.wake(),
+		wake: () => {
+			// An admission or a send is new evidence for a queued entry: the next pass
+			// judges it again instead of the tick judging it forever.
+			for (const [key, attempt] of inboundAttempts) if (attempt.decision.action === "queue") inboundAttempts.delete(key);
+			getRuntime()?.wake();
+		},
 	};
 }
 

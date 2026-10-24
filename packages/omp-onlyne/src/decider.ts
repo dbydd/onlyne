@@ -79,7 +79,7 @@ export interface DecisionScope {
 }
 
 export interface InboundDecision {
-	action: "fragment" | "wake" | "queue" | "context" | "new_subagent" | "wait_result";
+	action: "fragment" | "wake" | "queue" | "context" | "new_subagent";
 	context?: string;
 }
 
@@ -152,7 +152,7 @@ export class JudgeDecider {
 		const questions = this.#inboundQuestions(state);
 		const answers = await this.#judge(scope, state, questions);
 		const action = choice(answers, "action");
-		if (action === "fragment" || action === "wake" || action === "queue" || action === "new_subagent" || action === "wait_result") {
+		if (action === "fragment" || action === "wake" || action === "queue" || action === "new_subagent") {
 			return { action };
 		}
 		if (action !== "context") {
@@ -681,14 +681,13 @@ export class JudgeDecider {
 			action: {
 				type: "choice",
 				instructions:
-					"Decide how this inbound Onlyne message should be handled in this OMP session. fragment: add it to the next model context without starting a turn. wake: add it and start a turn now. queue: keep it pending because the session must not handle it yet. context: deliver it into one of the registered execution contexts. new_subagent: start independent new work in a fresh subagent. wait_result: this message is the reply an in-flight await is waiting for.",
+					"Decide how this inbound Onlyne message should be handled in this OMP session. fragment: add it to the next model context without starting a turn. wake: add it and start a turn now. queue: keep it pending because the session must not handle it yet. context: deliver it into one of the registered execution contexts. new_subagent: start independent new work in a fresh subagent.",
 				criteria: {
 					fragment: "The message belongs in the main session's next context but does not need a turn now.",
 					wake: "The message should start work in the main session now.",
 					queue: "The session is busy, in plan mode, or otherwise must not receive the message yet.",
 					context: "The message is a supplement or continuation for one registered execution context.",
 					new_subagent: "The message asks for fresh, independent work that no registered context is already doing.",
-					wait_result: "The message answers a message this session is currently awaiting.",
 				},
 			},
 		};
