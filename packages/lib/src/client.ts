@@ -855,7 +855,13 @@ export class OnlyneClient {
   async #consume(entry: Entry, record: LocalAttention): Promise<void> {
     const runtime = this.#ctx.options.plugins.runtime;
     if (runtime === undefined || record.injected) return;
-    const requested = record.context ?? record.attention.plan?.context ?? this.#ctx.options.node_id;
+    const related = entry.message.meta?.in_reply_to;
+    const outbound = related?.sender === this.#ctx.options.node_id
+      ? await this.#ctx.storage.transaction(tx => tx.get<StoredOutbound>(outboundKey(related.sender, related.id)))
+      : undefined;
+    const replyContext = outbound !== undefined && outbound.expected_author === entry.authenticated_author
+      && isReply(outbound.request.message, entry) ? outbound.local_context ?? this.#ctx.options.node_id : undefined;
+    const requested = replyContext ?? record.context ?? record.attention.plan?.context ?? this.#ctx.options.node_id;
     // An await that owns this reply's body in that context either still holds the call or
     // already returned it as a tool result. Presenting the same body as a fragment here
     // would duplicate it; the await's confirmation releases the hold.

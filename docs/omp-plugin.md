@@ -320,6 +320,12 @@ pi.registerTool({
 4. 宿主确认在模型上下文完成该工具结果的渲染后，插件调用 `client.confirmToolResult(reply, context)` 提交已消费事实。
 5. 提交动作将已消费状态原子写入 `(context, ThreadRef, seq)` 消费记录中。
 
+回复的本地消费身份从原出站记录的 `local_context` 取得，例如 `Main`。只有作者匹配且 `in_reply_to` 指向原消息的合法回复才使用这个身份。接收方的 `plan.context` 继续用于接收方执行路由。等待中的回复与返回工具结果后的 hold 都按发送方身份阻止重复片段。
+
+工具收到 `reply_body: "withheld"` 时，向模型及工具详情仅输出 thread、seq、消息 sender/id、作者与到达时间。消息正文、parts 与 data 留在原始记录中。该输出不再登记新的正文消费确认。
+
+`onlyne.await-result` 与对应工具结果共同保存待确认回复。插件在 provider 请求中匹配工具调用 id，并在成功响应后提交消费记录。提交成功后追加一次 `onlyne.await-consumed`。未确认的记录可从活动分支恢复；请求失败时保留待确认状态。
+
 ## 6. 来信注入与消费确认流转
 
 来信入站由后台监听服务接收。每条来信都交给 SystemOne 判定投递计划，插件按计划执行。插件不按宿主忙闲自行决定注入、排队或唤醒。

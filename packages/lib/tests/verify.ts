@@ -315,7 +315,7 @@ async function phaseNet(): Promise<void> {
   };
   // The awaited reply is consumed by the sender's own session, not by the
   // receiver-side execution context named in the wire plan.
-  const pending = nodeA.client.send(dpdpNode, ask, awaitPlan, { context: lazuliNode });
+  const pending = nodeA.client.send(dpdpNode, ask, awaitPlan, { context: 'Main' });
   const landed = await waitFor(async () =>
     (await nodeB.messages.list(authB, ref, { attention: 'thread' })).items.some(entry => entry.message.id === 'net-02'));
   check('net.send.admitted', landed ? '' : 'the peer never admitted the sent message');
@@ -327,7 +327,8 @@ async function phaseNet(): Promise<void> {
   });
   const outcome = await polling(pending, () => nodeA.client.reconcile());
   check('net.send.await', outcome.admission === 'accepted' && outcome.wait === 'answered'
-    && outcome.reply?.message.msg === '复核完成，数据可用。'
+    && outcome.reply?.message.msg === '复核完成，数据可用。' && outcome.reply_body === undefined
+    && !netA.shared.injected.some(entry => entry.message.id === 'net-03')
     ? '' : `await did not resolve: admission=${outcome.admission} wait=${outcome.wait ?? 'none'} reply=${outcome.reply?.message.msg ?? 'none'}`);
   check('net.send.receipt', outcome.receipt?.seq === '2' && outcome.receipt?.guarantee === 'binding-defined'
     ? '' : `unexpected receipt ${JSON.stringify(outcome.receipt)}`);
@@ -335,7 +336,7 @@ async function phaseNet(): Promise<void> {
   // The host confirms the tool result it rendered; only that confirmation advances the shared
   // record, never the submission itself (RFC 0008 §5).
   if (outcome.reply !== undefined && outcome.reply_body === undefined) {
-    await nodeA.client.confirmToolResult(outcome.reply, lazuliNode);
+    await nodeA.client.confirmToolResult(outcome.reply, 'Main');
   }
   await nodeA.client.reconcile();
 
@@ -352,7 +353,7 @@ async function phaseNet(): Promise<void> {
   const inlineBody = outcome.reply_body === undefined ? 1 : 0;
   check('net.send.await.body_once', injectedOnce + inlineBody === 1
     ? '' : `the reply body was rendered ${injectedOnce + inlineBody} times (fragment=${injectedOnce}, tool=${inlineBody})`);
-  check('net.send.await.no_second_body', fragmentRow?.injected === true
+  check('net.send.await.no_second_body', fragmentRow?.injected === true && fragmentRow.context === 'Main'
     ? '' : 'the reply obligation never reached a delivered state');
 
   // The reverse order: the automatic fragment consumes the body first, so the awaited tool
@@ -365,7 +366,7 @@ async function phaseNet(): Promise<void> {
   // the tool result record resolve to the same slot.
   // Send without waiting first, so the automatic fragment is the path that consumes
   // the reply before a later await registers for the same original.
-  const firstSend = await nodeA.client.send(dpdpNode, askAgain, plan, { context: lazuliNode });
+  const firstSend = await nodeA.client.send(dpdpNode, askAgain, plan, { context: 'Main' });
   check('net.send.await.fragment_first_admitted', firstSend.admission === 'accepted'
     ? '' : `the fragment-first request was not admitted: ${firstSend.admission}`);
   await waitFor(async () =>
@@ -387,7 +388,7 @@ async function phaseNet(): Promise<void> {
   });
   // A later await for the same original finds the reply already consumed by that fragment,
   // so it reports arrival facts without rendering the body a second time.
-  const secondReply = await nodeA.client.send(dpdpNode, askAgain, awaitPlan, { context: lazuliNode });
+  const secondReply = await nodeA.client.send(dpdpNode, askAgain, awaitPlan, { context: 'Main' });
   const fragmentFirst = netA.shared.injected.some(entry => entry.message.id === 'net-07');
   check('net.send.await.withheld_after_fragment', secondReply.wait === 'answered'
     && secondReply.reply?.message.id === 'net-07' && secondReply.reply_body === 'withheld' && fragmentFirst && fragmentConsumed

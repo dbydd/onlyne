@@ -61,9 +61,10 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 					}),
 				);
 				recordAwaitResult(pi, toolCallId, result, ctx);
+				const visible = visibleResult(result);
 				return {
-					content: [{ type: "text", text: JSON.stringify({ result }, null, 2) }],
-					details: { result },
+					content: [{ type: "text", text: JSON.stringify({ result: visible }, null, 2) }],
+					details: { result: visible },
 				};
 			} catch (error) {
 				return failure(error instanceof Error ? error.message : String(error));
@@ -79,6 +80,7 @@ export function registerMsgTool(pi: ExtensionAPI): void {
  */
 function recordAwaitResult(pi: ExtensionAPI, toolCallId: string, result: unknown, ctx: ExtensionContext): void {
 	if (result === null || typeof result !== "object") return;
+	if ((result as Partial<SendOutcome>).reply_body === "withheld") return;
 	const reply = (result as Partial<SendOutcome>).reply;
 	if (reply === null || reply === undefined || typeof reply !== "object") return;
 	if (typeof reply.seq !== "string" || typeof reply.thread_ref?.owner !== "string" || typeof reply.thread_ref.id !== "string") return;
@@ -95,28 +97,36 @@ function recordAwaitResult(pi: ExtensionAPI, toolCallId: string, result: unknown
 	});
 }
 
-/**
- * Marks every pending await result on the active branch as consumed. The
- * `before_provider_request` scan only sees entries still in `pending`, so a
- * consumed one costs nothing and cannot fire twice. The marker is durable:
- * after a restart the pending entry is re-armed only if no marker names it.
- */
-export function markAwaitConsumed(pi: ExtensionAPI, branch: readonly SessionEntry[]): void {
-	const pendingResults = branch.filter((entry): entry is SessionEntry & { customType: typeof AWAIT_RESULT; data: Record<string, unknown> } =>
-		entry.type === "custom" && entry.customType === AWAIT_RESULT
-		&& (entry.data as { state?: unknown } | undefined)?.state === "pending");
-	for (const entry of pendingResults) {
-		const data = entry.data as { tool_call_id?: unknown };
-		if (typeof data.tool_call_id !== "string") continue;
-		pi.appendEntry(AWAIT_CONSUMED, {
-			tool_call_id: data.tool_call_id,
-			ref: (entry.data as { ref?: unknown }).ref,
-			thread_ref: (entry.data as { thread_ref?: unknown }).thread_ref,
-			seq: (entry.data as { seq?: unknown }).seq,
-			context: (entry.data as { context?: unknown }).context,
-			at: new Date().toISOString(),
-		});
-	}
+function visibleResult(result: unknown): unknown {
+	if (result === null || typeof result !== "object") return result;
+	const outcome = result as Partial<SendOutcome>;
+	if (outcome.reply_body !== "withheld" || outcome.reply === undefined) return result;
+	const { thread_ref, seq, authenticated_author, reply_authority, at, message } = outcome.reply;
+	return {
+		...outcome,
+		reply: {
+			thread_ref, seq, authenticated_author, reply_authority, at,
+			message: { sender: message.sender, id: message.id },
+		},
+	};
+}
+
+export function pendingAwaitResults(branch: readonly SessionEntry[]): Array<{ toolCallId: string; context: string; entry: NonNullable<SendOutcome["reply"]> }> {
+	const consumed = new Set(branch.flatMap(entry => entry.type === "custom" && entry.customType === AWAIT_CONSUMED
+		&& typeof (entry.data as { tool_call_id?: unknown })?.tool_call_id === "string"
+		? [(entry.data as { tool_call_id: string }).tool_call_id] : []));
+	const results = new Map(branch.flatMap(entry => entry.type === "message" && entry.message.role === "toolResult"
+		? [[entry.message.toolCallId, entry.message] as const] : []));
+	return branch.flatMap(entry => {
+		if (entry.type !== "custom" || entry.customType !== AWAIT_RESULT) return [];
+		const data = entry.data as { tool_call_id?: unknown; context?: unknown; ref?: { sender?: unknown; id?: unknown } } | undefined;
+		if (typeof data?.tool_call_id !== "string" || typeof data.context !== "string" || consumed.has(data.tool_call_id)) return [];
+		const outcome = (results.get(data.tool_call_id)?.details as { result?: Partial<SendOutcome> } | undefined)?.result;
+		const reply = outcome?.reply;
+		if (outcome?.reply_body === "withheld" || typeof reply?.message?.msg !== "string"
+			|| reply.message.sender !== data.ref?.sender || reply.message.id !== data.ref?.id) return [];
+		return [{ toolCallId: data.tool_call_id, context: data.context, entry: reply }];
+	});
 }
 
 function failure(text: string): AgentToolResult<{ result: unknown }> {

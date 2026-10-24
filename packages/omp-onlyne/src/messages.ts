@@ -6,7 +6,7 @@ import { Text } from "@oh-my-pi/pi-tui";
 import type { JudgeDecider } from "./decider.ts";
 import type { ContextRegistry } from "./store.ts";
 import type { ContextRecord } from "./types.ts";
-import { markAwaitConsumed } from "./tool.ts";
+import { AWAIT_CONSUMED, pendingAwaitResults } from "./tool.ts";
 import { applyMessageTodo, type TodoPlanner } from "./todo.ts";
 import { getRuntime } from "./runtime.ts";
 
@@ -76,26 +76,21 @@ export function observeToolResult(toolCallId: string, entry: Entry, context: str
 }
 export function registerProviderBoundary(pi: ExtensionAPI): void {
 	pi.on("before_provider_request", (event, ctx) => {
-		// The model is about to run with the tool result in context: that turn is the
-		// consumption. Marking here is durable, so a restart cannot re-arm an old result,
-		// and the marker keeps the scan from confirming the same result twice.
-		try {
-			markAwaitConsumed(pi, ctx.sessionManager.getBranch());
-		} catch (error) {
-			pi.logger.warn("onlyne await-result marking failed", { error: error instanceof Error ? error.message : String(error) });
+		for (const result of pendingAwaitResults(ctx.sessionManager.getBranch())) {
+			if (result.context === ctx.agent.id) observeToolResult(result.toolCallId, result.entry, result.context);
 		}
 		const text = typeof event.payload === "string" ? event.payload : JSON.stringify(event.payload);
 		const found: string[] = [];
-		for (const token of pending.keys()) if (text.includes(token)) found.push(token);
+		for (const [token, record] of pending) if (record.context === ctx.agent.id && text.includes(token)) found.push(token);
 		for (const [toolCallId, record] of toolResults) {
-			if (!text.includes(toolCallId)) continue;
+			if (record.context !== ctx.agent.id || !text.includes(toolCallId)) continue;
 			pending.set(`tool:${toolCallId}`, record);
 			toolResults.delete(toolCallId);
 			found.push(`tool:${toolCallId}`);
 		}
 		observed.set(ctx.agent.id, found);
 	});
-	pi.on("after_provider_response", (event, ctx) => {
+	pi.on("after_provider_response", async (event, ctx) => {
 		const tokens = observed.get(ctx.agent.id) ?? [];
 		observed.delete(ctx.agent.id);
 		if (event.status >= 400) return;
@@ -104,10 +99,17 @@ export function registerProviderBoundary(pi: ExtensionAPI): void {
 		for (const token of tokens) {
 			const record = pending.get(token);
 			if (!record) continue;
-			pending.delete(token);
-			void runtime.node.client.confirmConsumption(record.entry, record.context, record.kind).catch(error => {
+			try {
+				await runtime.node.client.confirmConsumption(record.entry, record.context, record.kind);
+				if (record.kind === "tool_result") pi.appendEntry(AWAIT_CONSUMED, {
+					tool_call_id: token.slice("tool:".length), context: record.context,
+					ref: { sender: record.entry.message.sender, id: record.entry.message.id },
+					thread_ref: record.entry.thread_ref, seq: record.entry.seq, at: new Date().toISOString(),
+				});
+				pending.delete(token);
+			} catch (error) {
 				pi.logger.warn("onlyne consumption confirmation failed", { error: error instanceof Error ? error.message : String(error) });
-			});
+			}
 		}
 	});
 }
