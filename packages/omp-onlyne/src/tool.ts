@@ -16,12 +16,15 @@ const parameters = z.object({
 	meta: z.record(z.string(), z.unknown()).optional().describe("Explicit references and operation fields"),
 });
 
-const DESCRIPTION = `Send, reply to, read or manage Onlyne threads and resources through one entry.
+const DESCRIPTION = `The only surface for Onlyne messages, threads and resources. There is no CLI and nothing else to look up: call this tool with your intent instead of reading docs or source first.
 
-Use delivery_kind for the intent ("ask reviewer to check the data", "reply to this request", "show the thread"). Put explicit references in meta:
-to (a node id from the node directory, or an unambiguous short alias), thread, context, in_reply_to {thread,seq}, relation (reply|followup), mentions, message {sender,id} or {thread,seq}, resource {owner,id}, operation, op (create|close|list|describe|member_add|member_remove), title, scope (directory|threads|inbox|messages|message|evidence), seq, attention (inbox|thread), cursor, page_size, data, domain_id.
+Shape: { delivery_kind, msg, meta }. delivery_kind names the intent in plain language ("reply to dpdp's greeting", "show this thread", "read that message"). meta carries references you already know: to, thread, context, in_reply_to {thread,seq} or {sender,id}, relation (reply|followup), mentions, message {sender,id} or {thread,seq}, resource {owner,id}, operation, op, title, scope, seq, attention, cursor, page_size, data, domain_id.
 
-The plugin sends the request to OMP's judge role, which chooses the action and delivery plan. The result reports the plan that actually ran. Never guess a message id, idempotency key or revision. A reply or followup must state its relation; omitting it is rejected rather than assumed. A reply's target is the original reply authority, so a conflicting to is rejected. execution existing names a context the target publishes; execution new never allocates one here. Subagent sessions may read their own slice but may not send; return the result to the main agent instead.`;
+A send is one call. The result is the delivery fact: admission "accepted" means the receiver recorded the message; wait "timed_out" only means no reply arrived before the wait bound, the message is still delivered; reply_body "withheld" means this context already showed that body. Report the outcome and stop there.
+
+A reply arrives by itself. The plugin injects it as an onlyne.inbound message and starts a turn; you do not need to check. Do not poll after a send: no inbox scans, thread reads, evidence queries, log greps or SQLite lookups. Read state only when the user asks about history, or when a specific fact is missing from the result in hand.
+
+The judge role chooses the action and plan from your intent, so never invent message ids, idempotency keys or revisions. A reply or followup states its relation; omitting it is rejected rather than assumed. A reply targets the original reply authority, so a conflicting to is rejected. Subagent sessions read their slice but cannot send; return the result so the main agent can send it.`;
 
 export function registerMsgTool(pi: ExtensionAPI): void {
 	pi.registerTool({
@@ -65,7 +68,7 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 				const visible = visibleResult(result);
 				pi.logger.info("onlyne.msg.result", { kind: input.delivery_kind, ms: Date.now() - started, ...outcomeFacts(result) });
 				return {
-					content: [{ type: "text", text: JSON.stringify({ result: visible }, null, 2) }],
+					content: [{ type: "text", text: `${summary(result)}\n\n${JSON.stringify(visible, null, 2)}` }],
 					details: { result: visible },
 				};
 			} catch (error) {
@@ -77,6 +80,40 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 			}
 		},
 	});
+}
+
+/**
+ * The outcome as one sentence. A structured result invites a key-by-key search —
+ * `wait: timed_out` beside `admission: accepted` reads as a contradiction until the
+ * reader knows the contract — so the delivery fact is stated first and the JSON below
+ * it is for the rare case that needs a machine-readable detail.
+ */
+export function summary(result: unknown): string {
+	if (result === null || typeof result !== "object") return "Onlyne returned no structured result.";
+	const outcome = result as Partial<SendOutcome>;
+	const owner = outcome.receipt?.thread_ref?.owner ?? outcome.reply?.thread_ref.owner;
+	const where = owner === undefined ? "" : ` to ${owner}`;
+	const ref = outcome.receipt === undefined ? undefined : `thread ${outcome.receipt.thread_ref.id} seq ${outcome.receipt.seq}`;
+	const facts = ref === undefined ? "" : ` (${ref})`;
+	if (outcome.admission !== undefined) {
+		if (outcome.admission !== "accepted") {
+			const failure = outcome.error === undefined ? outcome.admission : `${outcome.error.code}: ${outcome.error.message}`;
+			return `Not confirmed: ${failure}. The record stays open for recovery; do not re-send the same intent.`;
+		}
+		if (outcome.wait === "answered" && outcome.reply !== undefined) {
+			return outcome.reply_body === "withheld"
+				? `Delivered${where}${facts}. ${outcome.reply.authenticated_author} answered at seq ${outcome.reply.seq}, but that body was already shown in this context, so only its arrival is reported.`
+				: `Delivered${where}${facts}. ${outcome.reply.authenticated_author} answered at seq ${outcome.reply.seq}.`;
+		}
+		if (outcome.wait === "timed_out") {
+			return `Delivered${where}${facts} and recorded durably. No reply arrived within the wait; it will arrive on its own as an inbound message.`;
+		}
+		if (outcome.wait === "cancelled") {
+			return `Delivered${where}${facts} and recorded durably. The wait was cancelled; a reply will arrive on its own as an inbound message.`;
+		}
+		return `Delivered${where}${facts} and recorded durably.`;
+	}
+	return "Onlyne answered; the structured result follows.";
 }
 
 /** The facts one `msg` call produced, without the reply body. */
