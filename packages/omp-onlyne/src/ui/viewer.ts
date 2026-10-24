@@ -3,12 +3,14 @@ import {
 	type DescribeContext,
 	type NativeNode,
 	type NativeUiEvent,
+	type NativeScroll,
 	type Theme,
 	type TspSpan,
 	matchesKey,
 	node,
 	span,
 	text as textNode,
+	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import { shortNodeId } from "../config.ts";
 import { getRuntime } from "../runtime.ts";
@@ -24,8 +26,7 @@ const PAGES: readonly { id: Page; label: string }[] = [
 	{ id: "contacts", label: "联系人" },
 ];
 
-const FOOTER = "1-4 切页 · j/k 移动 · space 连接 · r 刷新 · Esc 关闭";
-const DETAIL_ROWS = 3;
+const FOOTER = "1-4 切页 · j/k 移动 · space 连接 · enter 详情 · r 刷新 · Esc 关闭";
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -63,6 +64,8 @@ export class OnlyneViewer implements Component {
 	private discoveryIndex = 0;
 	private contactIndex = 0;
 	private expanded = false;
+	/** Bumped per scroll key while the detail pane is open; the terminal scrolls its body. */
+	private detailScroll: NativeScroll | undefined;
 	private notice: { text: string; error: boolean } | undefined;
 	private noticeTimer: Timer | undefined;
 	private ages = new Map<string, string>();
@@ -329,25 +332,25 @@ export class OnlyneViewer implements Component {
 		};
 	}
 
-	/** The selected message's fixed detail area: its head plus up to two text lines. */
-	private detailCells(count: number): Cell[][] {
+	/**
+	 * The detail band: a rule, the message head, then the body clamped to the band's
+	 * remaining lines. The native path swaps the body for the scrollable ansi block.
+	 */
+	private detailRows(count: number): BodyRow[] {
 		if (count <= 0) return [];
 		const message = this.selectedThread()?.messages[this.messageIndex];
-		if (message === undefined) return Array.from({ length: count }, () => []);
-		const rows: Cell[][] = [
-			[
-				["↳ ", "muted"],
-				[this.messageHead(message), "dim"],
-			],
-		];
-		const lines = message.text.split("\n");
-		for (let index = 0; rows.length < count; index++) rows.push([[lines[index] ?? ""]]);
+		if (message === undefined) return Array.from({ length: count }, () => ({ left: [] as Cell[] }));
+		const bodyLines = Math.max(1, count - 2);
+		const lines = wrapTextWithAnsi(message.text, this.lastWidth).slice(0, bodyLines);
+		const rows: BodyRow[] = [{ left: [["─".repeat(Math.max(1, this.lastWidth - 2)), "muted"]], key: "detail-rule" }];
+		rows.push({ left: [["↳ ", "muted"], [this.messageHead(message), "dim"]], key: "detail-head" });
+		for (const line of lines) rows.push({ left: [[line]], key: `detail-body-${rows.length}` });
 		return rows.slice(0, count);
 	}
 
 	private chatLayout(width: number): { stacked: boolean; threadHeight: number; messageHeight: number; detailHeight: number; threadWidth: number } {
 		const body = this.bodyHeight();
-		const detail = this.expanded && (this.selectedThread()?.messages.length ?? 0) > 0 ? DETAIL_ROWS : 0;
+		const detail = this.expanded && (this.selectedThread()?.messages.length ?? 0) > 0 ? Math.max(4, Math.floor(body / 3)) : 0;
 		if (width >= 92) {
 			const detailHeight = Math.min(detail, Math.max(0, body - 1));
 			return {
@@ -378,10 +381,7 @@ export class OnlyneViewer implements Component {
 		const messageRows = messageWindow.items.map((message, offset) =>
 			this.messageRow(message, messageWindow.start + offset === this.messageIndex),
 		);
-		const detailRows = this.detailCells(layout.detailHeight).map((cells, index) => ({
-			left: cells,
-			key: `detail-${index}`,
-		}));
+		const detailRows = this.detailRows(layout.detailHeight);
 
 		if (layout.stacked) {
 			const rows: BodyRow[] = [{ left: [[`Threads · ${threads.length}`, "muted"]], key: "threads-head" }];
@@ -644,7 +644,8 @@ export class OnlyneViewer implements Component {
 	describe(cx: DescribeContext): NativeNode {
 		this.lastWidth = cx.cols;
 		const height = this.bodyHeight();
-		const key = `${this.version}:${cx.cols}:${height}`;
+		const detail = this.detailOverlay(cx);
+		const key = `${this.version}:${cx.cols}:${height}:${this.detailScroll?.n ?? 0}`;
 		if (this.described !== undefined && this.describedKey === key) return this.described;
 		const children: NativeNode[] = [
 			this.titleNode(),
@@ -653,9 +654,45 @@ export class OnlyneViewer implements Component {
 			...this.bodyRows(cx.cols).map((row, index) => this.describeRow(row, index)),
 			this.footerNode(),
 		];
-		this.described = node("card", { role: "onlyne.viewer" }, children);
+		this.described = node("card", { role: "onlyne.viewer" }, detail === undefined ? children : [...children, detail]);
 		this.describedKey = key;
 		return this.described;
+	}
+
+	/**
+	 * The selected message's full text as a sheet anchored to the bottom of the pane,
+	 * shown while the detail band is open. The body is one `ansi` block clamped to the
+	 * band's height: the terminal scrolls it, and the j/k and page keys reach it as
+	 * `scroll` requests (raw-sse's stream page works the same way).
+	 */
+	private detailOverlay(cx: DescribeContext): NativeNode | undefined {
+		if (!this.expanded) return undefined;
+		const message = this.selectedThread()?.messages[this.messageIndex];
+		if (message === undefined) return undefined;
+		const body = this.bodyHeight();
+		const lines = Math.max(4, Math.floor(body / 3));
+		const width = Math.max(20, cx.cols - 4);
+		const wrapped = wrapTextWithAnsi(message.text, width);
+		return node(
+			"overlay",
+			{ anchor: "bottom" as const, size: "md" as const, role: "onlyne.detail" },
+			[
+				{
+					...node(
+						"ansi",
+						{
+							text: [this.theme.fg("dim", this.messageHead(message)), ...wrapped].join("\n"),
+							max: { h: `${lines}lines` as const },
+							role: "onlyne.detail.body",
+						},
+						undefined,
+						"detail-body",
+					),
+					...(this.detailScroll === undefined ? {} : { scroll: this.detailScroll }),
+				},
+			],
+			"detail",
+		);
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
@@ -801,8 +838,30 @@ export class OnlyneViewer implements Component {
 		if (matchesKey(data, "enter")) {
 			if (messages.length === 0) return;
 			this.expanded = !this.expanded;
+			if (!this.expanded) this.detailScroll = undefined;
 			this.changed();
 			return;
+		}
+		// With the detail sheet open the movement keys scroll it, like the raw-sse page.
+		if (this.expanded && messages.length > 0) {
+			const by = matchesKey(data, "up") || matchesKey(data, "k")
+				? "line-up" as const
+				: matchesKey(data, "down") || matchesKey(data, "j")
+					? "line-down" as const
+					: matchesKey(data, "pageUp")
+						? "page-up" as const
+						: matchesKey(data, "pageDown")
+							? "page-down" as const
+							: data === "g"
+								? "start" as const
+								: data === "G"
+									? "end" as const
+									: undefined;
+			if (by !== undefined) {
+				this.detailScroll = { by, n: (this.detailScroll?.n ?? 0) + 1 };
+				this.changed();
+				return;
+			}
 		}
 		this.handleListKey("chat", data);
 	}
