@@ -1201,18 +1201,26 @@ export class OnlyneClient {
   }
 
   /**
-   * One message by reference. `evidence` is this node's own outbound record; otherwise
-   * the owner that admitted the message is the only source, and its message list is
-   * where a referenced entry is found (RFC 0004 §2).
+   * One message by reference. `evidence` is this node's own delivery record; a message this
+   * node appended to a thread it hosts never creates one, so its committed entry is the
+   * evidence. Otherwise the owner that admitted the message is the only source, and its
+   * message list is where a referenced entry is found (RFC 0004 §2).
    */
   async #readMessage(action: Extract<Action, { kind: 'read' }>, options: MsgOptions): Promise<unknown> {
     const ref = requireValue(action.message, 'invalid_request');
-    // The evidence view is this node's own delivery record and nothing else: a received
-    // message has no outbound evidence, and answering with the thread entry would be a lie.
     if (action.scope === 'evidence') {
       const record = await this.#ctx.storage.transaction(tx => tx.get<StoredOutbound>(outboundKey(ref.sender, ref.id)));
-      if (record === undefined) fail('not_found', 'This node holds no outbound evidence for that message.');
-      return record;
+      if (record !== undefined) return record;
+      // A reply appended to a hosted thread is committed locally and delivered by that
+      // commit; reporting "no evidence" for it reads as a failed send and invites a
+      // duplicate. A message this node received has another sender, so it stays not_found.
+      const hosted = ref.sender === this.#ctx.options.node_id
+        ? await this.#ctx.storage.transaction(tx => tx.get<Entry>(key('entry-ref', ref.sender, ref.id)))
+        : undefined;
+      if (hosted !== undefined) {
+        return { admission: 'accepted', local: true, entry: hosted, thread_ref: hosted.thread_ref, seq: hosted.seq };
+      }
+      fail('not_found', 'This node holds no outbound evidence for that message.');
     }
     const hosted = await this.#ctx.storage.transaction(tx => tx.get<Entry>(key('entry-ref', ref.sender, ref.id)));
     const thread = action.thread ?? hosted?.thread_ref;
