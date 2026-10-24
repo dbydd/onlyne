@@ -47,6 +47,8 @@ interface BodyRow {
 	rightAct?: string;
 	selected?: boolean;
 	key?: string;
+	/** Card presentation: a head line plus a wrapping description, instead of one flat row. */
+	card?: { head: string; description: string; tone?: string };
 }
 
 /** Read-only view of the current OMP process: queue, threads, discovery and contacts over a fixed body. */
@@ -241,18 +243,22 @@ export class OnlyneViewer implements Component {
 	}
 
 	private titleLine(): string {
-		const title = this.theme.bold("Onlyne");
+		// The overlay sheet already draws `Onlyne` from `nativeOverlay.head`; a second
+		// copy here reads as a duplicated heading.
+		const title = "";
 		if (this.notice === undefined) return title;
 		const notice = this.notice.error ? this.theme.fg("error", this.notice.text) : this.theme.fg("accent", this.notice.text);
 		return `${title}  ${notice}`;
 	}
 
-	private tabLine(): string {
-		const tabs = PAGES.map((page, index) => {
+	private tabLine(width: number): string {
+		// Tabs own their row and fill it: an equal column each, the active one bold.
+		const slot = Math.max(1, Math.floor(width / PAGES.length));
+		return PAGES.map((page, index) => {
 			const label = `${index + 1} ${page.label}`;
-			return page.id === this.page ? this.theme.bold(label) : label;
-		}).join("  ");
-		return `${tabs}   ${this.summaryText()}`;
+			const cell = pad(label, slot);
+			return page.id === this.page ? this.theme.bold(cell) : cell;
+		}).join("");
 	}
 
 	private messageHead(message: ViewerMessage): string {
@@ -276,7 +282,10 @@ export class OnlyneViewer implements Component {
 			if (age !== "") cells.push([` · ${age}`, "muted"]);
 			const detail = oneLine(item.detail);
 			if (detail !== "") cells.push([` · ${detail}`, "muted"]);
-			return { left: cells, selected, act: `onlyne.queue:${item.id}`, key: item.id };
+			return {
+				left: cells, selected, act: `onlyne.queue:${item.id}`, key: item.id,
+				card: { head: item.label, description: [kindLabel(item.kind), detail, age === "" ? "" : age].filter(part => part !== "").join(" · ") },
+			};
 		});
 	}
 
@@ -292,6 +301,7 @@ export class OnlyneViewer implements Component {
 			selected,
 			act: `onlyne.thread:${thread.alias}`,
 			key: thread.alias,
+			card: { head: thread.alias, description: [thread.title, unread.replace(" · ", ""), closed.replace(" · ", "")].filter(part => part !== "").join(" · ") },
 		};
 	}
 
@@ -305,6 +315,7 @@ export class OnlyneViewer implements Component {
 			selected,
 			act: `onlyne.message:${message.seq}`,
 			key: message.seq,
+			card: { head: this.messageHead(message), description: oneLine(message.text) },
 		};
 	}
 
@@ -418,7 +429,13 @@ export class OnlyneViewer implements Component {
 			if (record.region !== undefined) cells.push([` · ${record.region}`, "muted"]);
 			cells.push([` · ${record.base_url}`, "path"], [` · ${record.source}`, "muted"]);
 			if (record.error !== undefined) cells.push([` · ⚠ ${oneLine(record.error)}`, "error"]);
-			rows.push({ left: cells, selected: index === this.discoveryIndex, act: `onlyne.discovery:${index}`, key: record.base_url });
+			const description = [record.region === undefined ? "" : record.region, record.base_url, record.source, record.error === undefined ? "" : oneLine(record.error)]
+				.filter(part => part !== "")
+				.join(" · ");
+			rows.push({
+				left: cells, selected: index === this.discoveryIndex, act: `onlyne.discovery:${index}`, key: record.base_url,
+				card: { head: `${confirmed ? "[x]" : "[ ]"} ${shortNodeId(record.node_id)}`, description, tone: record.error === undefined ? undefined : "warning" },
+			});
 		}
 		return rows;
 	}
@@ -437,7 +454,13 @@ export class OnlyneViewer implements Component {
 			if (contact.region !== undefined) cells.push([` · ${contact.region}`, "muted"]);
 			cells.push([` · ${contact.base_url}`, "path"]);
 			if (age !== "") cells.push([` · ${age}`, "muted"]);
-			return { left: cells, selected: index === this.contactIndex, act: `onlyne.contacts:${index}`, key: `${contact.node_id}/${contact.base_url}` };
+			const description = [contact.region === undefined ? "" : contact.region, contact.base_url, age === "" ? "" : age]
+				.filter(part => part !== "")
+				.join(" · ");
+			return {
+				left: cells, selected: index === this.contactIndex, act: `onlyne.contacts:${index}`, key: `${contact.node_id}/${contact.base_url}`,
+				card: { head: shortNodeId(contact.node_id), description },
+			};
 		});
 	}
 
@@ -477,11 +500,25 @@ export class OnlyneViewer implements Component {
 	}
 
 	private titleNode(): NativeNode {
-		const children: NativeNode[] = [textNode([span("Onlyne", "strong")])];
-		if (this.notice !== undefined) {
-			children.push(textNode([span(this.notice.text, this.notice.error ? "error" : "accent")], { grow: 1, truncate: "end" }));
-		}
-		return node("row", { gap: "sm", align: "baseline" }, children, "title");
+		// No `Onlyne` copy: the sheet head carries it. This row holds the transient
+		// notice only, and is omitted entirely when there is none.
+		if (this.notice === undefined) return node("col", {}, [], "title");
+		return node(
+			"row",
+			{ gap: "sm", align: "baseline" },
+			[textNode([span(this.notice.text, this.notice.error ? "error" : "accent")], { grow: 1, truncate: "end" })],
+			"title",
+		);
+	}
+
+	/** The summary wraps under the title, so a long region URI never squeezes the tabs. */
+	private summaryNode(): NativeNode {
+		return node(
+			"col",
+			{},
+			[textNode([span(this.summaryText(), "muted")], { wrap: "word", truncate: "end" })],
+			"summary",
+		);
 	}
 
 	private tabsNode(): NativeNode {
@@ -498,16 +535,37 @@ export class OnlyneViewer implements Component {
 				`tab-${page.id}`,
 			),
 		);
-		return node(
+		// Each tab grows to an equal share, so the row is filled rather than left-packed.
+		const tabRow = node(
 			"row",
 			{ gap: "sm", align: "center" },
-			[...tabs, textNode([span(this.summaryText(), "muted")], { grow: 1, truncate: "end" })],
+			tabs.map((tab, index) => node("col", { key: `tab-wrap-${index}`, grow: 1 }, [tab], `tab-wrap-${index}`)),
 			"tabs",
 		);
+		return tabRow;
 	}
 
 	private describeRow(row: BodyRow, index: number): NativeNode {
 		const tone = row.selected === true ? "accent" : undefined;
+		// A card is a head line plus a wrapping description; the click target is the whole card.
+		if (row.card !== undefined) {
+			return node(
+				"card",
+				{
+					variant: "bare",
+					selected: row.selected === true,
+					...(row.act === undefined ? {} : { actions: { click: row.act } }),
+					...(row.act === undefined ? {} : { title: row.card.head }),
+				},
+				[
+					// One head row plus one clamped description row keeps the frame at bodyHeight;
+					// the ANSI row already carries the same text as a single line.
+					textNode([span(row.card.head, "strong")], { wrap: "none", truncate: "end", lines: 1 }),
+					textNode([span(row.card.description, "muted")], { wrap: "none", truncate: "end", lines: 1 }),
+				],
+				row.key ?? `row-${index}`,
+			);
+		}
 		if (row.right !== undefined) {
 			return node(
 				"row",
@@ -557,6 +615,7 @@ export class OnlyneViewer implements Component {
 		if (this.described !== undefined && this.describedKey === key) return this.described;
 		const children: NativeNode[] = [
 			this.titleNode(),
+			this.summaryNode(),
 			this.tabsNode(),
 			...this.bodyRows(cx.cols).map((row, index) => this.describeRow(row, index)),
 			this.footerNode(),
@@ -769,11 +828,11 @@ export class OnlyneViewer implements Component {
 		this.lastWidth = width;
 		const key = `${this.version}:${width}`;
 		if (this.rendered !== undefined && this.rendered.key === key) return this.rendered.lines;
-		const lines: string[] = [fit(this.titleLine(), width), fit(this.tabLine(), width)];
+		const lines: string[] = [fit(this.summaryText(), width), fit(this.tabLine(width), width)];
 		for (const row of this.bodyRows(width)) lines.push(this.renderRow(row, width));
 		lines.push(fit(FOOTER, width));
 		this.rendered = { key, lines };
-		return lines;
+		return this.rendered.lines;
 	}
 
 	invalidate(): void {

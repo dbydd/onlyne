@@ -246,11 +246,22 @@ export class DiscoveryService {
     return parsed;
   }
 
-  /** A failure is recorded beside addresses this node already observed; a clue that never verified leaves no record. */
+  /**
+   * A failure is recorded beside addresses this node already observed; a clue that never
+   * verified leaves no record. A record whose freshness window has already lapsed is
+   * deleted instead: a row nobody can reach and nobody would trust as fresh is a
+   * candidate that has to be rediscovered, not a permanent entry.
+   */
   async #failed(base_url: string, source: string, at: number, error: Failure): Promise<void> {
     await this.ctx.storage.transaction(async tx => {
       const rows = (await tx.scan<DiscoveryRecord>(`${PREFIX}/`)).filter(row => row.value.base_url === base_url);
-      for (const row of rows) await tx.put(row.key, { ...row.value, source, received_at: iso(at), error });
+      for (const row of rows) {
+        if (row.value.verified_at !== undefined && Date.parse(row.value.expires_at) > at) {
+          await tx.put(row.key, { ...row.value, source, received_at: iso(at), error });
+          continue;
+        }
+        await tx.delete(row.key);
+      }
     });
   }
 }

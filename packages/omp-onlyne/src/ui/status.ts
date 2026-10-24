@@ -15,13 +15,6 @@ const REGION_PREFIX = "urn:onlyne:region:";
 const REFRESH_MS = 2_000;
 const WIDGET_KEY = "onlyne";
 
-/** One `label value` field of the status row; the value alone when unlabelled. */
-interface Segment {
-	label?: string;
-	value: string;
-	tone?: string;
-}
-
 /** A region URI is stored for stability; the row shows the short name the user typed. */
 function regionLabel(region: string): string {
 	if (!region.startsWith(REGION_PREFIX)) return region;
@@ -33,10 +26,19 @@ function regionLabel(region: string): string {
 	}
 }
 
+/** One `label value` module of the status row. */
+interface Module {
+	label: string;
+	value: string;
+	tone?: string;
+}
+
 /**
  * One fixed row above the editor: region, node and neighbor counts, pending
- * alerts and unread messages. `render` and `describe` read the same line, so the
- * ANSI row and the Tern card cannot disagree.
+ * alerts and unread messages. The modules are laid out across the full width
+ * (`justify: between`), never left-aligned; the separators are layout gaps, not
+ * drawn characters. `render` and `describe` project the same modules, so the
+ * ANSI row and the Tern card cannot disagree, and neither repeats the line.
  */
 export class OnlyneStatus implements Component {
 	private readonly theme: Theme;
@@ -73,9 +75,9 @@ export class OnlyneStatus implements Component {
 			const next = await runtime?.status();
 			if (this.disposed) return;
 			// The rendered row is the whole observable state, so an identical row needs no repaint.
-			const before = this.line();
+			const before = this.modules();
 			this.snapshot = next;
-			if (this.line() !== before) this.changed();
+			if (JSON.stringify(before) !== JSON.stringify(this.modules())) this.changed();
 		} catch {
 			// The status read is best effort: keep the last good row instead of throwing into the host.
 		} finally {
@@ -91,42 +93,44 @@ export class OnlyneStatus implements Component {
 		this.requestRender();
 	}
 
-	private segments(): Segment[] {
+	private modules(): Module[] {
 		const snapshot = this.snapshot;
 		if (snapshot === undefined) {
 			return this.runtime === undefined
-				? [{ value: "onlyne", tone: "accent strong" }, { value: "unconfigured", tone: "warning" }]
-				: [{ value: "onlyne", tone: "accent strong" }, { value: "starting", tone: "muted" }];
+				? [{ label: "onlyne", value: "unconfigured", tone: "warning" }]
+				: [{ label: "onlyne", value: "starting", tone: "muted" }];
 		}
-		const segments: Segment[] = [
-			{ value: regionLabel(snapshot.region), tone: "accent strong" },
+		const modules: Module[] = [
 			{ label: "nodes", value: String(snapshot.nodes) },
 			{ label: "neighbors", value: String(snapshot.neighbors) },
 			{ label: "alert", value: String(snapshot.alerts) },
 			{ label: "unread", value: String(snapshot.unread) },
 		];
 		if (snapshot.discovery_error !== undefined) {
-			segments.push({ label: "discovery:", value: oneLine(snapshot.discovery_error), tone: "warning" });
+			modules.push({ label: "discovery", value: oneLine(snapshot.discovery_error), tone: "warning" });
 		}
-		return segments;
+		return modules;
 	}
 
-	private line(): string {
-		return this.segments()
-			.map(segment => (segment.label === undefined ? segment.value : `${segment.label} ${segment.value}`))
-			.join(" | ");
+	/** The region leads the row; without a runtime there is nothing to lead with. */
+	private lead(): { text: string; tone: string } {
+		const region = this.snapshot?.region;
+		if (region === undefined) return { text: "", tone: "muted" };
+		return { text: regionLabel(region), tone: "accent strong" };
 	}
 
+	/** ANSI: one row with the modules spread across the width, region pinned left. */
 	render(width: number): readonly string[] {
-		let text = this.line();
-		if (this.snapshot?.discovery_error !== undefined) {
-			try {
-				text = this.theme.fg("warning", text);
-			} catch {
-				// A host theme without the token leaves the row plain.
-			}
+		const lead = this.lead();
+		const cells = this.modules().map(module => `${module.label} ${module.value}`);
+		const head = lead.text === "" ? "" : `${lead.text}  `;
+		// Even columns over the remaining width, so the modules are spread out rather than left-aligned.
+		const each = cells.length === 0 ? 0 : Math.max(1, Math.floor(Math.max(0, width - head.length) / cells.length));
+		let row = head;
+		for (const [index, cell] of cells.entries()) {
+			row += " ".repeat(index === 0 ? 0 : Math.max(0, each - cells[index - 1]!.length)) + cell;
 		}
-		const row = fit(text, width);
+		row = fit(row, width);
 		if (row === this.row && this.rows !== undefined) return this.rows;
 		this.row = row;
 		this.rows = [row];
@@ -135,12 +139,16 @@ export class OnlyneStatus implements Component {
 
 	describe(): NativeNode {
 		if (this.described !== undefined) return this.described;
-		const head: { t: string; s?: string }[] = [];
-		this.segments().forEach((segment, index) => {
-			if (index > 0) head.push(span(" | ", "dim"));
-			if (segment.label !== undefined) head.push(span(`${segment.label} `, "muted"));
-			head.push(span(segment.value, segment.tone ?? "strong"));
-		});
+		const lead = this.lead();
+		const children: NativeNode[] = [];
+		if (lead.text !== "") {
+			children.push(textNode([span(lead.text, lead.tone)], { truncate: "end" }));
+		}
+		for (const module of this.modules()) {
+			children.push(
+				textNode([span(`${module.label} `, "muted"), span(module.value, module.tone ?? "strong")], { truncate: "end" }),
+			);
+		}
 		// TspCardStatus has no "warning": a discovery failure is the card's error state.
 		this.described = node(
 			"card",
@@ -148,9 +156,8 @@ export class OnlyneStatus implements Component {
 				role: "omp.widget.onlyne",
 				variant: "bare",
 				status: this.snapshot?.discovery_error === undefined ? "done" : "error",
-				head,
 			},
-			[textNode(this.line(), { truncate: "end" })],
+			[node("row", { justify: "between", align: "center", gap: "md" }, children, "modules")],
 		);
 		return this.described;
 	}

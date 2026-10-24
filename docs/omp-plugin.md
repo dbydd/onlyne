@@ -484,16 +484,16 @@ pi.sendMessage(payload, { triggerTurn: true });
 
 `/onlyne` 打开查看界面。`/onlyne settings` 打开配置界面。两个界面互不替代。
 
-查看界面分四页，页签固定为 `1 队列`、`2 对话`、`3 发现`、`4 联系人`。页脚显示 `1/4`、thread 总数、未读总数与可达联系人数。
+查看界面分四页，页签固定为 `1 队列`、`2 对话`、`3 发现`、`4 联系人`。页签单独占一行并等分铺满宽度；页签上方的标题只由 overlay 的 `head` 提供一次，组件内部不再重复绘制 `Onlyne`。标题下方的摘要允许换行，显示 `1/4`、region、thread 总数、未读总数与可达联系人数。
 
 | 页 | 内容 |
 |---|---|
 | 1 队列 | 待处理来信、排队条目、运行中上下文、未决等待、未知出站结果。每项显示来源、目标、状态与等待时长 |
 | 2 对话 | 左侧 thread 列表，右侧消息流。消息按 seq 排列，区分 in/out，显示作者、时间、关系、路由标记与消费状态 |
-| 3 发现 | 自动发现与手动地址留下的全部记录；`[x]` 表示已验证且未过期，`[ ]` 表示待连接。勾选或按空格请求连接，当前无认证所以默认放行。首行提供刷新发现 |
+| 3 发现 | 自动发现与手动地址留下的记录，每个节点一行（同一节点换了端口只保留最新记录）；`[x]` 表示已验证且未过期，`[ ]` 表示待连接。勾选或按空格请求连接，当前无认证所以默认放行。首行提供刷新发现 |
 | 4 联系人 | 已验证、未过期且非本节点的可达节点，显示短 id、region、endpoint 与最近可见时间 |
 
-队列页按类型与时间排序。对话页的 thread 列表按最近活动排序，未读 thread 带计数。消息流的选中条目在固定详情区显示正文，其余条目显示首行。所有页面共用同一固定高度：正文窗口由终端行数计算，列表在窗口内滚动，内容长度不改变界面高度。
+每个条目是一张卡片：卡片头部是标题，卡片内部是描述。描述按卡片宽度换行；窗口按卡片滚动。所有页面共用同一固定高度：正文窗口由终端行数计算，内容长度不改变界面高度。
 
 操作：
 
@@ -518,13 +518,13 @@ pi.sendMessage(payload, { triggerTurn: true });
 
 ### 9.3 状态行
 
-主会话挂载一行固定状态组件，位置在编辑器上方，每两秒和运行时变更时刷新：
+主会话挂载一行固定状态组件，位置在编辑器上方，每两秒和运行时变更时刷新。region 在左，其余四个计数模块等距铺开占满整行；模块之间是布局间隔，不绘制 `|` 字符，也不重复一行：
 
 ```text
-research-chamber | nodes 4 | neighbors 3 | alert 1 | unread 2
+research-chamber   nodes 4      neighbors 3     alert 1     unread 2
 ```
 
-字段依次是 region 短名、已知节点数、已验证邻居数、待处理来信数和未确认消费数。发现错误附加在末尾，并只占同一行。Tern 原生模式使用 `omp.widget.onlyne` 的 bare card 与 `head` spans；普通终端逐行渲染同一字符串。没有运行时显示 `onlyne | unconfigured`。
+字段依次是 region 短名、已知节点数、已验证邻居数、待处理来信数和未确认消费数。发现错误附加在末尾，仍只占同一行。Tern 原生模式返回 `omp.widget.onlyne` 的 bare card，卡片内只有一行 `justify: between` 的模块；普通终端把同样的模块铺开成一行。没有运行时显示 `onlyne unconfigured`。
 
 ### 9.4 Tern 下的呈现
 
@@ -571,14 +571,14 @@ Tern 下的原生渲染由 Tern Surface Protocol（TSP）驱动。OMP 用 `TERM_
 
 | 能力 | 代码现状 |
 |---|---|
-| 网络发现与 region | 引导种子、HTTP 候选目录和 SQLite 发现目录已接入；启动时提交 region 成员关系；DNS-SD 可选。真实多进程发现未验收 |
+| 网络发现与 region | 引导种子、HTTP 候选目录和 SQLite 发现目录已接入；启动时提交 region 成员关系；维护循环每 30 秒重验一次候选，过期且不可达的记录被删除；DNS-SD 可选。真实多进程发现未验收 |
 | 新执行上下文 | 接收方通过原生 task 工具启动子代理并绑定 c-N；发送方不再分配接收方上下文。真实派生未验收 |
 | 消费确认 | 自定义消息提交返回 consumed:false；provider 请求头命中后确认。真实请求边界未验收 |
 | Await 去重 | 发送方本地 context、hold、confirmConsumption 已接入；库套件覆盖。插件工具路径未验收 |
 | Todo | todo-more 可选；存在时原子写 rich+native，缺失时写原生 `user_todo_edit` 与决策标记。用户将在实战验证 |
 | 子代理读取 | msg 写路径受限；onlyne:// 与 decider 读取按 agent 与 context source 过滤。未验收 |
 | 配置与调度 | endpoint、port、peers、default_attention、spawn、supplement_window 已从配置和执行路径删除 |
-| 界面 | 四页、固定高度、内部滚动、状态行、bootstrap 与设置组件；真实 Tern 操作、刷新和连接未验收 |
+| 界面 | 四页、固定高度、卡片化条目、单行状态行、bootstrap 与设置组件；真实 Tern 操作、刷新和连接未验收 |
 
 已按 18.12.6 源码核对：
 
@@ -600,6 +600,7 @@ Tern 下的原生渲染由 Tern Surface Protocol（TSP）驱动。OMP 用 `TERM_
 - 根目录 `bun run check`：`@onlyne/lib` 与 `omp-onlyne` 类型检查通过。
 - 根目录 `bun run test`：库的 verify、domain、first-contact 套件全部通过；插件 32 个测试通过。
 - 该证据覆盖库行为、插件单元路径和单机两节点发现/首次接触。真实 OMP 集群已启动并通过 SQLite 记录确认四个节点互相发现；重启后的状态行与四页界面仍待用户手动验收。
+- `/onlyne` 在已有配置但运行时未启动时会先启动运行时再打开查看界面，不再落入空白引导；引导只在 `/onlyne init` 或确实没有配置文件时打开。
 
 尚未实跑：
 

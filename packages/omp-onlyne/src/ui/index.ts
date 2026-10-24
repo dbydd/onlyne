@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { loadConfig } from "../config.ts";
-import { getRuntime } from "../runtime.ts";
+import { ConfigError, loadConfig } from "../config.ts";
+import { getRuntime, startRuntime } from "../runtime.ts";
 import { detectTernSession } from "../tern.ts";
 import type { OnlyneConfig } from "../types.ts";
 import { OnlyneBootstrap, type BootstrapDefaults } from "./bootstrap.ts";
@@ -43,7 +43,17 @@ export function registerUi(pi: ExtensionAPI): void {
 			const controller = new AbortController();
 			active = controller;
 			try {
-				const runtime = getRuntime();
+				let runtime = getRuntime();
+				// A saved config with the runtime down is not a first run: start the node and show
+				// the viewer. Opening the init form here is what made `/onlyne` look like it had
+				// cleared the project.
+				if (runtime === undefined && command !== "init") {
+					try {
+						runtime = await startRuntime(pi, ctx);
+					} catch (error) {
+						if (!(error instanceof ConfigError && error.code === "missing")) throw error;
+					}
+				}
 				const needsBootstrap = command === "init" || runtime === undefined;
 				if (needsBootstrap) {
 					const tern = detectTernSession();

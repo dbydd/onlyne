@@ -44,6 +44,9 @@ export async function restartRuntime(config: OnlyneConfig, pi: ExtensionAPI, ctx
 }
 export async function stopRuntime(): Promise<void> { await active?.close(); }
 
+/** How often the discovery catalog is re-observed; well inside the library's 120 s freshness window. */
+const DISCOVERY_REFRESH_MS = 30_000;
+
 class OmpRuntime implements PluginRuntime {
 	readonly contexts: ContextRegistry;
 	readonly storage: SqliteStorage;
@@ -56,6 +59,8 @@ class OmpRuntime implements PluginRuntime {
 	private timer?: ReturnType<ExtensionContext["setInterval"]>;
 	private maintenance?: Promise<void>;
 	private discoveryError?: string;
+	/** Last time the discovery catalog was re-observed; a record expires after 120 s. */
+	private lastDiscoveryRefresh = 0;
 	private controller = new AbortController();
 	private listeners = new Set<() => void>();
 	private closed = false;
@@ -120,9 +125,19 @@ class OmpRuntime implements PluginRuntime {
 	}
 	private maintain(): void {
 		if (this.closed || this.maintenance) return;
+		const at = Date.now();
+		const rediscover = at - this.lastDiscoveryRefresh >= DISCOVERY_REFRESH_MS;
+		if (rediscover) this.lastDiscoveryRefresh = at;
 		const pass = (async () => {
-			for (const work of [() => this.node.client.maintain(this.controller.signal), () => this.node.client.recover(this.controller.signal)]) {
-				try { await work(); } catch (error) { if (!this.closed) this.pi.logger.warn("onlyne maintenance failed", { error: errorText(error) }); }
+			const steps: Array<() => Promise<unknown>> = [
+				() => this.node.client.maintain(this.controller.signal),
+				() => this.node.client.recover(this.controller.signal),
+			];
+			// Re-observing keeps every record's freshness window open and lets an unreachable
+			// candidate be dropped rather than lingering as a permanent stale row.
+			if (rediscover) steps.push(() => this.node.discovery.refresh(this.controller.signal));
+			for (const step of steps) {
+				try { await step(); } catch (error) { if (!this.closed) this.pi.logger.warn("onlyne maintenance failed", { error: errorText(error) }); }
 			}
 			this.changed();
 		})();
@@ -183,7 +198,14 @@ class OmpRuntime implements PluginRuntime {
 		queue.push(...contexts.filter(record => record.state === "running" || record.state === "unbound").map(record => ({ id: `context:${record.alias}`, kind: "context" as const, label: record.alias, detail: `${record.summary} · ${record.state}`, at: record.created_at })));
 		queue.push(...outbound.filter(row => row.value.state === "unknown" || row.value.state === "pending").map(row => ({ id: row.key, kind: "outbound" as const, label: row.value.request.target_endpoint, detail: row.value.state })));
 		const at = Date.now();
-		const discovery: ViewerDiscovery[] = records.map(record => ({
+		// One row per node: a node that moved ports would otherwise appear once per address.
+		// A verified record beats an unverified one; within each class the newest wins.
+		const byNode = new Map<string, DiscoveryRecord>();
+		for (const record of records) {
+			const kept = byNode.get(record.node_id);
+			if (kept === undefined || newerRecord(record, kept)) byNode.set(record.node_id, record);
+		}
+		const discovery: ViewerDiscovery[] = [...byNode.values()].map(record => ({
 			node_id: record.node_id, instance_id: record.instance_id, base_url: record.base_url, source: record.source,
 			...(record.membership?.domain_id === undefined ? {} : { region: record.membership.domain_id }),
 			...(record.membership?.state === undefined ? {} : { membership_state: record.membership.state }),
@@ -195,7 +217,7 @@ class OmpRuntime implements PluginRuntime {
 		for (const record of records) {
 			if (record.node_id === this.config.node.id || record.verified_at === undefined || Date.parse(record.expires_at) <= at) continue;
 			const kept = newest.get(record.node_id);
-			if (kept === undefined || Date.parse(record.last_seen) > Date.parse(kept.last_seen)) newest.set(record.node_id, record);
+			if (kept === undefined || newerRecord(record, kept)) newest.set(record.node_id, record);
 		}
 		const contacts: ViewerContact[] = [...newest.values()].map(record => ({
 			node_id: record.node_id, instance_id: record.instance_id, base_url: record.base_url,
@@ -225,4 +247,13 @@ export async function allPages<T>(read: (cursor?: string) => Promise<Page<T>>): 
 	do { const page = await read(cursor); items.push(...page.items); cursor = page.next_cursor ?? undefined; } while (cursor);
 	return items;
 }
+
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+
+/** A verified record beats an unverified one; within each class the newest observation wins. */
+function newerRecord(candidate: DiscoveryRecord, kept: DiscoveryRecord): boolean {
+	const candidateVerified = candidate.verified_at !== undefined;
+	const keptVerified = kept.verified_at !== undefined;
+	if (candidateVerified !== keptVerified) return candidateVerified;
+	return Date.parse(candidate.last_seen) > Date.parse(kept.last_seen);
+}
