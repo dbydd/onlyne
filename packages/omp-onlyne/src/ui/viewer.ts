@@ -546,54 +546,50 @@ export class OnlyneViewer implements Component {
 	}
 
 	private describeRow(row: BodyRow, index: number): NativeNode {
-		const tone = row.selected === true ? "accent" : undefined;
-		// A card is a head line plus a wrapping description; the click target is the whole card.
-		if (row.card !== undefined) {
+		// Every selectable row is a bare card: `selected` only exists on `card`, and a
+		// `tone: accent` fills the row like a button. The terminal draws `selected: true`
+		// as a quiet background band instead.
+		const asCard = row.card ?? {
+			head: row.left.map(cell => cell[0]).join(""),
+			description: "",
+		};
+		const actions = row.act ?? row.leftAct;
+		if (row.card !== undefined || row.right === undefined) {
 			return node(
 				"card",
 				{
 					variant: "bare",
 					selected: row.selected === true,
-					...(row.act === undefined ? {} : { actions: { click: row.act } }),
-					...(row.act === undefined ? {} : { title: row.card.head }),
+					...(actions === undefined ? {} : { actions: { click: actions } }),
+					...(actions === undefined ? {} : { title: asCard.head }),
 				},
 				[
 					// One head row plus one clamped description row keeps the frame at bodyHeight;
 					// the ANSI row already carries the same text as a single line.
-					textNode([span(row.card.head, "strong")], { wrap: "none", truncate: "end", lines: 1 }),
-					textNode([span(row.card.description, "muted")], { wrap: "none", truncate: "end", lines: 1 }),
+					textNode([span(asCard.head, "strong")], { wrap: "none", truncate: "end", lines: 1 }),
+					...(asCard.description === "" ? [] : [textNode([span(asCard.description, "muted")], { wrap: "none", truncate: "end", lines: 1 })]),
 				],
 				row.key ?? `row-${index}`,
 			);
 		}
-		if (row.right !== undefined) {
-			return node(
-				"row",
-				{ gap: "sm", align: "start", tone },
-				[
-					textNode(this.spans(row.left), {
-						wrap: "none",
-						truncate: "end",
-						basis: Math.max(1, row.leftWidth ?? 20),
-						...(row.leftAct === undefined ? {} : { actions: { click: row.leftAct } }),
-					}),
-					textNode(this.spans(row.right), {
-						wrap: "none",
-						truncate: "end",
-						grow: 1,
-						...(row.rightAct === undefined ? {} : { actions: { click: row.rightAct } }),
-					}),
-				],
-				row.key ?? `row-${index}`,
-			);
-		}
-		return textNode(this.spans(row.left), {
-			wrap: "none",
-			truncate: "end",
-			tone,
-			...(row.act === undefined ? {} : { actions: { click: row.act } }),
-			key: row.key ?? `row-${index}`,
-		});
+		// Two-column chat rows: each column is its own bare card so either side can show
+		// a selection band.
+		return node(
+			"row",
+			{ gap: "sm", align: "start" },
+			[
+				node("card", {
+					variant: "bare",
+					selected: row.selected === true,
+					...(row.leftAct === undefined ? {} : { actions: { click: row.leftAct } }),
+				}, [textNode(this.spans(row.left), { wrap: "none", truncate: "end" })], `${row.key ?? index}/left`),
+				node("card", {
+					variant: "bare",
+					...(row.rightAct === undefined ? {} : { actions: { click: row.rightAct } }),
+				}, [textNode(this.spans(row.right!), { wrap: "none", truncate: "end", grow: 1 })], `${row.key ?? index}/right`),
+			],
+			row.key ?? `row-${index}`,
+		);
 	}
 
 	private footerNode(): NativeNode {

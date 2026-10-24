@@ -5,6 +5,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { Text } from "@oh-my-pi/pi-tui";
 import type { JudgeDecider } from "./decider.ts";
 import type { ContextRegistry } from "./store.ts";
+import type { ContextRecord } from "./types.ts";
 import { applyMessageTodo, type TodoPlanner } from "./todo.ts";
 import { getRuntime } from "./runtime.ts";
 
@@ -28,7 +29,7 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 		async inject(entry: Entry, context?: string, plan?: DeliveryPlan) {
 			const decision = plan?.execution === "new" ? { action: "new_subagent" as const } : await deps.decider.decideInbound(deps.main, entry);
 			if (decision.action === "queue") return { context: context ?? deps.main.agent.id, consumed: false };
-			if (decision.action === "new_subagent") return { context: await startSubagent(deps, entry), consumed: false };
+			if (decision.action === "new_subagent") return { context: await startSubagent(deps, entry), consumed: true };
 			if (decision.action === "context") {
 				const alias = decision.context;
 				if (alias === undefined) throw new OnlyneError("decision_unavailable", "The inbound decision named no context.");
@@ -106,11 +107,20 @@ async function deliverToContext(agentId: string, payload: MessagePayload, runnin
 	const session = ref?.session ?? (await AgentLifecycleManager.global().ensureLive(agentId));
 	await session.sendCustomMessage(payload, running ? { deliverAs: "steer" } : { triggerTurn: true });
 }
+/**
+ * One source message owns one context, for the process lifetime: a replay of the same
+ * inbox record (the maintain loop's every-2s pass) must never spawn a second task. A
+ * record bound to a live agent is returned as is; an unbound one from a failed earlier
+ * spawn is reused under its own alias. The task text is the child's first prompt, so a
+ * finished spawn has already consumed the message — the caller reports it as consumed.
+ */
 async function startSubagent(deps: BridgeDeps, entry: Entry): Promise<string> {
+	const existing = await findContextBySource(deps.contexts, entry);
+	if (existing?.agent_id !== undefined) return existing.agent_id;
 	const tool = taskTool(deps.main);
 	if (!tool) throw new OnlyneError("unsupported_delivery", "This OMP session has no native task tool.");
 	const source = entry.thread_ref.id + "/" + entry.seq;
-	const record = await deps.contexts.allocate(entry.thread_ref, `onlyne ${source}`, entry.message);
+	const record = existing ?? await deps.contexts.allocate(entry.thread_ref, `onlyne ${source}`, entry.message);
 	const name = `onlyne-${record.alias}`;
 	const result = await tool.execute(`onlyne-${crypto.randomUUID()}`, {
 		task: `Handle this onlyne delivery from ${entry.authenticated_author} (${source}).\n\n${entry.message.msg}`,
@@ -123,6 +133,12 @@ async function startSubagent(deps: BridgeDeps, entry: Entry): Promise<string> {
 	const parentId = AgentRegistry.global().get(child)?.parentId;
 	await deps.contexts.bind(record.alias, { agent_id: child, ...(parentId === undefined ? {} : { parent_id: parentId }) });
 	return child;
+}
+async function findContextBySource(contexts: ContextRegistry, entry: Entry): Promise<ContextRecord | undefined> {
+	const records = await contexts.list();
+	return records.find(record =>
+		record.source?.sender === entry.message.sender && record.source?.id === entry.message.id
+		&& record.thread_ref?.owner === entry.thread_ref.owner && record.thread_ref?.id === entry.thread_ref.id);
 }
 function taskTool(ctx: ExtensionContext) {
 	return AgentRegistry.global().get(ctx.agent.id)?.session?.getToolByName("task");

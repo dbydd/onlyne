@@ -9,6 +9,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getRuntime, type PluginRuntime } from "../runtime.ts";
 import type { OnlyneStatus as OnlyneStatusSnapshot } from "../types.ts";
+import { shortNodeId } from "../config.ts";
 import { fit, oneLine } from "./format.ts";
 
 const REGION_PREFIX = "urn:onlyne:region:";
@@ -112,11 +113,12 @@ export class OnlyneStatus implements Component {
 		return modules;
 	}
 
-	/** The region leads the row; without a runtime there is nothing to lead with. */
+	/** The node id and region lead the row; without a runtime there is nothing to lead with. */
 	private lead(): { text: string; tone: string } {
-		const region = this.snapshot?.region;
-		if (region === undefined) return { text: "", tone: "muted" };
-		return { text: regionLabel(region), tone: "accent strong" };
+		const snapshot = this.snapshot;
+		if (snapshot === undefined) return { text: "", tone: "muted" };
+		const parts = [shortNodeId(snapshot.node_id), regionLabel(snapshot.region)].filter(part => part !== "");
+		return { text: parts.join(" · "), tone: "accent strong" };
 	}
 
 	/** ANSI: one row with the modules spread across the width, region pinned left. */
@@ -149,15 +151,13 @@ export class OnlyneStatus implements Component {
 				textNode([span(`${module.label} `, "muted"), span(module.value, module.tone ?? "strong")], { truncate: "end" }),
 			);
 		}
-		// TspCardStatus has no "warning": a discovery failure is the card's error state.
+		// A plain row, not a card: a card adds head/body chrome and a second visual row,
+		// which pushed the widget taller than the one line it is meant to occupy.
 		this.described = node(
-			"card",
-			{
-				role: "omp.widget.onlyne",
-				variant: "bare",
-				status: this.snapshot?.discovery_error === undefined ? "done" : "error",
-			},
-			[node("row", { justify: "between", align: "center", gap: "md" }, children, "modules")],
+			"row",
+			{ role: "omp.widget.onlyne", justify: "between", align: "center", gap: "md" },
+			children,
+			"status",
 		);
 		return this.described;
 	}
