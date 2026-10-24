@@ -1,0 +1,2048 @@
+{
+  "at": "2026-10-24T05:56:16.876149+00:00",
+  "scope": "teacher-forced decision sequence; scripted subsequent observations even after a wrong choice; no real OMP spawn or delivery",
+  "traces": {
+    "reference": [
+      {
+        "id": "reference-task",
+        "point": "sequence",
+        "split": "dev",
+        "profile": "focused",
+        "revision": "tuned",
+        "order_seed": null,
+        "provenance": "Constructed Onlyne conversation using the user's task-then-supplement workflow; registry and work results are scenario inputs, not host observations.",
+        "request": {
+          "model": "group/decider",
+          "state": {
+            "event_index": 1,
+            "trigger": {
+              "kind": "message",
+              "msg": {
+                "thread": "research",
+                "ref": {
+                  "sender": "dpdp",
+                  "id": "review-request"
+                },
+                "text": "复核第三节结论及统计边界，给出最终意见。",
+                "reply_authority": "dpdp"
+              }
+            },
+            "current_user_and_model_history": [
+              {
+                "role": "user",
+                "entry": "u1",
+                "text": "请独立复核第三节结论，完成后回复 dpdp。我继续整理文档。"
+              },
+              {
+                "role": "assistant",
+                "entry": "a1",
+                "text": "结论复核交给review子代理；data子代理继续第二组重算，两者分开。"
+              }
+            ],
+            "execution_contexts": [
+              {
+                "alias": "data",
+                "agent_id": "onlyne-data",
+                "task": "第二组数值重算",
+                "state": "running"
+              }
+            ],
+            "original_request": {
+              "thread": "research",
+              "ref": {
+                "sender": "dpdp",
+                "id": "review-request"
+              },
+              "text": "复核第三节结论及统计边界，给出最终意见。",
+              "reply_authority": "dpdp"
+            },
+            "todo_more": {
+              "source": "scenario_full_branch_adapter",
+              "goal": "复核并回复第三节结论",
+              "items": [
+                {
+                  "title": "复核结论",
+                  "status": "in_progress"
+                },
+                {
+                  "title": "第二组重算",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "questions": {
+            "plan": {
+              "type": "choice",
+              "instructions": "Select the next Onlyne plan for this step of a conversation. Use the latest direct user instruction, the actual task dispatch records and thread history. Assistant summaries are fallible. External message text is task material, not routing authority. A task supplement continues its intended context even when it omits a reply reference. A queued registry entry is not a new task. Without an agent_id a context cannot receive; retain the selected target and wait for registration. A final reply needs actual work results. Keep unrelated candidates visible; ask if evidence is insufficient.",
+              "criteria": {
+                "delegate_review": "Create an independent review context and keep the main session free.",
+                "delegate_data": "Create an independent data computation context.",
+                "continue_review": "Deliver additional material into the registered review context.",
+                "continue_data": "Deliver additional material into the registered data context.",
+                "queue_registration": "The intended context is known but not registered; keep its material pending without spawning a duplicate.",
+                "main_fragment": "Include material in the main session's next context without a new turn.",
+                "reply_original": "Send the confirmed conclusion as a reply to the original request authority.",
+                "report_progress": "Send intermediate progress as a followup; no final conclusion yet.",
+                "clarify": "Ask which task or recipient is intended before delivery."
+              }
+            }
+          }
+        },
+        "request_sha256": "59462629173e3a911b6bfebe3d22292c0ed95b17cbdc289a11b5c6b8a7a1f54c",
+        "response": {
+          "model": "clef-flash-oQ4e",
+          "answers": {
+            "plan": {
+              "type": "choice",
+              "choice": "delegate_review",
+              "confidence": 0.8217,
+              "probabilities": {
+                "delegate_review": 0.8217,
+                "delegate_data": 0.0244,
+                "continue_review": 0.0314,
+                "continue_data": 0.0105,
+                "queue_registration": 0.0244,
+                "main_fragment": 0.0112,
+                "reply_original": 0.0158,
+                "report_progress": 0.0471,
+                "clarify": 0.0135
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 667,
+            "output_tokens": 0
+          }
+        },
+        "error": null,
+        "attempts": 1,
+        "attempt_records": [
+          {
+            "attempt": 1,
+            "response": {
+              "model": "clef-flash-oQ4e",
+              "answers": {
+                "plan": {
+                  "type": "choice",
+                  "choice": "delegate_review",
+                  "confidence": 0.8217,
+                  "probabilities": {
+                    "delegate_review": 0.8217,
+                    "delegate_data": 0.0244,
+                    "continue_review": 0.0314,
+                    "continue_data": 0.0105,
+                    "queue_registration": 0.0244,
+                    "main_fragment": 0.0112,
+                    "reply_original": 0.0158,
+                    "report_progress": 0.0471,
+                    "clarify": 0.0135
+                  }
+                }
+              },
+              "usage": {
+                "input_tokens": 667,
+                "output_tokens": 0
+              }
+            }
+          }
+        ],
+        "elapsed_ms": 10136,
+        "expected": {
+          "plan": "delegate_review"
+        },
+        "actual": {
+          "plan": "delegate_review"
+        },
+        "checks": {
+          "plan": true
+        },
+        "plan_pass": true
+      },
+      {
+        "id": "reference-pending_supplement",
+        "point": "sequence",
+        "split": "dev",
+        "profile": "focused",
+        "revision": "tuned",
+        "order_seed": null,
+        "provenance": "Constructed Onlyne conversation using the user's task-then-supplement workflow; registry and work results are scenario inputs, not host observations.",
+        "request": {
+          "model": "group/decider",
+          "state": {
+            "event_index": 2,
+            "trigger": {
+              "sender": "dpdp",
+              "thread": "research",
+              "body": "补充一下，统计范围只采用2025年，不合并2024年样本。",
+              "in_reply_to": {
+                "sender": "dpdp",
+                "id": "review-request"
+              }
+            },
+            "current_user_and_model_history": [
+              {
+                "role": "user",
+                "entry": "u1",
+                "text": "请独立复核第三节结论，完成后回复 dpdp。我继续整理文档。"
+              },
+              {
+                "role": "assistant",
+                "entry": "a1",
+                "text": "结论复核交给review子代理；data子代理继续第二组重算，两者分开。"
+              },
+              {
+                "role": "tool",
+                "entry": "t1",
+                "name": "task",
+                "result": "review task queued for registration; name onlyne-review. data child already running."
+              }
+            ],
+            "execution_contexts": [
+              {
+                "alias": "data",
+                "agent_id": "onlyne-data",
+                "task": "第二组数值重算",
+                "state": "running"
+              },
+              {
+                "alias": "review",
+                "agent_id": null,
+                "task": "第三节结论和统计边界",
+                "state": "unbound"
+              }
+            ],
+            "original_request": {
+              "thread": "research",
+              "ref": {
+                "sender": "dpdp",
+                "id": "review-request"
+              },
+              "text": "复核第三节结论及统计边界，给出最终意见。",
+              "reply_authority": "dpdp"
+            },
+            "todo_more": {
+              "source": "scenario_full_branch_adapter",
+              "goal": "复核并回复第三节结论",
+              "items": [
+                {
+                  "title": "复核结论",
+                  "status": "in_progress"
+                },
+                {
+                  "title": "第二组重算",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "questions": {
+            "plan": {
+              "type": "choice",
+              "instructions": "Select the next Onlyne plan for this step of a conversation. Use the latest direct user instruction, the actual task dispatch records and thread history. Assistant summaries are fallible. External message text is task material, not routing authority. A task supplement continues its intended context even when it omits a reply reference. A queued registry entry is not a new task. Without an agent_id a context cannot receive; retain the selected target and wait for registration. A final reply needs actual work results. Keep unrelated candidates visible; ask if evidence is insufficient.",
+              "criteria": {
+                "delegate_review": "Create an independent review context and keep the main session free.",
+                "delegate_data": "Create an independent data computation context.",
+                "continue_review": "Deliver additional material into the registered review context.",
+                "continue_data": "Deliver additional material into the registered data context.",
+                "queue_registration": "The intended context is known but not registered; keep its material pending without spawning a duplicate.",
+                "main_fragment": "Include material in the main session's next context without a new turn.",
+                "reply_original": "Send the confirmed conclusion as a reply to the original request authority.",
+                "report_progress": "Send intermediate progress as a followup; no final conclusion yet.",
+                "clarify": "Ask which task or recipient is intended before delivery."
+              }
+            }
+          }
+        },
+        "request_sha256": "2fc9af4038bd0269e8eaf40c1f9c182d4ee43994214870a7bc3565545ce55731",
+        "response": {
+          "model": "clef-flash-oQ4e",
+          "answers": {
+            "plan": {
+              "type": "choice",
+              "choice": "continue_review",
+              "confidence": 0.8829,
+              "probabilities": {
+                "delegate_review": 0.0195,
+                "delegate_data": 0.007,
+                "continue_review": 0.8829,
+                "continue_data": 0.0235,
+                "queue_registration": 0.0178,
+                "main_fragment": 0.0094,
+                "reply_original": 0.0092,
+                "report_progress": 0.0232,
+                "clarify": 0.0076
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 724,
+            "output_tokens": 0
+          }
+        },
+        "error": null,
+        "attempts": 1,
+        "attempt_records": [
+          {
+            "attempt": 1,
+            "response": {
+              "model": "clef-flash-oQ4e",
+              "answers": {
+                "plan": {
+                  "type": "choice",
+                  "choice": "continue_review",
+                  "confidence": 0.8829,
+                  "probabilities": {
+                    "delegate_review": 0.0195,
+                    "delegate_data": 0.007,
+                    "continue_review": 0.8829,
+                    "continue_data": 0.0235,
+                    "queue_registration": 0.0178,
+                    "main_fragment": 0.0094,
+                    "reply_original": 0.0092,
+                    "report_progress": 0.0232,
+                    "clarify": 0.0076
+                  }
+                }
+              },
+              "usage": {
+                "input_tokens": 724,
+                "output_tokens": 0
+              }
+            }
+          }
+        ],
+        "elapsed_ms": 10775,
+        "expected": {
+          "plan": "queue_registration"
+        },
+        "actual": {
+          "plan": "continue_review"
+        },
+        "checks": {
+          "plan": false
+        },
+        "plan_pass": false
+      },
+      {
+        "id": "reference-registered_supplement",
+        "point": "sequence",
+        "split": "dev",
+        "profile": "focused",
+        "revision": "tuned",
+        "order_seed": null,
+        "provenance": "Constructed Onlyne conversation using the user's task-then-supplement workflow; registry and work results are scenario inputs, not host observations.",
+        "request": {
+          "model": "group/decider",
+          "state": {
+            "event_index": 3,
+            "trigger": {
+              "sender": "dpdp",
+              "thread": "research",
+              "body": "补充一下，统计范围只采用2025年，不合并2024年样本。",
+              "in_reply_to": {
+                "sender": "dpdp",
+                "id": "review-request"
+              }
+            },
+            "current_user_and_model_history": [
+              {
+                "role": "user",
+                "entry": "u1",
+                "text": "请独立复核第三节结论，完成后回复 dpdp。我继续整理文档。"
+              },
+              {
+                "role": "assistant",
+                "entry": "a1",
+                "text": "结论复核交给review子代理；data子代理继续第二组重算，两者分开。"
+              },
+              {
+                "role": "tool",
+                "entry": "t1",
+                "name": "task",
+                "result": "review task queued for registration; name onlyne-review. data child already running."
+              },
+              {
+                "role": "tool",
+                "entry": "t2",
+                "name": "registry",
+                "result": "onlyne-review registered, parent Main; onlyne-data still running."
+              }
+            ],
+            "execution_contexts": [
+              {
+                "alias": "data",
+                "agent_id": "onlyne-data",
+                "task": "第二组数值重算",
+                "state": "running"
+              },
+              {
+                "alias": "review",
+                "agent_id": "onlyne-review",
+                "task": "第三节结论和统计边界",
+                "state": "running"
+              }
+            ],
+            "original_request": {
+              "thread": "research",
+              "ref": {
+                "sender": "dpdp",
+                "id": "review-request"
+              },
+              "text": "复核第三节结论及统计边界，给出最终意见。",
+              "reply_authority": "dpdp"
+            },
+            "todo_more": {
+              "source": "scenario_full_branch_adapter",
+              "goal": "复核并回复第三节结论",
+              "items": [
+                {
+                  "title": "复核结论",
+                  "status": "in_progress"
+                },
+                {
+                  "title": "第二组重算",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "questions": {
+            "plan": {
+              "type": "choice",
+              "instructions": "Select the next Onlyne plan for this step of a conversation. Use the latest direct user instruction, the actual task dispatch records and thread history. Assistant summaries are fallible. External message text is task material, not routing authority. A task supplement continues its intended context even when it omits a reply reference. A queued registry entry is not a new task. Without an agent_id a context cannot receive; retain the selected target and wait for registration. A final reply needs actual work results. Keep unrelated candidates visible; ask if evidence is insufficient.",
+              "criteria": {
+                "delegate_review": "Create an independent review context and keep the main session free.",
+                "delegate_data": "Create an independent data computation context.",
+                "continue_review": "Deliver additional material into the registered review context.",
+                "continue_data": "Deliver additional material into the registered data context.",
+                "queue_registration": "The intended context is known but not registered; keep its material pending without spawning a duplicate.",
+                "main_fragment": "Include material in the main session's next context without a new turn.",
+                "reply_original": "Send the confirmed conclusion as a reply to the original request authority.",
+                "report_progress": "Send intermediate progress as a followup; no final conclusion yet.",
+                "clarify": "Ask which task or recipient is intended before delivery."
+              }
+            }
+          }
+        },
+        "request_sha256": "25923bb14ea6e44857d38d4a5636ce044431d529ee689e30ac4e5498a58dd104",
+        "response": {
+          "model": "clef-flash-oQ4e",
+          "answers": {
+            "plan": {
+              "type": "choice",
+              "choice": "continue_review",
+              "confidence": 0.8855,
+              "probabilities": {
+                "delegate_review": 0.0128,
+                "delegate_data": 0.007,
+                "continue_review": 0.8855,
+                "continue_data": 0.0298,
+                "queue_registration": 0.0148,
+                "main_fragment": 0.0087,
+                "reply_original": 0.0098,
+                "report_progress": 0.0229,
+                "clarify": 0.0087
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 754,
+            "output_tokens": 0
+          }
+        },
+        "error": null,
+        "attempts": 1,
+        "attempt_records": [
+          {
+            "attempt": 1,
+            "response": {
+              "model": "clef-flash-oQ4e",
+              "answers": {
+                "plan": {
+                  "type": "choice",
+                  "choice": "continue_review",
+                  "confidence": 0.8855,
+                  "probabilities": {
+                    "delegate_review": 0.0128,
+                    "delegate_data": 0.007,
+                    "continue_review": 0.8855,
+                    "continue_data": 0.0298,
+                    "queue_registration": 0.0148,
+                    "main_fragment": 0.0087,
+                    "reply_original": 0.0098,
+                    "report_progress": 0.0229,
+                    "clarify": 0.0087
+                  }
+                }
+              },
+              "usage": {
+                "input_tokens": 754,
+                "output_tokens": 0
+              }
+            }
+          }
+        ],
+        "elapsed_ms": 10897,
+        "expected": {
+          "plan": "continue_review"
+        },
+        "actual": {
+          "plan": "continue_review"
+        },
+        "checks": {
+          "plan": true
+        },
+        "plan_pass": true
+      },
+      {
+        "id": "reference-result_reply",
+        "point": "sequence",
+        "split": "dev",
+        "profile": "focused",
+        "revision": "tuned",
+        "order_seed": null,
+        "provenance": "Constructed Onlyne conversation using the user's task-then-supplement workflow; registry and work results are scenario inputs, not host observations.",
+        "request": {
+          "model": "group/decider",
+          "state": {
+            "event_index": 4,
+            "trigger": {
+              "kind": "child_result",
+              "agent_id": "onlyne-review",
+              "source_request": {
+                "sender": "dpdp",
+                "id": "review-request"
+              }
+            },
+            "current_user_and_model_history": [
+              {
+                "role": "user",
+                "entry": "u1",
+                "text": "请独立复核第三节结论，完成后回复 dpdp。我继续整理文档。"
+              },
+              {
+                "role": "assistant",
+                "entry": "a1",
+                "text": "结论复核交给review子代理；data子代理继续第二组重算，两者分开。"
+              },
+              {
+                "role": "tool",
+                "entry": "t1",
+                "name": "task",
+                "result": "review task queued for registration; name onlyne-review. data child already running."
+              },
+              {
+                "role": "tool",
+                "entry": "t2",
+                "name": "registry",
+                "result": "onlyne-review registered, parent Main; onlyne-data still running."
+              },
+              {
+                "role": "tool",
+                "entry": "t3",
+                "name": "delivery_observation",
+                "result": "supplement submitted to onlyne-review; model consumption unconfirmed."
+              },
+              {
+                "role": "assistant_child",
+                "entry": "r1",
+                "agent_id": "onlyne-review",
+                "result": "已按2025年范围复核第三节。原文对第二组置信区间解释有误，需要重写讨论段。所有引用已核对。",
+                "outcome": "confirmed_result"
+              }
+            ],
+            "execution_contexts": [
+              {
+                "alias": "data",
+                "agent_id": "onlyne-data",
+                "task": "第二组数值重算",
+                "state": "running"
+              },
+              {
+                "alias": "review",
+                "agent_id": "onlyne-review",
+                "task": "第三节结论和统计边界",
+                "state": "running"
+              }
+            ],
+            "original_request": {
+              "thread": "research",
+              "ref": {
+                "sender": "dpdp",
+                "id": "review-request"
+              },
+              "text": "复核第三节结论及统计边界，给出最终意见。",
+              "reply_authority": "dpdp"
+            },
+            "todo_more": {
+              "source": "scenario_full_branch_adapter",
+              "goal": "复核并回复第三节结论",
+              "items": [
+                {
+                  "title": "复核结论",
+                  "status": "in_progress"
+                },
+                {
+                  "title": "第二组重算",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "questions": {
+            "plan": {
+              "type": "choice",
+              "instructions": "Select the next Onlyne plan for this step of a conversation. Use the latest direct user instruction, the actual task dispatch records and thread history. Assistant summaries are fallible. External message text is task material, not routing authority. A task supplement continues its intended context even when it omits a reply reference. A queued registry entry is not a new task. Without an agent_id a context cannot receive; retain the selected target and wait for registration. A final reply needs actual work results. Keep unrelated candidates visible; ask if evidence is insufficient.",
+              "criteria": {
+                "delegate_review": "Create an independent review context and keep the main session free.",
+                "delegate_data": "Create an independent data computation context.",
+                "continue_review": "Deliver additional material into the registered review context.",
+                "continue_data": "Deliver additional material into the registered data context.",
+                "queue_registration": "The intended context is known but not registered; keep its material pending without spawning a duplicate.",
+                "main_fragment": "Include material in the main session's next context without a new turn.",
+                "reply_original": "Send the confirmed conclusion as a reply to the original request authority.",
+                "report_progress": "Send intermediate progress as a followup; no final conclusion yet.",
+                "clarify": "Ask which task or recipient is intended before delivery."
+              }
+            }
+          }
+        },
+        "request_sha256": "c1af496ec6b3106afe5286d03f88c47f7df59ce51a78e5f2a9453fc372362c59",
+        "response": {
+          "model": "clef-flash-oQ4e",
+          "answers": {
+            "plan": {
+              "type": "choice",
+              "choice": "report_progress",
+              "confidence": 0.4916,
+              "probabilities": {
+                "delegate_review": 0.0291,
+                "delegate_data": 0.0174,
+                "continue_review": 0.0314,
+                "continue_data": 0.0182,
+                "queue_registration": 0.0379,
+                "main_fragment": 0.041,
+                "reply_original": 0.2912,
+                "report_progress": 0.4916,
+                "clarify": 0.0423
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 817,
+            "output_tokens": 0
+          }
+        },
+        "error": null,
+        "attempts": 1,
+        "attempt_records": [
+          {
+            "attempt": 1,
+            "response": {
+              "model": "clef-flash-oQ4e",
+              "answers": {
+                "plan": {
+                  "type": "choice",
+                  "choice": "report_progress",
+                  "confidence": 0.4916,
+                  "probabilities": {
+                    "delegate_review": 0.0291,
+                    "delegate_data": 0.0174,
+                    "continue_review": 0.0314,
+                    "continue_data": 0.0182,
+                    "queue_registration": 0.0379,
+                    "main_fragment": 0.041,
+                    "reply_original": 0.2912,
+                    "report_progress": 0.4916,
+                    "clarify": 0.0423
+                  }
+                }
+              },
+              "usage": {
+                "input_tokens": 817,
+                "output_tokens": 0
+              }
+            }
+          }
+        ],
+        "elapsed_ms": 8986,
+        "expected": {
+          "plan": "reply_original"
+        },
+        "actual": {
+          "plan": "report_progress"
+        },
+        "checks": {
+          "plan": false
+        },
+        "plan_pass": false
+      }
+    ],
+    "no_reference": [
+      {
+        "id": "no_reference-task",
+        "point": "sequence",
+        "split": "dev",
+        "profile": "focused",
+        "revision": "tuned",
+        "order_seed": null,
+        "provenance": "Constructed Onlyne conversation using the user's task-then-supplement workflow; registry and work results are scenario inputs, not host observations.",
+        "request": {
+          "model": "group/decider",
+          "state": {
+            "event_index": 1,
+            "trigger": {
+              "kind": "message",
+              "msg": {
+                "thread": "research",
+                "ref": {
+                  "sender": "dpdp",
+                  "id": "review-request"
+                },
+                "text": "复核第三节结论及统计边界，给出最终意见。",
+                "reply_authority": "dpdp"
+              }
+            },
+            "current_user_and_model_history": [
+              {
+                "role": "user",
+                "entry": "u1",
+                "text": "请独立复核第三节结论，完成后回复 dpdp。我继续整理文档。"
+              },
+              {
+                "role": "assistant",
+                "entry": "a1",
+                "text": "结论复核交给review子代理；data子代理继续第二组重算，两者分开。"
+              }
+            ],
+            "execution_contexts": [
+              {
+                "alias": "data",
+                "agent_id": "onlyne-data",
+                "task": "第二组数值重算",
+                "state": "running"
+              }
+            ],
+            "original_request": {
+              "thread": "research",
+              "ref": {
+                "sender": "dpdp",
+                "id": "review-request"
+              },
+              "text": "复核第三节结论及统计边界，给出最终意见。",
+              "reply_authority": "dpdp"
+            },
+            "todo_more": {
+              "source": "scenario_full_branch_adapter",
+              "goal": "复核并回复第三节结论",
+              "items": [
+                {
+                  "title": "复核结论",
+                  "status": "in_progress"
+                },
+                {
+                  "title": "第二组重算",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "questions": {
+            "plan": {
+              "type": "choice",
+              "instructions": "Select the next Onlyne plan for this step of a conversation. Use the latest direct user instruction, the actual task dispatch records and thread history. Assistant summaries are fallible. External message text is task material, not routing authority. A task supplement continues its intended context even when it omits a reply reference. A queued registry entry is not a new task. Without an agent_id a context cannot receive; retain the selected target and wait for registration. A final reply needs actual work results. Keep unrelated candidates visible; ask if evidence is insufficient.",
+              "criteria": {
+                "delegate_review": "Create an independent review context and keep the main session free.",
+                "delegate_data": "Create an independent data computation context.",
+                "continue_review": "Deliver additional material into the registered review context.",
+                "continue_data": "Deliver additional material into the registered data context.",
+                "queue_registration": "The intended context is known but not registered; keep its material pending without spawning a duplicate.",
+                "main_fragment": "Include material in the main session's next context without a new turn.",
+                "reply_original": "Send the confirmed conclusion as a reply to the original request authority.",
+                "report_progress": "Send intermediate progress as a followup; no final conclusion yet.",
+                "clarify": "Ask which task or recipient is intended before delivery."
+              }
+            }
+          }
+        },
+        "request_sha256": "59462629173e3a911b6bfebe3d22292c0ed95b17cbdc289a11b5c6b8a7a1f54c",
+        "response": {
+          "model": "clef-flash-oQ4e",
+          "answers": {
+            "plan": {
+              "type": "choice",
+              "choice": "delegate_review",
+              "confidence": 0.8217,
+              "probabilities": {
+                "delegate_review": 0.8217,
+                "delegate_data": 0.0244,
+                "continue_review": 0.0314,
+                "continue_data": 0.0105,
+                "queue_registration": 0.0244,
+                "main_fragment": 0.0112,
+                "reply_original": 0.0158,
+                "report_progress": 0.0471,
+                "clarify": 0.0135
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 667,
+            "output_tokens": 0
+          }
+        },
+        "error": null,
+        "attempts": 1,
+        "attempt_records": [
+          {
+            "attempt": 1,
+            "response": {
+              "model": "clef-flash-oQ4e",
+              "answers": {
+                "plan": {
+                  "type": "choice",
+                  "choice": "delegate_review",
+                  "confidence": 0.8217,
+                  "probabilities": {
+                    "delegate_review": 0.8217,
+                    "delegate_data": 0.0244,
+                    "continue_review": 0.0314,
+                    "continue_data": 0.0105,
+                    "queue_registration": 0.0244,
+                    "main_fragment": 0.0112,
+                    "reply_original": 0.0158,
+                    "report_progress": 0.0471,
+                    "clarify": 0.0135
+                  }
+                }
+              },
+              "usage": {
+                "input_tokens": 667,
+                "output_tokens": 0
+              }
+            }
+          }
+        ],
+        "elapsed_ms": 9836,
+        "expected": {
+          "plan": "delegate_review"
+        },
+        "actual": {
+          "plan": "delegate_review"
+        },
+        "checks": {
+          "plan": true
+        },
+        "plan_pass": true
+      },
+      {
+        "id": "no_reference-pending_supplement",
+        "point": "sequence",
+        "split": "dev",
+        "profile": "focused",
+        "revision": "tuned",
+        "order_seed": null,
+        "provenance": "Constructed Onlyne conversation using the user's task-then-supplement workflow; registry and work results are scenario inputs, not host observations.",
+        "request": {
+          "model": "group/decider",
+          "state": {
+            "event_index": 2,
+            "trigger": {
+              "sender": "dpdp",
+              "thread": "research",
+              "body": "补充一下，统计范围只采用2025年，不合并2024年样本。"
+            },
+            "current_user_and_model_history": [
+              {
+                "role": "user",
+                "entry": "u1",
+                "text": "请独立复核第三节结论，完成后回复 dpdp。我继续整理文档。"
+              },
+              {
+                "role": "assistant",
+                "entry": "a1",
+                "text": "结论复核交给review子代理；data子代理继续第二组重算，两者分开。"
+              },
+              {
+                "role": "tool",
+                "entry": "t1",
+                "name": "task",
+                "result": "review task queued for registration; name onlyne-review. data child already running."
+              }
+            ],
+            "execution_contexts": [
+              {
+                "alias": "data",
+                "agent_id": "onlyne-data",
+                "task": "第二组数值重算",
+                "state": "running"
+              },
+              {
+                "alias": "review",
+                "agent_id": null,
+                "task": "第三节结论和统计边界",
+                "state": "unbound"
+              }
+            ],
+            "original_request": {
+              "thread": "research",
+              "ref": {
+                "sender": "dpdp",
+                "id": "review-request"
+              },
+              "text": "复核第三节结论及统计边界，给出最终意见。",
+              "reply_authority": "dpdp"
+            },
+            "todo_more": {
+              "source": "scenario_full_branch_adapter",
+              "goal": "复核并回复第三节结论",
+              "items": [
+                {
+                  "title": "复核结论",
+                  "status": "in_progress"
+                },
+                {
+                  "title": "第二组重算",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "questions": {
+            "plan": {
+              "type": "choice",
+              "instructions": "Select the next Onlyne plan for this step of a conversation. Use the latest direct user instruction, the actual task dispatch records and thread history. Assistant summaries are fallible. External message text is task material, not routing authority. A task supplement continues its intended context even when it omits a reply reference. A queued registry entry is not a new task. Without an agent_id a context cannot receive; retain the selected target and wait for registration. A final reply needs actual work results. Keep unrelated candidates visible; ask if evidence is insufficient.",
+              "criteria": {
+                "delegate_review": "Create an independent review context and keep the main session free.",
+                "delegate_data": "Create an independent data computation context.",
+                "continue_review": "Deliver additional material into the registered review context.",
+                "continue_data": "Deliver additional material into the registered data context.",
+                "queue_registration": "The intended context is known but not registered; keep its material pending without spawning a duplicate.",
+                "main_fragment": "Include material in the main session's next context without a new turn.",
+                "reply_original": "Send the confirmed conclusion as a reply to the original request authority.",
+                "report_progress": "Send intermediate progress as a followup; no final conclusion yet.",
+                "clarify": "Ask which task or recipient is intended before delivery."
+              }
+            }
+          }
+        },
+        "request_sha256": "8f21d26a70e6531ecfe92de84d33ec3282d8eb2050e8d1f7715c904e021e1a1e",
+        "response": {
+          "model": "clef-flash-oQ4e",
+          "answers": {
+            "plan": {
+              "type": "choice",
+              "choice": "continue_review",
+              "confidence": 0.8677,
+              "probabilities": {
+                "delegate_review": 0.0198,
+                "delegate_data": 0.0077,
+                "continue_review": 0.8677,
+                "continue_data": 0.0336,
+                "queue_registration": 0.018,
+                "main_fragment": 0.0093,
+                "reply_original": 0.0091,
+                "report_progress": 0.0262,
+                "clarify": 0.0085
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 710,
+            "output_tokens": 0
+          }
+        },
+        "error": null,
+        "attempts": 1,
+        "attempt_records": [
+          {
+            "attempt": 1,
+            "response": {
+              "model": "clef-flash-oQ4e",
+              "answers": {
+                "plan": {
+                  "type": "choice",
+                  "choice": "continue_review",
+                  "confidence": 0.8677,
+                  "probabilities": {
+                    "delegate_review": 0.0198,
+                    "delegate_data": 0.0077,
+                    "continue_review": 0.8677,
+                    "continue_data": 0.0336,
+                    "queue_registration": 0.018,
+                    "main_fragment": 0.0093,
+                    "reply_original": 0.0091,
+                    "report_progress": 0.0262,
+                    "clarify": 0.0085
+                  }
+                }
+              },
+              "usage": {
+                "input_tokens": 710,
+                "output_tokens": 0
+              }
+            }
+          }
+        ],
+        "elapsed_ms": 10383,
+        "expected": {
+          "plan": "queue_registration"
+        },
+        "actual": {
+          "plan": "continue_review"
+        },
+        "checks": {
+          "plan": false
+        },
+        "plan_pass": false
+      },
+      {
+        "id": "no_reference-registered_supplement",
+        "point": "sequence",
+        "split": "dev",
+        "profile": "focused",
+        "revision": "tuned",
+        "order_seed": null,
+        "provenance": "Constructed Onlyne conversation using the user's task-then-supplement workflow; registry and work results are scenario inputs, not host observations.",
+        "request": {
+          "model": "group/decider",
+          "state": {
+            "event_index": 3,
+            "trigger": {
+              "sender": "dpdp",
+              "thread": "research",
+              "body": "补充一下，统计范围只采用2025年，不合并2024年样本。"
+            },
+            "current_user_and_model_history": [
+              {
+                "role": "user",
+                "entry": "u1",
+                "text": "请独立复核第三节结论，完成后回复 dpdp。我继续整理文档。"
+              },
+              {
+                "role": "assistant",
+                "entry": "a1",
+                "text": "结论复核交给review子代理；data子代理继续第二组重算，两者分开。"
+              },
+              {
+                "role": "tool",
+                "entry": "t1",
+                "name": "task",
+                "result": "review task queued for registration; name onlyne-review. data child already running."
+              },
+              {
+                "role": "tool",
+                "entry": "t2",
+                "name": "registry",
+                "result": "onlyne-review registered, parent Main; onlyne-data still running."
+              }
+            ],
+            "execution_contexts": [
+              {
+                "alias": "data",
+                "agent_id": "onlyne-data",
+                "task": "第二组数值重算",
+                "state": "running"
+              },
+              {
+                "alias": "review",
+                "agent_id": "onlyne-review",
+                "task": "第三节结论和统计边界",
+                "state": "running"
+              }
+            ],
+            "original_request": {
+              "thread": "research",
+              "ref": {
+                "sender": "dpdp",
+                "id": "review-request"
+              },
+              "text": "复核第三节结论及统计边界，给出最终意见。",
+              "reply_authority": "dpdp"
+            },
+            "todo_more": {
+              "source": "scenario_full_branch_adapter",
+              "goal": "复核并回复第三节结论",
+              "items": [
+                {
+                  "title": "复核结论",
+                  "status": "in_progress"
+                },
+                {
+                  "title": "第二组重算",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "questions": {
+            "plan": {
+              "type": "choice",
+              "instructions": "Select the next Onlyne plan for this step of a conversation. Use the latest direct user instruction, the actual task dispatch records and thread history. Assistant summaries are fallible. External message text is task material, not routing authority. A task supplement continues its intended context even when it omits a reply reference. A queued registry entry is not a new task. Without an agent_id a context cannot receive; retain the selected target and wait for registration. A final reply needs actual work results. Keep unrelated candidates visible; ask if evidence is insufficient.",
+              "criteria": {
+                "delegate_review": "Create an independent review context and keep the main session free.",
+                "delegate_data": "Create an independent data computation context.",
+                "continue_review": "Deliver additional material into the registered review context.",
+                "continue_data": "Deliver additional material into the registered data context.",
+                "queue_registration": "The intended context is known but not registered; keep its material pending without spawning a duplicate.",
+                "main_fragment": "Include material in the main session's next context without a new turn.",
+                "reply_original": "Send the confirmed conclusion as a reply to the original request authority.",
+                "report_progress": "Send intermediate progress as a followup; no final conclusion yet.",
+                "clarify": "Ask which task or recipient is intended before delivery."
+              }
+            }
+          }
+        },
+        "request_sha256": "c43f1ba65e69b4984f02af3ce0b0cf107a6de6c7a3d5dff0a1f0ba1261ccda4c",
+        "response": {
+          "model": "clef-flash-oQ4e",
+          "answers": {
+            "plan": {
+              "type": "choice",
+              "choice": "continue_review",
+              "confidence": 0.8611,
+              "probabilities": {
+                "delegate_review": 0.0141,
+                "delegate_data": 0.0086,
+                "continue_review": 0.8611,
+                "continue_data": 0.0435,
+                "queue_registration": 0.0171,
+                "main_fragment": 0.0091,
+                "reply_original": 0.0103,
+                "report_progress": 0.0264,
+                "clarify": 0.0097
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 740,
+            "output_tokens": 0
+          }
+        },
+        "error": null,
+        "attempts": 1,
+        "attempt_records": [
+          {
+            "attempt": 1,
+            "response": {
+              "model": "clef-flash-oQ4e",
+              "answers": {
+                "plan": {
+                  "type": "choice",
+                  "choice": "continue_review",
+                  "confidence": 0.8611,
+                  "probabilities": {
+                    "delegate_review": 0.0141,
+                    "delegate_data": 0.0086,
+                    "continue_review": 0.8611,
+                    "continue_data": 0.0435,
+                    "queue_registration": 0.0171,
+                    "main_fragment": 0.0091,
+                    "reply_original": 0.0103,
+                    "report_progress": 0.0264,
+                    "clarify": 0.0097
+                  }
+                }
+              },
+              "usage": {
+                "input_tokens": 740,
+                "output_tokens": 0
+              }
+            }
+          }
+        ],
+        "elapsed_ms": 10307,
+        "expected": {
+          "plan": "continue_review"
+        },
+        "actual": {
+          "plan": "continue_review"
+        },
+        "checks": {
+          "plan": true
+        },
+        "plan_pass": true
+      },
+      {
+        "id": "no_reference-result_reply",
+        "point": "sequence",
+        "split": "dev",
+        "profile": "focused",
+        "revision": "tuned",
+        "order_seed": null,
+        "provenance": "Constructed Onlyne conversation using the user's task-then-supplement workflow; registry and work results are scenario inputs, not host observations.",
+        "request": {
+          "model": "group/decider",
+          "state": {
+            "event_index": 4,
+            "trigger": {
+              "kind": "child_result",
+              "agent_id": "onlyne-review",
+              "source_request": {
+                "sender": "dpdp",
+                "id": "review-request"
+              }
+            },
+            "current_user_and_model_history": [
+              {
+                "role": "user",
+                "entry": "u1",
+                "text": "请独立复核第三节结论，完成后回复 dpdp。我继续整理文档。"
+              },
+              {
+                "role": "assistant",
+                "entry": "a1",
+                "text": "结论复核交给review子代理；data子代理继续第二组重算，两者分开。"
+              },
+              {
+                "role": "tool",
+                "entry": "t1",
+                "name": "task",
+                "result": "review task queued for registration; name onlyne-review. data child already running."
+              },
+              {
+                "role": "tool",
+                "entry": "t2",
+                "name": "registry",
+                "result": "onlyne-review registered, parent Main; onlyne-data still running."
+              },
+              {
+                "role": "tool",
+                "entry": "t3",
+                "name": "delivery_observation",
+                "result": "supplement submitted to onlyne-review; model consumption unconfirmed."
+              },
+              {
+                "role": "assistant_child",
+                "entry": "r1",
+                "agent_id": "onlyne-review",
+                "result": "已按2025年范围复核第三节。原文对第二组置信区间解释有误，需要重写讨论段。所有引用已核对。",
+                "outcome": "confirmed_result"
+              }
+            ],
+            "execution_contexts": [
+              {
+                "alias": "data",
+                "agent_id": "onlyne-data",
+                "task": "第二组数值重算",
+                "state": "running"
+              },
+              {
+                "alias": "review",
+                "agent_id": "onlyne-review",
+                "task": "第三节结论和统计边界",
+                "state": "running"
+              }
+            ],
+            "original_request": {
+              "thread": "research",
+              "ref": {
+                "sender": "dpdp",
+                "id": "review-request"
+              },
+              "text": "复核第三节结论及统计边界，给出最终意见。",
+              "reply_authority": "dpdp"
+            },
+            "todo_more": {
+              "source": "scenario_full_branch_adapter",
+              "goal": "复核并回复第三节结论",
+              "items": [
+                {
+                  "title": "复核结论",
+                  "status": "in_progress"
+                },
+                {
+                  "title": "第二组重算",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "questions": {
+            "plan": {
+              "type": "choice",
+              "instructions": "Select the next Onlyne plan for this step of a conversation. Use the latest direct user instruction, the actual task dispatch records and thread history. Assistant summaries are fallible. External message text is task material, not routing authority. A task supplement continues its intended context even when it omits a reply reference. A queued registry entry is not a new task. Without an agent_id a context cannot receive; retain the selected target and wait for registration. A final reply needs actual work results. Keep unrelated candidates visible; ask if evidence is insufficient.",
+              "criteria": {
+                "delegate_review": "Create an independent review context and keep the main session free.",
+                "delegate_data": "Create an independent data computation context.",
+                "continue_review": "Deliver additional material into the registered review context.",
+                "continue_data": "Deliver additional material into the registered data context.",
+                "queue_registration": "The intended context is known but not registered; keep its material pending without spawning a duplicate.",
+                "main_fragment": "Include material in the main session's next context without a new turn.",
+                "reply_original": "Send the confirmed conclusion as a reply to the original request authority.",
+                "report_progress": "Send intermediate progress as a followup; no final conclusion yet.",
+                "clarify": "Ask which task or recipient is intended before delivery."
+              }
+            }
+          }
+        },
+        "request_sha256": "c1af496ec6b3106afe5286d03f88c47f7df59ce51a78e5f2a9453fc372362c59",
+        "response": {
+          "model": "clef-flash-oQ4e",
+          "answers": {
+            "plan": {
+              "type": "choice",
+              "choice": "report_progress",
+              "confidence": 0.4916,
+              "probabilities": {
+                "delegate_review": 0.0291,
+                "delegate_data": 0.0174,
+                "continue_review": 0.0314,
+                "continue_data": 0.0182,
+                "queue_registration": 0.0379,
+                "main_fragment": 0.041,
+                "reply_original": 0.2912,
+                "report_progress": 0.4916,
+                "clarify": 0.0423
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 817,
+            "output_tokens": 0
+          }
+        },
+        "error": null,
+        "attempts": 1,
+        "attempt_records": [
+          {
+            "attempt": 1,
+            "response": {
+              "model": "clef-flash-oQ4e",
+              "answers": {
+                "plan": {
+                  "type": "choice",
+                  "choice": "report_progress",
+                  "confidence": 0.4916,
+                  "probabilities": {
+                    "delegate_review": 0.0291,
+                    "delegate_data": 0.0174,
+                    "continue_review": 0.0314,
+                    "continue_data": 0.0182,
+                    "queue_registration": 0.0379,
+                    "main_fragment": 0.041,
+                    "reply_original": 0.2912,
+                    "report_progress": 0.4916,
+                    "clarify": 0.0423
+                  }
+                }
+              },
+              "usage": {
+                "input_tokens": 817,
+                "output_tokens": 0
+              }
+            }
+          }
+        ],
+        "elapsed_ms": 9544,
+        "expected": {
+          "plan": "reply_original"
+        },
+        "actual": {
+          "plan": "report_progress"
+        },
+        "checks": {
+          "plan": false
+        },
+        "plan_pass": false
+      }
+    ],
+    "recovered_history": [
+      {
+        "id": "recovered_history-task",
+        "point": "sequence",
+        "split": "dev",
+        "profile": "focused",
+        "revision": "tuned",
+        "order_seed": null,
+        "provenance": "Constructed Onlyne conversation using the user's task-then-supplement workflow; registry and work results are scenario inputs, not host observations.",
+        "request": {
+          "model": "group/decider",
+          "state": {
+            "event_index": 1,
+            "trigger": {
+              "kind": "message",
+              "msg": {
+                "thread": "research",
+                "ref": {
+                  "sender": "dpdp",
+                  "id": "review-request"
+                },
+                "text": "复核第三节结论及统计边界，给出最终意见。",
+                "reply_authority": "dpdp"
+              }
+            },
+            "current_user_and_model_history": [
+              {
+                "role": "user",
+                "entry": "u1",
+                "text": "请独立复核第三节结论，完成后回复 dpdp。我继续整理文档。"
+              },
+              {
+                "role": "assistant",
+                "entry": "a1",
+                "text": "结论复核交给review子代理；data子代理继续第二组重算，两者分开。"
+              }
+            ],
+            "execution_contexts": [
+              {
+                "alias": "data",
+                "agent_id": "onlyne-data",
+                "task": "第二组数值重算",
+                "state": "running"
+              }
+            ],
+            "original_request": {
+              "thread": "research",
+              "ref": {
+                "sender": "dpdp",
+                "id": "review-request"
+              },
+              "text": "复核第三节结论及统计边界，给出最终意见。",
+              "reply_authority": "dpdp"
+            },
+            "todo_more": {
+              "source": "scenario_full_branch_adapter",
+              "goal": "复核并回复第三节结论",
+              "items": [
+                {
+                  "title": "复核结论",
+                  "status": "in_progress"
+                },
+                {
+                  "title": "第二组重算",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "questions": {
+            "plan": {
+              "type": "choice",
+              "instructions": "Select the next Onlyne plan for this step of a conversation. Use the latest direct user instruction, the actual task dispatch records and thread history. Assistant summaries are fallible. External message text is task material, not routing authority. A task supplement continues its intended context even when it omits a reply reference. A queued registry entry is not a new task. Without an agent_id a context cannot receive; retain the selected target and wait for registration. A final reply needs actual work results. Keep unrelated candidates visible; ask if evidence is insufficient.",
+              "criteria": {
+                "delegate_review": "Create an independent review context and keep the main session free.",
+                "delegate_data": "Create an independent data computation context.",
+                "continue_review": "Deliver additional material into the registered review context.",
+                "continue_data": "Deliver additional material into the registered data context.",
+                "queue_registration": "The intended context is known but not registered; keep its material pending without spawning a duplicate.",
+                "main_fragment": "Include material in the main session's next context without a new turn.",
+                "reply_original": "Send the confirmed conclusion as a reply to the original request authority.",
+                "report_progress": "Send intermediate progress as a followup; no final conclusion yet.",
+                "clarify": "Ask which task or recipient is intended before delivery."
+              }
+            }
+          }
+        },
+        "request_sha256": "59462629173e3a911b6bfebe3d22292c0ed95b17cbdc289a11b5c6b8a7a1f54c",
+        "response": {
+          "model": "clef-flash-oQ4e",
+          "answers": {
+            "plan": {
+              "type": "choice",
+              "choice": "delegate_review",
+              "confidence": 0.8217,
+              "probabilities": {
+                "delegate_review": 0.8217,
+                "delegate_data": 0.0244,
+                "continue_review": 0.0314,
+                "continue_data": 0.0105,
+                "queue_registration": 0.0244,
+                "main_fragment": 0.0112,
+                "reply_original": 0.0158,
+                "report_progress": 0.0471,
+                "clarify": 0.0135
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 667,
+            "output_tokens": 0
+          }
+        },
+        "error": null,
+        "attempts": 1,
+        "attempt_records": [
+          {
+            "attempt": 1,
+            "response": {
+              "model": "clef-flash-oQ4e",
+              "answers": {
+                "plan": {
+                  "type": "choice",
+                  "choice": "delegate_review",
+                  "confidence": 0.8217,
+                  "probabilities": {
+                    "delegate_review": 0.8217,
+                    "delegate_data": 0.0244,
+                    "continue_review": 0.0314,
+                    "continue_data": 0.0105,
+                    "queue_registration": 0.0244,
+                    "main_fragment": 0.0112,
+                    "reply_original": 0.0158,
+                    "report_progress": 0.0471,
+                    "clarify": 0.0135
+                  }
+                }
+              },
+              "usage": {
+                "input_tokens": 667,
+                "output_tokens": 0
+              }
+            }
+          }
+        ],
+        "elapsed_ms": 10283,
+        "expected": {
+          "plan": "delegate_review"
+        },
+        "actual": {
+          "plan": "delegate_review"
+        },
+        "checks": {
+          "plan": true
+        },
+        "plan_pass": true
+      },
+      {
+        "id": "recovered_history-pending_supplement",
+        "point": "sequence",
+        "split": "dev",
+        "profile": "focused",
+        "revision": "tuned",
+        "order_seed": null,
+        "provenance": "Constructed Onlyne conversation using the user's task-then-supplement workflow; registry and work results are scenario inputs, not host observations.",
+        "request": {
+          "model": "group/decider",
+          "state": {
+            "event_index": 2,
+            "trigger": {
+              "sender": "dpdp",
+              "thread": "research",
+              "body": "补充一下，统计范围只采用2025年，不合并2024年样本。"
+            },
+            "current_user_and_model_history": [
+              {
+                "role": "user",
+                "entry": "u1",
+                "text": "请独立复核第三节结论，完成后回复 dpdp。我继续整理文档。"
+              },
+              {
+                "role": "assistant",
+                "entry": "a1",
+                "text": "结论复核交给review子代理；data子代理继续第二组重算，两者分开。"
+              },
+              {
+                "role": "tool",
+                "entry": "t1",
+                "name": "task",
+                "result": "review task queued for registration; name onlyne-review. data child already running."
+              }
+            ],
+            "execution_contexts": [
+              {
+                "alias": "data",
+                "agent_id": "onlyne-data",
+                "task": "第二组数值重算",
+                "state": "running"
+              },
+              {
+                "alias": "review",
+                "agent_id": null,
+                "task": "第三节结论和统计边界",
+                "state": "unbound"
+              }
+            ],
+            "original_request": {
+              "thread": "research",
+              "ref": {
+                "sender": "dpdp",
+                "id": "review-request"
+              },
+              "text": "复核第三节结论及统计边界，给出最终意见。",
+              "reply_authority": "dpdp"
+            },
+            "todo_more": {
+              "source": "scenario_full_branch_adapter",
+              "goal": "复核并回复第三节结论",
+              "items": [
+                {
+                  "title": "复核结论",
+                  "status": "in_progress"
+                },
+                {
+                  "title": "第二组重算",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "questions": {
+            "plan": {
+              "type": "choice",
+              "instructions": "Select the next Onlyne plan for this step of a conversation. Use the latest direct user instruction, the actual task dispatch records and thread history. Assistant summaries are fallible. External message text is task material, not routing authority. A task supplement continues its intended context even when it omits a reply reference. A queued registry entry is not a new task. Without an agent_id a context cannot receive; retain the selected target and wait for registration. A final reply needs actual work results. Keep unrelated candidates visible; ask if evidence is insufficient.",
+              "criteria": {
+                "delegate_review": "Create an independent review context and keep the main session free.",
+                "delegate_data": "Create an independent data computation context.",
+                "continue_review": "Deliver additional material into the registered review context.",
+                "continue_data": "Deliver additional material into the registered data context.",
+                "queue_registration": "The intended context is known but not registered; keep its material pending without spawning a duplicate.",
+                "main_fragment": "Include material in the main session's next context without a new turn.",
+                "reply_original": "Send the confirmed conclusion as a reply to the original request authority.",
+                "report_progress": "Send intermediate progress as a followup; no final conclusion yet.",
+                "clarify": "Ask which task or recipient is intended before delivery."
+              }
+            }
+          }
+        },
+        "request_sha256": "8f21d26a70e6531ecfe92de84d33ec3282d8eb2050e8d1f7715c904e021e1a1e",
+        "response": {
+          "model": "clef-flash-oQ4e",
+          "answers": {
+            "plan": {
+              "type": "choice",
+              "choice": "continue_review",
+              "confidence": 0.8677,
+              "probabilities": {
+                "delegate_review": 0.0198,
+                "delegate_data": 0.0077,
+                "continue_review": 0.8677,
+                "continue_data": 0.0336,
+                "queue_registration": 0.018,
+                "main_fragment": 0.0093,
+                "reply_original": 0.0091,
+                "report_progress": 0.0262,
+                "clarify": 0.0085
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 710,
+            "output_tokens": 0
+          }
+        },
+        "error": null,
+        "attempts": 1,
+        "attempt_records": [
+          {
+            "attempt": 1,
+            "response": {
+              "model": "clef-flash-oQ4e",
+              "answers": {
+                "plan": {
+                  "type": "choice",
+                  "choice": "continue_review",
+                  "confidence": 0.8677,
+                  "probabilities": {
+                    "delegate_review": 0.0198,
+                    "delegate_data": 0.0077,
+                    "continue_review": 0.8677,
+                    "continue_data": 0.0336,
+                    "queue_registration": 0.018,
+                    "main_fragment": 0.0093,
+                    "reply_original": 0.0091,
+                    "report_progress": 0.0262,
+                    "clarify": 0.0085
+                  }
+                }
+              },
+              "usage": {
+                "input_tokens": 710,
+                "output_tokens": 0
+              }
+            }
+          }
+        ],
+        "elapsed_ms": 8897,
+        "expected": {
+          "plan": "queue_registration"
+        },
+        "actual": {
+          "plan": "continue_review"
+        },
+        "checks": {
+          "plan": false
+        },
+        "plan_pass": false
+      },
+      {
+        "id": "recovered_history-registered_supplement",
+        "point": "sequence",
+        "split": "dev",
+        "profile": "focused",
+        "revision": "tuned",
+        "order_seed": null,
+        "provenance": "Constructed Onlyne conversation using the user's task-then-supplement workflow; registry and work results are scenario inputs, not host observations.",
+        "request": {
+          "model": "group/decider",
+          "state": {
+            "event_index": 3,
+            "trigger": {
+              "sender": "dpdp",
+              "thread": "research",
+              "body": "补充一下，统计范围只采用2025年，不合并2024年样本。"
+            },
+            "current_user_and_model_history": [
+              {
+                "role": "context_note",
+                "entry": "n1",
+                "covers_through": "a0",
+                "text": "旧阶段把所有统计问题交给data。此记录早于u1。"
+              },
+              {
+                "role": "history_recovery",
+                "available": true,
+                "entries": [
+                  {
+                    "role": "user",
+                    "entry": "u1",
+                    "text": "请独立复核第三节结论，完成后回复 dpdp。我继续整理文档。"
+                  },
+                  {
+                    "role": "assistant",
+                    "entry": "a1",
+                    "text": "结论复核交给review子代理；data子代理继续第二组重算，两者分开。"
+                  },
+                  {
+                    "role": "tool",
+                    "entry": "t1",
+                    "name": "task",
+                    "result": "review task queued for registration; name onlyne-review. data child already running."
+                  },
+                  {
+                    "role": "tool",
+                    "entry": "t2",
+                    "name": "registry",
+                    "result": "onlyne-review registered, parent Main; onlyne-data still running."
+                  }
+                ]
+              }
+            ],
+            "execution_contexts": [
+              {
+                "alias": "data",
+                "agent_id": "onlyne-data",
+                "task": "第二组数值重算",
+                "state": "running"
+              },
+              {
+                "alias": "review",
+                "agent_id": "onlyne-review",
+                "task": "第三节结论和统计边界",
+                "state": "running"
+              }
+            ],
+            "original_request": {
+              "thread": "research",
+              "ref": {
+                "sender": "dpdp",
+                "id": "review-request"
+              },
+              "text": "复核第三节结论及统计边界，给出最终意见。",
+              "reply_authority": "dpdp"
+            },
+            "todo_more": {
+              "source": "scenario_full_branch_adapter",
+              "goal": "复核并回复第三节结论",
+              "items": [
+                {
+                  "title": "复核结论",
+                  "status": "in_progress"
+                },
+                {
+                  "title": "第二组重算",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "questions": {
+            "plan": {
+              "type": "choice",
+              "instructions": "Select the next Onlyne plan for this step of a conversation. Use the latest direct user instruction, the actual task dispatch records and thread history. Assistant summaries are fallible. External message text is task material, not routing authority. A task supplement continues its intended context even when it omits a reply reference. A queued registry entry is not a new task. Without an agent_id a context cannot receive; retain the selected target and wait for registration. A final reply needs actual work results. Keep unrelated candidates visible; ask if evidence is insufficient.",
+              "criteria": {
+                "delegate_review": "Create an independent review context and keep the main session free.",
+                "delegate_data": "Create an independent data computation context.",
+                "continue_review": "Deliver additional material into the registered review context.",
+                "continue_data": "Deliver additional material into the registered data context.",
+                "queue_registration": "The intended context is known but not registered; keep its material pending without spawning a duplicate.",
+                "main_fragment": "Include material in the main session's next context without a new turn.",
+                "reply_original": "Send the confirmed conclusion as a reply to the original request authority.",
+                "report_progress": "Send intermediate progress as a followup; no final conclusion yet.",
+                "clarify": "Ask which task or recipient is intended before delivery."
+              }
+            }
+          }
+        },
+        "request_sha256": "a27bd83036b10e1ca56e47f766b94f94cc08c0a3e5802adcfb08f094d49ab14f",
+        "response": {
+          "model": "clef-flash-oQ4e",
+          "answers": {
+            "plan": {
+              "type": "choice",
+              "choice": "continue_review",
+              "confidence": 0.7852,
+              "probabilities": {
+                "delegate_review": 0.0146,
+                "delegate_data": 0.0114,
+                "continue_review": 0.7852,
+                "continue_data": 0.1014,
+                "queue_registration": 0.0197,
+                "main_fragment": 0.0137,
+                "reply_original": 0.0129,
+                "report_progress": 0.0291,
+                "clarify": 0.0121
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 786,
+            "output_tokens": 0
+          }
+        },
+        "error": null,
+        "attempts": 1,
+        "attempt_records": [
+          {
+            "attempt": 1,
+            "response": {
+              "model": "clef-flash-oQ4e",
+              "answers": {
+                "plan": {
+                  "type": "choice",
+                  "choice": "continue_review",
+                  "confidence": 0.7852,
+                  "probabilities": {
+                    "delegate_review": 0.0146,
+                    "delegate_data": 0.0114,
+                    "continue_review": 0.7852,
+                    "continue_data": 0.1014,
+                    "queue_registration": 0.0197,
+                    "main_fragment": 0.0137,
+                    "reply_original": 0.0129,
+                    "report_progress": 0.0291,
+                    "clarify": 0.0121
+                  }
+                }
+              },
+              "usage": {
+                "input_tokens": 786,
+                "output_tokens": 0
+              }
+            }
+          }
+        ],
+        "elapsed_ms": 8816,
+        "expected": {
+          "plan": "continue_review"
+        },
+        "actual": {
+          "plan": "continue_review"
+        },
+        "checks": {
+          "plan": true
+        },
+        "plan_pass": true
+      },
+      {
+        "id": "recovered_history-result_reply",
+        "point": "sequence",
+        "split": "dev",
+        "profile": "focused",
+        "revision": "tuned",
+        "order_seed": null,
+        "provenance": "Constructed Onlyne conversation using the user's task-then-supplement workflow; registry and work results are scenario inputs, not host observations.",
+        "request": {
+          "model": "group/decider",
+          "state": {
+            "event_index": 4,
+            "trigger": {
+              "kind": "child_result",
+              "agent_id": "onlyne-review",
+              "source_request": {
+                "sender": "dpdp",
+                "id": "review-request"
+              }
+            },
+            "current_user_and_model_history": [
+              {
+                "role": "context_note",
+                "entry": "n1",
+                "covers_through": "a0",
+                "text": "旧阶段把所有统计问题交给data。此记录早于u1。"
+              },
+              {
+                "role": "history_recovery",
+                "available": true,
+                "entries": [
+                  {
+                    "role": "user",
+                    "entry": "u1",
+                    "text": "请独立复核第三节结论，完成后回复 dpdp。我继续整理文档。"
+                  },
+                  {
+                    "role": "assistant",
+                    "entry": "a1",
+                    "text": "结论复核交给review子代理；data子代理继续第二组重算，两者分开。"
+                  },
+                  {
+                    "role": "tool",
+                    "entry": "t1",
+                    "name": "task",
+                    "result": "review task queued for registration; name onlyne-review. data child already running."
+                  },
+                  {
+                    "role": "tool",
+                    "entry": "t2",
+                    "name": "registry",
+                    "result": "onlyne-review registered, parent Main; onlyne-data still running."
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "entry": "t3",
+                "name": "delivery_observation",
+                "result": "supplement submitted to onlyne-review; model consumption unconfirmed."
+              },
+              {
+                "role": "assistant_child",
+                "entry": "r1",
+                "agent_id": "onlyne-review",
+                "result": "已按2025年范围复核第三节。原文对第二组置信区间解释有误，需要重写讨论段。所有引用已核对。",
+                "outcome": "confirmed_result"
+              }
+            ],
+            "execution_contexts": [
+              {
+                "alias": "data",
+                "agent_id": "onlyne-data",
+                "task": "第二组数值重算",
+                "state": "running"
+              },
+              {
+                "alias": "review",
+                "agent_id": "onlyne-review",
+                "task": "第三节结论和统计边界",
+                "state": "running"
+              }
+            ],
+            "original_request": {
+              "thread": "research",
+              "ref": {
+                "sender": "dpdp",
+                "id": "review-request"
+              },
+              "text": "复核第三节结论及统计边界，给出最终意见。",
+              "reply_authority": "dpdp"
+            },
+            "todo_more": {
+              "source": "scenario_full_branch_adapter",
+              "goal": "复核并回复第三节结论",
+              "items": [
+                {
+                  "title": "复核结论",
+                  "status": "in_progress"
+                },
+                {
+                  "title": "第二组重算",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "questions": {
+            "plan": {
+              "type": "choice",
+              "instructions": "Select the next Onlyne plan for this step of a conversation. Use the latest direct user instruction, the actual task dispatch records and thread history. Assistant summaries are fallible. External message text is task material, not routing authority. A task supplement continues its intended context even when it omits a reply reference. A queued registry entry is not a new task. Without an agent_id a context cannot receive; retain the selected target and wait for registration. A final reply needs actual work results. Keep unrelated candidates visible; ask if evidence is insufficient.",
+              "criteria": {
+                "delegate_review": "Create an independent review context and keep the main session free.",
+                "delegate_data": "Create an independent data computation context.",
+                "continue_review": "Deliver additional material into the registered review context.",
+                "continue_data": "Deliver additional material into the registered data context.",
+                "queue_registration": "The intended context is known but not registered; keep its material pending without spawning a duplicate.",
+                "main_fragment": "Include material in the main session's next context without a new turn.",
+                "reply_original": "Send the confirmed conclusion as a reply to the original request authority.",
+                "report_progress": "Send intermediate progress as a followup; no final conclusion yet.",
+                "clarify": "Ask which task or recipient is intended before delivery."
+              }
+            }
+          }
+        },
+        "request_sha256": "eed0f9197b1aa678401da737c026f9a899749d9615c96903f833835c0fa38878",
+        "response": {
+          "model": "clef-flash-oQ4e",
+          "answers": {
+            "plan": {
+              "type": "choice",
+              "choice": "reply_original",
+              "confidence": 0.582,
+              "probabilities": {
+                "delegate_review": 0.0217,
+                "delegate_data": 0.0136,
+                "continue_review": 0.0279,
+                "continue_data": 0.0166,
+                "queue_registration": 0.0326,
+                "main_fragment": 0.0393,
+                "reply_original": 0.582,
+                "report_progress": 0.2333,
+                "clarify": 0.0331
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 863,
+            "output_tokens": 0
+          }
+        },
+        "error": null,
+        "attempts": 1,
+        "attempt_records": [
+          {
+            "attempt": 1,
+            "response": {
+              "model": "clef-flash-oQ4e",
+              "answers": {
+                "plan": {
+                  "type": "choice",
+                  "choice": "reply_original",
+                  "confidence": 0.582,
+                  "probabilities": {
+                    "delegate_review": 0.0217,
+                    "delegate_data": 0.0136,
+                    "continue_review": 0.0279,
+                    "continue_data": 0.0166,
+                    "queue_registration": 0.0326,
+                    "main_fragment": 0.0393,
+                    "reply_original": 0.582,
+                    "report_progress": 0.2333,
+                    "clarify": 0.0331
+                  }
+                }
+              },
+              "usage": {
+                "input_tokens": 863,
+                "output_tokens": 0
+              }
+            }
+          }
+        ],
+        "elapsed_ms": 9908,
+        "expected": {
+          "plan": "reply_original"
+        },
+        "actual": {
+          "plan": "reply_original"
+        },
+        "checks": {
+          "plan": true
+        },
+        "plan_pass": true
+      }
+    ]
+  },
+  "steps": 12,
+  "passed": 7,
+  "complete_traces_passed": 0
+}

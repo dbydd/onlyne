@@ -1,0 +1,5100 @@
+{
+  "at": "2026-10-24T06:00:47.806997+00:00",
+  "endpoint": "http://127.0.0.1:3425/v1/systemone",
+  "route": "group/decider",
+  "sources": [
+    {
+      "module": "send_extended",
+      "sha256": "c88b798d39263c222b942c4bd10db412ef9e4eac8a9708d065be7478c44069da"
+    }
+  ],
+  "summary": [
+    {
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 4,
+      "questions": 14,
+      "correct": 9,
+      "errors": 0,
+      "token_sum": 7821,
+      "token_count": 8,
+      "elapsed_ms_sum": 82933
+    },
+    {
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 5,
+      "questions": 14,
+      "correct": 10,
+      "errors": 0,
+      "token_sum": 7011,
+      "token_count": 8,
+      "elapsed_ms_sum": 82852
+    },
+    {
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 6,
+      "questions": 14,
+      "correct": 11,
+      "errors": 0,
+      "token_sum": 6100,
+      "token_count": 8,
+      "elapsed_ms_sum": 92299
+    }
+  ],
+  "results": [
+    {
+      "id": "sendx-h01",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of an ambiguous '把这个也给他' with two antecedents in one turn; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "把这个也给他",
+            "msg": "同一份清单。",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "caerulea",
+              "node_id": "urn:onlyne:agent:caerulea",
+              "display": "caerulea",
+              "responsibility": "data engineering",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "research",
+              "owner": "urn:onlyne:agent:lazuli",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "owner",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "107",
+              "members": [
+                "lazuli",
+                "dpdp",
+                "caerulea"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 202,
+              "authority": "assistant",
+              "at": "2026-10-24T09:10:00Z",
+              "text": "dpdp 要一份数据清单，caerulea 也要同一份。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          },
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "caerulea": "alias=caerulea; node=urn:onlyne:agent:caerulea; display=caerulea; responsibility=data engineering; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "reviewer": "alias=reviewer; node=urn:onlyne:agent:reviewer; display=reviewer; responsibility=release windows; relation=domain_member; threads=none; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          }
+        }
+      },
+      "request_sha256": "22fd888aa9cc482be0fa6169d0ba292d966dec46293a1284ca340bd06f7d1d7c",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.6746,
+            "probabilities": {
+              "send": 0.6746,
+              "read": 0.0775,
+              "local": 0.1093,
+              "reject": 0.1387
+            }
+          },
+          "target": {
+            "type": "choice",
+            "choice": "unresolved",
+            "confidence": 0.5547,
+            "probabilities": {
+              "dpdp": 0.056,
+              "caerulea": 0.1092,
+              "reviewer": 0.0033,
+              "none": 0.2768,
+              "unresolved": 0.5547
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 861,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.6746,
+                "probabilities": {
+                  "send": 0.6746,
+                  "read": 0.0775,
+                  "local": 0.1093,
+                  "reject": 0.1387
+                }
+              },
+              "target": {
+                "type": "choice",
+                "choice": "unresolved",
+                "confidence": 0.5547,
+                "probabilities": {
+                  "dpdp": 0.056,
+                  "caerulea": 0.1092,
+                  "reviewer": 0.0033,
+                  "none": 0.2768,
+                  "unresolved": 0.5547
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 861,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 13566,
+      "expected": {
+        "action": "send",
+        "target": "unresolved"
+      },
+      "actual": {
+        "action": "send",
+        "target": "unresolved"
+      },
+      "checks": {
+        "action": true,
+        "target": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h01",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of an ambiguous '把这个也给他' with two antecedents in one turn; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "把这个也给他",
+            "msg": "同一份清单。",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "caerulea",
+              "node_id": "urn:onlyne:agent:caerulea",
+              "display": "caerulea",
+              "responsibility": "data engineering",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "research",
+              "owner": "urn:onlyne:agent:lazuli",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "owner",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "107",
+              "members": [
+                "lazuli",
+                "dpdp",
+                "caerulea"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 200,
+              "authority": "user",
+              "at": "2026-10-24T09:00:00Z",
+              "text": "两个人都来要数据清单。"
+            },
+            {
+              "seq": 201,
+              "authority": "assistant",
+              "at": "2026-10-24T09:05:00Z",
+              "text": "我整理一份。"
+            },
+            {
+              "seq": 202,
+              "authority": "assistant",
+              "at": "2026-10-24T09:10:00Z",
+              "text": "dpdp 要一份数据清单，caerulea 也要同一份。"
+            },
+            {
+              "seq": 203,
+              "authority": "user",
+              "at": "2026-10-24T09:11:00Z",
+              "text": "把这个也给他。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          },
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "caerulea": "alias=caerulea; node=urn:onlyne:agent:caerulea; display=caerulea; responsibility=data engineering; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "reviewer": "alias=reviewer; node=urn:onlyne:agent:reviewer; display=reviewer; responsibility=release windows; relation=domain_member; threads=none; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          }
+        }
+      },
+      "request_sha256": "e1d5429db661b6efed90a763b7eb49125a8b916634db5e5885d004bfa5b6da2e",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.9213,
+            "probabilities": {
+              "send": 0.9213,
+              "read": 0.0167,
+              "local": 0.036,
+              "reject": 0.0259
+            }
+          },
+          "target": {
+            "type": "choice",
+            "choice": "unresolved",
+            "confidence": 0.4248,
+            "probabilities": {
+              "dpdp": 0.0622,
+              "caerulea": 0.2364,
+              "reviewer": 0.0401,
+              "none": 0.2364,
+              "unresolved": 0.4248
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 984,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.9213,
+                "probabilities": {
+                  "send": 0.9213,
+                  "read": 0.0167,
+                  "local": 0.036,
+                  "reject": 0.0259
+                }
+              },
+              "target": {
+                "type": "choice",
+                "choice": "unresolved",
+                "confidence": 0.4248,
+                "probabilities": {
+                  "dpdp": 0.0622,
+                  "caerulea": 0.2364,
+                  "reviewer": 0.0401,
+                  "none": 0.2364,
+                  "unresolved": 0.4248
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 984,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 11616,
+      "expected": {
+        "action": "send",
+        "target": "unresolved"
+      },
+      "actual": {
+        "action": "send",
+        "target": "unresolved"
+      },
+      "checks": {
+        "action": true,
+        "target": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h01",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of an ambiguous '把这个也给他' with two antecedents in one turn; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "把这个也给他",
+            "msg": "同一份清单。",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "caerulea",
+              "node_id": "urn:onlyne:agent:caerulea",
+              "display": "caerulea",
+              "responsibility": "data engineering",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "research",
+              "owner": "urn:onlyne:agent:lazuli",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "owner",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "107",
+              "members": [
+                "lazuli",
+                "dpdp",
+                "caerulea"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 180,
+              "authority": "user",
+              "at": "2026-10-23T09:00:00Z",
+              "text": "清单模板别外发。"
+            },
+            {
+              "seq": 200,
+              "authority": "user",
+              "at": "2026-10-24T09:00:00Z",
+              "text": "两个人都来要数据清单。"
+            },
+            {
+              "seq": 202,
+              "authority": "assistant",
+              "at": "2026-10-24T09:10:00Z",
+              "text": "dpdp 要一份数据清单，caerulea 也要同一份。"
+            },
+            {
+              "seq": 203,
+              "authority": "user",
+              "at": "2026-10-24T09:11:00Z",
+              "text": "把这个也给他。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)",
+          "notes": [
+            {
+              "authority": "note",
+              "source": "experimental_context_notes",
+              "at": "2026-10-23T10:00:00Z",
+              "text": "caerulea 和 dpdp 都在 research。",
+              "active": true
+            }
+          ],
+          "host": {
+            "session": "main",
+            "idle": true,
+            "idle_source": "ctx.isIdle (includes prompt in flight)",
+            "plan_mode": false,
+            "plan_mode_source": "branch mode_change record",
+            "todo_source": "state.readTodoMore(branch)",
+            "todo_adapter_available": true,
+            "todos": [
+              {
+                "text": "复核第 2 组数据",
+                "state": "pending"
+              }
+            ]
+          }
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          },
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "caerulea": "alias=caerulea; node=urn:onlyne:agent:caerulea; display=caerulea; responsibility=data engineering; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "reviewer": "alias=reviewer; node=urn:onlyne:agent:reviewer; display=reviewer; responsibility=release windows; relation=domain_member; threads=none; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          }
+        }
+      },
+      "request_sha256": "f3e762f27e0070be21818fb113728d6a900d76db645d2736cda06dcfa0b7bbe1",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.9113,
+            "probabilities": {
+              "send": 0.9113,
+              "read": 0.0218,
+              "local": 0.0337,
+              "reject": 0.0332
+            }
+          },
+          "target": {
+            "type": "choice",
+            "choice": "unresolved",
+            "confidence": 0.4235,
+            "probabilities": {
+              "dpdp": 0.2138,
+              "caerulea": 0.1879,
+              "reviewer": 0.007,
+              "none": 0.1678,
+              "unresolved": 0.4235
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 1109,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.9113,
+                "probabilities": {
+                  "send": 0.9113,
+                  "read": 0.0218,
+                  "local": 0.0337,
+                  "reject": 0.0332
+                }
+              },
+              "target": {
+                "type": "choice",
+                "choice": "unresolved",
+                "confidence": 0.4235,
+                "probabilities": {
+                  "dpdp": 0.2138,
+                  "caerulea": 0.1879,
+                  "reviewer": 0.007,
+                  "none": 0.1678,
+                  "unresolved": 0.4235
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 1109,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 18572,
+      "expected": {
+        "action": "send",
+        "target": "unresolved"
+      },
+      "actual": {
+        "action": "send",
+        "target": "unresolved"
+      },
+      "checks": {
+        "action": true,
+        "target": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h02",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of the user accepting an assistant commitment that names a peer; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "行，发给他",
+            "msg": "复核意见如下。",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "auditor",
+              "node_id": "urn:onlyne:agent:auditor",
+              "display": "auditor",
+              "responsibility": "review and audit",
+              "relation": "domain_member",
+              "threads": [
+                "review"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "review",
+              "owner": "urn:onlyne:agent:auditor",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "member",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "21",
+              "members": [
+                "auditor",
+                "reviewer",
+                "lazuli"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 212,
+              "authority": "assistant",
+              "at": "2026-10-24T09:30:00Z",
+              "text": "我让 auditor 复核这份结论。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          },
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "auditor": "alias=auditor; node=urn:onlyne:agent:auditor; display=auditor; responsibility=review and audit; relation=domain_member; threads=review; can_post=true; can_read=true",
+              "reviewer": "alias=reviewer; node=urn:onlyne:agent:reviewer; display=reviewer; responsibility=release windows; relation=domain_member; threads=none; can_post=true; can_read=true",
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          }
+        }
+      },
+      "request_sha256": "93a4ae23d03cf0ca0af23c0c6c3f13d95c3dba17d135bcbe7efef33baeb9b5cc",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.8396,
+            "probabilities": {
+              "send": 0.8396,
+              "read": 0.0322,
+              "local": 0.0498,
+              "reject": 0.0784
+            }
+          },
+          "target": {
+            "type": "choice",
+            "choice": "auditor",
+            "confidence": 0.7737,
+            "probabilities": {
+              "auditor": 0.7737,
+              "reviewer": 0.016,
+              "dpdp": 0.0162,
+              "none": 0.0812,
+              "unresolved": 0.1128
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 848,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.8396,
+                "probabilities": {
+                  "send": 0.8396,
+                  "read": 0.0322,
+                  "local": 0.0498,
+                  "reject": 0.0784
+                }
+              },
+              "target": {
+                "type": "choice",
+                "choice": "auditor",
+                "confidence": 0.7737,
+                "probabilities": {
+                  "auditor": 0.7737,
+                  "reviewer": 0.016,
+                  "dpdp": 0.0162,
+                  "none": 0.0812,
+                  "unresolved": 0.1128
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 848,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 21721,
+      "expected": {
+        "action": "send",
+        "target": "auditor"
+      },
+      "actual": {
+        "action": "send",
+        "target": "auditor"
+      },
+      "checks": {
+        "action": true,
+        "target": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h02",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of the user accepting an assistant commitment that names a peer; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "行，发给他",
+            "msg": "复核意见如下。",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "auditor",
+              "node_id": "urn:onlyne:agent:auditor",
+              "display": "auditor",
+              "responsibility": "review and audit",
+              "relation": "domain_member",
+              "threads": [
+                "review"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "review",
+              "owner": "urn:onlyne:agent:auditor",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "member",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "21",
+              "members": [
+                "auditor",
+                "reviewer",
+                "lazuli"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 210,
+              "authority": "user",
+              "at": "2026-10-24T09:25:00Z",
+              "text": "这份结论谁看？"
+            },
+            {
+              "seq": 211,
+              "authority": "assistant",
+              "at": "2026-10-24T09:28:00Z",
+              "text": "review 现在由 auditor 负责。"
+            },
+            {
+              "seq": 212,
+              "authority": "assistant",
+              "at": "2026-10-24T09:30:00Z",
+              "text": "我让 auditor 复核这份结论。"
+            },
+            {
+              "seq": 213,
+              "authority": "user",
+              "at": "2026-10-24T09:31:00Z",
+              "text": "行，发给他。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          },
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "auditor": "alias=auditor; node=urn:onlyne:agent:auditor; display=auditor; responsibility=review and audit; relation=domain_member; threads=review; can_post=true; can_read=true",
+              "reviewer": "alias=reviewer; node=urn:onlyne:agent:reviewer; display=reviewer; responsibility=release windows; relation=domain_member; threads=none; can_post=true; can_read=true",
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          }
+        }
+      },
+      "request_sha256": "896bf3a58aa8f7e8d20b56c24d05f3b57203b4f668a064ba0b28f160bdc04341",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.9311,
+            "probabilities": {
+              "send": 0.9311,
+              "read": 0.0226,
+              "local": 0.0199,
+              "reject": 0.0264
+            }
+          },
+          "target": {
+            "type": "choice",
+            "choice": "auditor",
+            "confidence": 0.8878,
+            "probabilities": {
+              "auditor": 0.8878,
+              "reviewer": 0.021,
+              "dpdp": 0.0164,
+              "none": 0.0288,
+              "unresolved": 0.046
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 974,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.9311,
+                "probabilities": {
+                  "send": 0.9311,
+                  "read": 0.0226,
+                  "local": 0.0199,
+                  "reject": 0.0264
+                }
+              },
+              "target": {
+                "type": "choice",
+                "choice": "auditor",
+                "confidence": 0.8878,
+                "probabilities": {
+                  "auditor": 0.8878,
+                  "reviewer": 0.021,
+                  "dpdp": 0.0164,
+                  "none": 0.0288,
+                  "unresolved": 0.046
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 974,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 14054,
+      "expected": {
+        "action": "send",
+        "target": "auditor"
+      },
+      "actual": {
+        "action": "send",
+        "target": "auditor"
+      },
+      "checks": {
+        "action": true,
+        "target": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h02",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of the user accepting an assistant commitment that names a peer; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "行，发给他",
+            "msg": "复核意见如下。",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "auditor",
+              "node_id": "urn:onlyne:agent:auditor",
+              "display": "auditor",
+              "responsibility": "review and audit",
+              "relation": "domain_member",
+              "threads": [
+                "review"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "review",
+              "owner": "urn:onlyne:agent:auditor",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "member",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "21",
+              "members": [
+                "auditor",
+                "reviewer",
+                "lazuli"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 190,
+              "authority": "user",
+              "at": "2026-10-23T11:00:00Z",
+              "text": "reviewer 先忙发布。"
+            },
+            {
+              "seq": 213,
+              "authority": "user",
+              "at": "2026-10-24T09:31:00Z",
+              "text": "行，发给他。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)",
+          "notes": [
+            {
+              "authority": "note",
+              "source": "experimental_context_notes",
+              "at": "2026-10-23T12:00:00Z",
+              "text": "review 的负责人是 auditor。",
+              "active": true
+            }
+          ],
+          "host": {
+            "session": "main",
+            "idle": true,
+            "idle_source": "ctx.isIdle (includes prompt in flight)",
+            "plan_mode": false,
+            "plan_mode_source": "branch mode_change record",
+            "todo_source": "state.readTodoMore(branch)",
+            "todo_adapter_available": true,
+            "todos": [
+              {
+                "text": "复核第 2 组数据",
+                "state": "pending"
+              }
+            ]
+          }
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          },
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "auditor": "alias=auditor; node=urn:onlyne:agent:auditor; display=auditor; responsibility=review and audit; relation=domain_member; threads=review; can_post=true; can_read=true",
+              "reviewer": "alias=reviewer; node=urn:onlyne:agent:reviewer; display=reviewer; responsibility=release windows; relation=domain_member; threads=none; can_post=true; can_read=true",
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          }
+        }
+      },
+      "request_sha256": "b81e86ab0b63d99b681b34dbd7002f9e3b70d8c007cbd38df944dd1945adf474",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.9625,
+            "probabilities": {
+              "send": 0.9625,
+              "read": 0.011,
+              "local": 0.013,
+              "reject": 0.0135
+            }
+          },
+          "target": {
+            "type": "choice",
+            "choice": "reviewer",
+            "confidence": 0.606,
+            "probabilities": {
+              "auditor": 0.1491,
+              "reviewer": 0.606,
+              "dpdp": 0.0167,
+              "none": 0.0593,
+              "unresolved": 0.1689
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 1007,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.9625,
+                "probabilities": {
+                  "send": 0.9625,
+                  "read": 0.011,
+                  "local": 0.013,
+                  "reject": 0.0135
+                }
+              },
+              "target": {
+                "type": "choice",
+                "choice": "reviewer",
+                "confidence": 0.606,
+                "probabilities": {
+                  "auditor": 0.1491,
+                  "reviewer": 0.606,
+                  "dpdp": 0.0167,
+                  "none": 0.0593,
+                  "unresolved": 0.1689
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 1007,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 13458,
+      "expected": {
+        "action": "send",
+        "target": "auditor"
+      },
+      "actual": {
+        "action": "send",
+        "target": "reviewer"
+      },
+      "checks": {
+        "action": true,
+        "target": false
+      },
+      "plan_pass": false
+    },
+    {
+      "id": "sendx-h03",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of a thread-addressed review request with a later check; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "在 review 里请负责人看一下，我出去一趟，回来再看",
+            "msg": "请复核第 3 节。",
+            "meta": {
+              "thread": "review"
+            }
+          },
+          "peers": [
+            {
+              "alias": "reviewer-a",
+              "node_id": "urn:onlyne:agent:reviewer-a",
+              "display": "reviewer",
+              "responsibility": "review thread host",
+              "relation": "domain_member",
+              "threads": [
+                "review"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer-b",
+              "node_id": "urn:onlyne:agent:reviewer-b",
+              "display": "reviewer",
+              "responsibility": "ops coordination",
+              "relation": "thread_member",
+              "threads": [
+                "ops"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "review",
+              "owner": "urn:onlyne:agent:reviewer-a",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "member",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "13",
+              "members": [
+                "reviewer-a",
+                "auditor",
+                "lazuli"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 222,
+              "authority": "user",
+              "at": "2026-10-24T10:00:00Z",
+              "text": "在 review 里请负责人看一下，我出去一趟，回来再看。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "reviewer-a": "alias=reviewer-a; node=urn:onlyne:agent:reviewer-a; display=reviewer; responsibility=review thread host; relation=domain_member; threads=review; can_post=true; can_read=true",
+              "reviewer-b": "alias=reviewer-b; node=urn:onlyne:agent:reviewer-b; display=reviewer; responsibility=ops coordination; relation=thread_member; threads=ops; can_post=true; can_read=true",
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          },
+          "response": {
+            "type": "choice",
+            "instructions": "What reply expectation does the sender express?",
+            "criteria": {
+              "none": "the sender asks for no reply and states no question",
+              "async": "the sender keeps working after this send and reads any reply later; a question without a stated pause belongs here",
+              "await": "the sender pauses this work until the reply arrives; only an explicit stop-and-wait belongs here"
+            }
+          }
+        }
+      },
+      "request_sha256": "e4d9f98978c41dd5b650159872d9b26c219cea960cd1a10073bc6ad9f7a30f9a",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "target": {
+            "type": "choice",
+            "choice": "reviewer-a",
+            "confidence": 0.7288,
+            "probabilities": {
+              "reviewer-a": 0.7288,
+              "reviewer-b": 0.0194,
+              "dpdp": 0.022,
+              "none": 0.1042,
+              "unresolved": 0.1257
+            }
+          },
+          "response": {
+            "type": "choice",
+            "choice": "async",
+            "confidence": 0.7688,
+            "probabilities": {
+              "none": 0.1255,
+              "async": 0.7688,
+              "await": 0.1057
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 875,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "target": {
+                "type": "choice",
+                "choice": "reviewer-a",
+                "confidence": 0.7288,
+                "probabilities": {
+                  "reviewer-a": 0.7288,
+                  "reviewer-b": 0.0194,
+                  "dpdp": 0.022,
+                  "none": 0.1042,
+                  "unresolved": 0.1257
+                }
+              },
+              "response": {
+                "type": "choice",
+                "choice": "async",
+                "confidence": 0.7688,
+                "probabilities": {
+                  "none": 0.1255,
+                  "async": 0.7688,
+                  "await": 0.1057
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 875,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 14370,
+      "expected": {
+        "target": "reviewer-a",
+        "response": "async"
+      },
+      "actual": {
+        "target": "reviewer-a",
+        "response": "async"
+      },
+      "checks": {
+        "target": true,
+        "response": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h03",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of a thread-addressed review request with a later check; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "在 review 里请负责人看一下，我出去一趟，回来再看",
+            "msg": "请复核第 3 节。",
+            "meta": {
+              "thread": "review"
+            }
+          },
+          "peers": [
+            {
+              "alias": "reviewer-a",
+              "node_id": "urn:onlyne:agent:reviewer-a",
+              "display": "reviewer",
+              "responsibility": "review thread host",
+              "relation": "domain_member",
+              "threads": [
+                "review"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer-b",
+              "node_id": "urn:onlyne:agent:reviewer-b",
+              "display": "reviewer",
+              "responsibility": "ops coordination",
+              "relation": "thread_member",
+              "threads": [
+                "ops"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "review",
+              "owner": "urn:onlyne:agent:reviewer-a",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "member",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "13",
+              "members": [
+                "reviewer-a",
+                "auditor",
+                "lazuli"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 220,
+              "authority": "user",
+              "at": "2026-10-24T09:55:00Z",
+              "text": "review 现在谁主持？"
+            },
+            {
+              "seq": 221,
+              "authority": "assistant",
+              "at": "2026-10-24T09:57:00Z",
+              "text": "reviewer-a 主持 review，reviewer-b 在 ops。"
+            },
+            {
+              "seq": 222,
+              "authority": "user",
+              "at": "2026-10-24T10:00:00Z",
+              "text": "在 review 里请负责人看一下，我出去一趟，回来再看。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "reviewer-a": "alias=reviewer-a; node=urn:onlyne:agent:reviewer-a; display=reviewer; responsibility=review thread host; relation=domain_member; threads=review; can_post=true; can_read=true",
+              "reviewer-b": "alias=reviewer-b; node=urn:onlyne:agent:reviewer-b; display=reviewer; responsibility=ops coordination; relation=thread_member; threads=ops; can_post=true; can_read=true",
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          },
+          "response": {
+            "type": "choice",
+            "instructions": "What reply expectation does the sender express?",
+            "criteria": {
+              "none": "the sender asks for no reply and states no question",
+              "async": "the sender keeps working after this send and reads any reply later; a question without a stated pause belongs here",
+              "await": "the sender pauses this work until the reply arrives; only an explicit stop-and-wait belongs here"
+            }
+          }
+        }
+      },
+      "request_sha256": "f1b794c94edda60ec337c1cf12f87eb1a5abfd0342e5bdc02be401d131945f1e",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "target": {
+            "type": "choice",
+            "choice": "reviewer-a",
+            "confidence": 0.504,
+            "probabilities": {
+              "reviewer-a": 0.504,
+              "reviewer-b": 0.0215,
+              "dpdp": 0.0232,
+              "none": 0.1586,
+              "unresolved": 0.2928
+            }
+          },
+          "response": {
+            "type": "choice",
+            "choice": "async",
+            "confidence": 0.4747,
+            "probabilities": {
+              "none": 0.377,
+              "async": 0.4747,
+              "await": 0.1482
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 967,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "target": {
+                "type": "choice",
+                "choice": "reviewer-a",
+                "confidence": 0.504,
+                "probabilities": {
+                  "reviewer-a": 0.504,
+                  "reviewer-b": 0.0215,
+                  "dpdp": 0.0232,
+                  "none": 0.1586,
+                  "unresolved": 0.2928
+                }
+              },
+              "response": {
+                "type": "choice",
+                "choice": "async",
+                "confidence": 0.4747,
+                "probabilities": {
+                  "none": 0.377,
+                  "async": 0.4747,
+                  "await": 0.1482
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 967,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 14806,
+      "expected": {
+        "target": "reviewer-a",
+        "response": "async"
+      },
+      "actual": {
+        "target": "reviewer-a",
+        "response": "async"
+      },
+      "checks": {
+        "target": true,
+        "response": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h03",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of a thread-addressed review request with a later check; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "在 review 里请负责人看一下，我出去一趟，回来再看",
+            "msg": "请复核第 3 节。",
+            "meta": {
+              "thread": "review"
+            }
+          },
+          "peers": [
+            {
+              "alias": "reviewer-a",
+              "node_id": "urn:onlyne:agent:reviewer-a",
+              "display": "reviewer",
+              "responsibility": "review thread host",
+              "relation": "domain_member",
+              "threads": [
+                "review"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer-b",
+              "node_id": "urn:onlyne:agent:reviewer-b",
+              "display": "reviewer",
+              "responsibility": "ops coordination",
+              "relation": "thread_member",
+              "threads": [
+                "ops"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "review",
+              "owner": "urn:onlyne:agent:reviewer-a",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "member",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "13",
+              "members": [
+                "reviewer-a",
+                "auditor",
+                "lazuli"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 200,
+              "authority": "user",
+              "at": "2026-10-23T12:00:00Z",
+              "text": "ops 暂时不用管。"
+            },
+            {
+              "seq": 222,
+              "authority": "user",
+              "at": "2026-10-24T10:00:00Z",
+              "text": "在 review 里请负责人看一下，我出去一趟，回来再看。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)",
+          "notes": [
+            {
+              "authority": "note",
+              "source": "experimental_context_notes",
+              "at": "2026-10-23T13:00:00Z",
+              "text": "reviewer-a 和 reviewer-b 的显示名相同。",
+              "active": true
+            }
+          ],
+          "host": {
+            "session": "main",
+            "idle": false,
+            "idle_source": "ctx.isIdle (prompt in flight)",
+            "plan_mode": false,
+            "plan_mode_source": "branch mode_change record",
+            "todo_source": "state.readTodoMore(branch)",
+            "todo_adapter_available": true,
+            "todos": [
+              {
+                "text": "复核第 2 组数据",
+                "state": "pending"
+              }
+            ]
+          }
+        },
+        "questions": {
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "reviewer-a": "alias=reviewer-a; node=urn:onlyne:agent:reviewer-a; display=reviewer; responsibility=review thread host; relation=domain_member; threads=review; can_post=true; can_read=true",
+              "reviewer-b": "alias=reviewer-b; node=urn:onlyne:agent:reviewer-b; display=reviewer; responsibility=ops coordination; relation=thread_member; threads=ops; can_post=true; can_read=true",
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          },
+          "response": {
+            "type": "choice",
+            "instructions": "What reply expectation does the sender express?",
+            "criteria": {
+              "none": "the sender asks for no reply and states no question",
+              "async": "the sender keeps working after this send and reads any reply later; a question without a stated pause belongs here",
+              "await": "the sender pauses this work until the reply arrives; only an explicit stop-and-wait belongs here"
+            }
+          }
+        }
+      },
+      "request_sha256": "7b35b02c7f31a1d262f79f7a7ca79cc66d414031953cb6f84afe35a8f769a435",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "target": {
+            "type": "choice",
+            "choice": "reviewer-a",
+            "confidence": 0.7857,
+            "probabilities": {
+              "reviewer-a": 0.7857,
+              "reviewer-b": 0.0278,
+              "dpdp": 0.0201,
+              "none": 0.0722,
+              "unresolved": 0.0942
+            }
+          },
+          "response": {
+            "type": "choice",
+            "choice": "async",
+            "confidence": 0.6799,
+            "probabilities": {
+              "none": 0.2074,
+              "async": 0.6799,
+              "await": 0.1127
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 1041,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "target": {
+                "type": "choice",
+                "choice": "reviewer-a",
+                "confidence": 0.7857,
+                "probabilities": {
+                  "reviewer-a": 0.7857,
+                  "reviewer-b": 0.0278,
+                  "dpdp": 0.0201,
+                  "none": 0.0722,
+                  "unresolved": 0.0942
+                }
+              },
+              "response": {
+                "type": "choice",
+                "choice": "async",
+                "confidence": 0.6799,
+                "probabilities": {
+                  "none": 0.2074,
+                  "async": 0.6799,
+                  "await": 0.1127
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 1041,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 12755,
+      "expected": {
+        "target": "reviewer-a",
+        "response": "async"
+      },
+      "actual": {
+        "target": "reviewer-a",
+        "response": "async"
+      },
+      "checks": {
+        "target": true,
+        "response": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h04",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of the cloned-lazuli resource split; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "问问负责 research chamber 数据的那个 lazuli，作业跑完没有",
+            "msg": "作业跑完了吗？",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "lazuli-1",
+              "node_id": "urn:onlyne:agent:lazuli-1",
+              "display": "lazuli",
+              "responsibility": "research chamber compute",
+              "relation": "domain_member",
+              "threads": [
+                "chamber"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "lazuli-2",
+              "node_id": "urn:onlyne:agent:lazuli-2",
+              "display": "lazuli",
+              "responsibility": "research chamber data",
+              "relation": "domain_member",
+              "threads": [
+                "chamber"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "chamber",
+              "owner": "urn:onlyne:agent:lazuli-1",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "member",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "31",
+              "members": [
+                "lazuli-1",
+                "lazuli-2",
+                "lazuli"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 232,
+              "authority": "user",
+              "at": "2026-10-24T10:30:00Z",
+              "text": "问问负责 research chamber 数据的那个 lazuli，作业跑完没有。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          },
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "lazuli-1": "alias=lazuli-1; node=urn:onlyne:agent:lazuli-1; display=lazuli; responsibility=research chamber compute; relation=domain_member; threads=chamber; can_post=true; can_read=true",
+              "lazuli-2": "alias=lazuli-2; node=urn:onlyne:agent:lazuli-2; display=lazuli; responsibility=research chamber data; relation=domain_member; threads=chamber; can_post=true; can_read=true",
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          }
+        }
+      },
+      "request_sha256": "d874c58eec07f056209b152f4d54af7fd80d6efbfe80fe6d47bd293672d52e5a",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.9151,
+            "probabilities": {
+              "send": 0.9151,
+              "read": 0.0303,
+              "local": 0.0252,
+              "reject": 0.0294
+            }
+          },
+          "target": {
+            "type": "choice",
+            "choice": "lazuli-2",
+            "confidence": 0.9317,
+            "probabilities": {
+              "lazuli-1": 0.0177,
+              "lazuli-2": 0.9317,
+              "dpdp": 0.0111,
+              "none": 0.0147,
+              "unresolved": 0.0249
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 900,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.9151,
+                "probabilities": {
+                  "send": 0.9151,
+                  "read": 0.0303,
+                  "local": 0.0252,
+                  "reject": 0.0294
+                }
+              },
+              "target": {
+                "type": "choice",
+                "choice": "lazuli-2",
+                "confidence": 0.9317,
+                "probabilities": {
+                  "lazuli-1": 0.0177,
+                  "lazuli-2": 0.9317,
+                  "dpdp": 0.0111,
+                  "none": 0.0147,
+                  "unresolved": 0.0249
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 900,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 10008,
+      "expected": {
+        "action": "send",
+        "target": "lazuli-2"
+      },
+      "actual": {
+        "action": "send",
+        "target": "lazuli-2"
+      },
+      "checks": {
+        "action": true,
+        "target": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h04",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of the cloned-lazuli resource split; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "问问负责 research chamber 数据的那个 lazuli，作业跑完没有",
+            "msg": "作业跑完了吗？",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "lazuli-1",
+              "node_id": "urn:onlyne:agent:lazuli-1",
+              "display": "lazuli",
+              "responsibility": "research chamber compute",
+              "relation": "domain_member",
+              "threads": [
+                "chamber"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "lazuli-2",
+              "node_id": "urn:onlyne:agent:lazuli-2",
+              "display": "lazuli",
+              "responsibility": "research chamber data",
+              "relation": "domain_member",
+              "threads": [
+                "chamber"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "chamber",
+              "owner": "urn:onlyne:agent:lazuli-1",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "member",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "31",
+              "members": [
+                "lazuli-1",
+                "lazuli-2",
+                "lazuli"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 230,
+              "authority": "user",
+              "at": "2026-10-24T10:25:00Z",
+              "text": "chamber 里怎么有两个 lazuli？"
+            },
+            {
+              "seq": 231,
+              "authority": "assistant",
+              "at": "2026-10-24T10:27:00Z",
+              "text": "一个管计算，一个管数据，都在 chamber。"
+            },
+            {
+              "seq": 232,
+              "authority": "user",
+              "at": "2026-10-24T10:30:00Z",
+              "text": "问问负责 research chamber 数据的那个 lazuli，作业跑完没有。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          },
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "lazuli-1": "alias=lazuli-1; node=urn:onlyne:agent:lazuli-1; display=lazuli; responsibility=research chamber compute; relation=domain_member; threads=chamber; can_post=true; can_read=true",
+              "lazuli-2": "alias=lazuli-2; node=urn:onlyne:agent:lazuli-2; display=lazuli; responsibility=research chamber data; relation=domain_member; threads=chamber; can_post=true; can_read=true",
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          }
+        }
+      },
+      "request_sha256": "9a37dca08976f4463ea18266383ca478067b535d2b05e90ce9dae872746f4216",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.9395,
+            "probabilities": {
+              "send": 0.9395,
+              "read": 0.0189,
+              "local": 0.0195,
+              "reject": 0.0221
+            }
+          },
+          "target": {
+            "type": "choice",
+            "choice": "lazuli-2",
+            "confidence": 0.9397,
+            "probabilities": {
+              "lazuli-1": 0.0169,
+              "lazuli-2": 0.9397,
+              "dpdp": 0.0116,
+              "none": 0.0127,
+              "unresolved": 0.0191
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 992,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.9395,
+                "probabilities": {
+                  "send": 0.9395,
+                  "read": 0.0189,
+                  "local": 0.0195,
+                  "reject": 0.0221
+                }
+              },
+              "target": {
+                "type": "choice",
+                "choice": "lazuli-2",
+                "confidence": 0.9397,
+                "probabilities": {
+                  "lazuli-1": 0.0169,
+                  "lazuli-2": 0.9397,
+                  "dpdp": 0.0116,
+                  "none": 0.0127,
+                  "unresolved": 0.0191
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 992,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 7061,
+      "expected": {
+        "action": "send",
+        "target": "lazuli-2"
+      },
+      "actual": {
+        "action": "send",
+        "target": "lazuli-2"
+      },
+      "checks": {
+        "action": true,
+        "target": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h04",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of the cloned-lazuli resource split; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "问问负责 research chamber 数据的那个 lazuli，作业跑完没有",
+            "msg": "作业跑完了吗？",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "lazuli-1",
+              "node_id": "urn:onlyne:agent:lazuli-1",
+              "display": "lazuli",
+              "responsibility": "research chamber compute",
+              "relation": "domain_member",
+              "threads": [
+                "chamber"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "lazuli-2",
+              "node_id": "urn:onlyne:agent:lazuli-2",
+              "display": "lazuli",
+              "responsibility": "research chamber data",
+              "relation": "domain_member",
+              "threads": [
+                "chamber"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "chamber",
+              "owner": "urn:onlyne:agent:lazuli-1",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "member",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "31",
+              "members": [
+                "lazuli-1",
+                "lazuli-2",
+                "lazuli"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 210,
+              "authority": "user",
+              "at": "2026-10-23T14:00:00Z",
+              "text": "chamber 的作业先别取消。"
+            },
+            {
+              "seq": 232,
+              "authority": "user",
+              "at": "2026-10-24T10:30:00Z",
+              "text": "问问负责 research chamber 数据的那个 lazuli，作业跑完没有。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)",
+          "notes": [
+            {
+              "authority": "note",
+              "source": "experimental_context_notes",
+              "at": "2026-10-23T15:00:00Z",
+              "text": "两个 lazuli 共用显示名，责任不同。",
+              "active": true
+            }
+          ],
+          "host": {
+            "session": "main",
+            "idle": true,
+            "idle_source": "ctx.isIdle (includes prompt in flight)",
+            "plan_mode": false,
+            "plan_mode_source": "branch mode_change record",
+            "todo_source": "state.readTodoMore(branch)",
+            "todo_adapter_available": true,
+            "todos": [
+              {
+                "text": "复核第 2 组数据",
+                "state": "pending"
+              }
+            ]
+          }
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          },
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "lazuli-1": "alias=lazuli-1; node=urn:onlyne:agent:lazuli-1; display=lazuli; responsibility=research chamber compute; relation=domain_member; threads=chamber; can_post=true; can_read=true",
+              "lazuli-2": "alias=lazuli-2; node=urn:onlyne:agent:lazuli-2; display=lazuli; responsibility=research chamber data; relation=domain_member; threads=chamber; can_post=true; can_read=true",
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          }
+        }
+      },
+      "request_sha256": "23ac3d7949a6783a6a486d19a59274d9327eb38160d77b4f2a2edc103f3e8396",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.9022,
+            "probabilities": {
+              "send": 0.9022,
+              "read": 0.0309,
+              "local": 0.0309,
+              "reject": 0.0361
+            }
+          },
+          "target": {
+            "type": "choice",
+            "choice": "lazuli-2",
+            "confidence": 0.9251,
+            "probabilities": {
+              "lazuli-1": 0.018,
+              "lazuli-2": 0.9251,
+              "dpdp": 0.0106,
+              "none": 0.0154,
+              "unresolved": 0.031
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 1067,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.9022,
+                "probabilities": {
+                  "send": 0.9022,
+                  "read": 0.0309,
+                  "local": 0.0309,
+                  "reject": 0.0361
+                }
+              },
+              "target": {
+                "type": "choice",
+                "choice": "lazuli-2",
+                "confidence": 0.9251,
+                "probabilities": {
+                  "lazuli-1": 0.018,
+                  "lazuli-2": 0.9251,
+                  "dpdp": 0.0106,
+                  "none": 0.0154,
+                  "unresolved": 0.031
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 1067,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 9079,
+      "expected": {
+        "action": "send",
+        "target": "lazuli-2"
+      },
+      "actual": {
+        "action": "send",
+        "target": "lazuli-2"
+      },
+      "checks": {
+        "action": true,
+        "target": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h05",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of the user asking for the historical reviewer after a handover; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "问问之前那个 reviewer，他手上还有没有旧记录，我接着整理",
+            "msg": "旧评审记录还在吗？",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "reviewer-old",
+              "node_id": "urn:onlyne:agent:reviewer-old",
+              "display": "reviewer",
+              "responsibility": "review (until last week)",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "auditor",
+              "node_id": "urn:onlyne:agent:auditor",
+              "display": "auditor",
+              "responsibility": "review and audit",
+              "relation": "domain_member",
+              "threads": [
+                "review"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 242,
+              "authority": "assistant",
+              "at": "2026-10-24T11:00:00Z",
+              "text": "reviewer 上周负责评审，现在评审由 auditor 负责。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "reviewer-old": "alias=reviewer-old; node=urn:onlyne:agent:reviewer-old; display=reviewer; responsibility=review (until last week); relation=domain_member; threads=none; can_post=true; can_read=true",
+              "auditor": "alias=auditor; node=urn:onlyne:agent:auditor; display=auditor; responsibility=review and audit; relation=domain_member; threads=review; can_post=true; can_read=true",
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          },
+          "response": {
+            "type": "choice",
+            "instructions": "What reply expectation does the sender express?",
+            "criteria": {
+              "none": "the sender asks for no reply and states no question",
+              "async": "the sender keeps working after this send and reads any reply later; a question without a stated pause belongs here",
+              "await": "the sender pauses this work until the reply arrives; only an explicit stop-and-wait belongs here"
+            }
+          }
+        }
+      },
+      "request_sha256": "89b06e1f4ed503783e814f0c16986bf718a9e30df77c7dc5f022a3bdcdaabfcd",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "target": {
+            "type": "choice",
+            "choice": "reviewer-old",
+            "confidence": 0.7348,
+            "probabilities": {
+              "reviewer-old": 0.7348,
+              "auditor": 0.1277,
+              "dpdp": 0.0134,
+              "none": 0.0485,
+              "unresolved": 0.0757
+            }
+          },
+          "response": {
+            "type": "choice",
+            "choice": "async",
+            "confidence": 0.8087,
+            "probabilities": {
+              "none": 0.0289,
+              "async": 0.8087,
+              "await": 0.1624
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 813,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "target": {
+                "type": "choice",
+                "choice": "reviewer-old",
+                "confidence": 0.7348,
+                "probabilities": {
+                  "reviewer-old": 0.7348,
+                  "auditor": 0.1277,
+                  "dpdp": 0.0134,
+                  "none": 0.0485,
+                  "unresolved": 0.0757
+                }
+              },
+              "response": {
+                "type": "choice",
+                "choice": "async",
+                "confidence": 0.8087,
+                "probabilities": {
+                  "none": 0.0289,
+                  "async": 0.8087,
+                  "await": 0.1624
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 813,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 8604,
+      "expected": {
+        "target": "reviewer-old",
+        "response": "async"
+      },
+      "actual": {
+        "target": "reviewer-old",
+        "response": "async"
+      },
+      "checks": {
+        "target": true,
+        "response": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h05",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of the user asking for the historical reviewer after a handover; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "问问之前那个 reviewer，他手上还有没有旧记录，我接着整理",
+            "msg": "旧评审记录还在吗？",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "reviewer-old",
+              "node_id": "urn:onlyne:agent:reviewer-old",
+              "display": "reviewer",
+              "responsibility": "review (until last week)",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "auditor",
+              "node_id": "urn:onlyne:agent:auditor",
+              "display": "auditor",
+              "responsibility": "review and audit",
+              "relation": "domain_member",
+              "threads": [
+                "review"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 240,
+              "authority": "user",
+              "at": "2026-10-24T10:56:00Z",
+              "text": "评审这边换人了吗？"
+            },
+            {
+              "seq": 241,
+              "authority": "assistant",
+              "at": "2026-10-24T10:58:00Z",
+              "text": "换了，auditor 接手，reviewer 去忙发布。"
+            },
+            {
+              "seq": 242,
+              "authority": "assistant",
+              "at": "2026-10-24T11:00:00Z",
+              "text": "reviewer 上周负责评审，现在评审由 auditor 负责。"
+            },
+            {
+              "seq": 243,
+              "authority": "user",
+              "at": "2026-10-24T11:02:00Z",
+              "text": "问问之前那个 reviewer，他手上还有没有旧记录，我接着整理。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "reviewer-old": "alias=reviewer-old; node=urn:onlyne:agent:reviewer-old; display=reviewer; responsibility=review (until last week); relation=domain_member; threads=none; can_post=true; can_read=true",
+              "auditor": "alias=auditor; node=urn:onlyne:agent:auditor; display=auditor; responsibility=review and audit; relation=domain_member; threads=review; can_post=true; can_read=true",
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          },
+          "response": {
+            "type": "choice",
+            "instructions": "What reply expectation does the sender express?",
+            "criteria": {
+              "none": "the sender asks for no reply and states no question",
+              "async": "the sender keeps working after this send and reads any reply later; a question without a stated pause belongs here",
+              "await": "the sender pauses this work until the reply arrives; only an explicit stop-and-wait belongs here"
+            }
+          }
+        }
+      },
+      "request_sha256": "c153eff89eb165ca2ddd857a0ba7c024cea6bd6714e26c16213590ed52550885",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "target": {
+            "type": "choice",
+            "choice": "reviewer-old",
+            "confidence": 0.8854,
+            "probabilities": {
+              "reviewer-old": 0.8854,
+              "auditor": 0.0261,
+              "dpdp": 0.0158,
+              "none": 0.0296,
+              "unresolved": 0.0431
+            }
+          },
+          "response": {
+            "type": "choice",
+            "choice": "async",
+            "confidence": 0.7379,
+            "probabilities": {
+              "none": 0.0491,
+              "async": 0.7379,
+              "await": 0.2131
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 957,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "target": {
+                "type": "choice",
+                "choice": "reviewer-old",
+                "confidence": 0.8854,
+                "probabilities": {
+                  "reviewer-old": 0.8854,
+                  "auditor": 0.0261,
+                  "dpdp": 0.0158,
+                  "none": 0.0296,
+                  "unresolved": 0.0431
+                }
+              },
+              "response": {
+                "type": "choice",
+                "choice": "async",
+                "confidence": 0.7379,
+                "probabilities": {
+                  "none": 0.0491,
+                  "async": 0.7379,
+                  "await": 0.2131
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 957,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 10045,
+      "expected": {
+        "target": "reviewer-old",
+        "response": "async"
+      },
+      "actual": {
+        "target": "reviewer-old",
+        "response": "async"
+      },
+      "checks": {
+        "target": true,
+        "response": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h05",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of the user asking for the historical reviewer after a handover; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "问问之前那个 reviewer，他手上还有没有旧记录，我接着整理",
+            "msg": "旧评审记录还在吗？",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "reviewer-old",
+              "node_id": "urn:onlyne:agent:reviewer-old",
+              "display": "reviewer",
+              "responsibility": "review (until last week)",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "auditor",
+              "node_id": "urn:onlyne:agent:auditor",
+              "display": "auditor",
+              "responsibility": "review and audit",
+              "relation": "domain_member",
+              "threads": [
+                "review"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 220,
+              "authority": "user",
+              "at": "2026-10-23T15:00:00Z",
+              "text": "发布窗口对齐周五。"
+            },
+            {
+              "seq": 243,
+              "authority": "user",
+              "at": "2026-10-24T11:02:00Z",
+              "text": "问问之前那个 reviewer，他手上还有没有旧记录，我接着整理。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)",
+          "notes": [
+            {
+              "authority": "note",
+              "source": "experimental_context_notes",
+              "at": "2026-10-23T16:00:00Z",
+              "text": "旧评审记录还在 reviewer 手上。",
+              "active": true
+            }
+          ],
+          "history_modes": {
+            "compressed_note": {
+              "authority": "note",
+              "source": "compaction summary",
+              "at": "2026-10-24T10:59:00Z",
+              "text": "review 已交给 auditor；reviewer 去忙发布。"
+            },
+            "recovered_source": {
+              "source": "history recovery",
+              "turns": [
+                {
+                  "seq": 241,
+                  "authority": "assistant",
+                  "at": "2026-10-24T10:58:00Z",
+                  "text": "换了，auditor 接手，reviewer 去忙发布。"
+                },
+                {
+                  "seq": 242,
+                  "authority": "assistant",
+                  "at": "2026-10-24T11:00:00Z",
+                  "text": "reviewer 上周负责评审，现在评审由 auditor 负责。"
+                }
+              ]
+            }
+          },
+          "host": {
+            "session": "main",
+            "idle": true,
+            "idle_source": "ctx.isIdle (includes prompt in flight)",
+            "plan_mode": false,
+            "plan_mode_source": "branch mode_change record",
+            "todo_source": "state.readTodoMore(branch)",
+            "todo_adapter_available": true,
+            "todos": [
+              {
+                "text": "复核第 2 组数据",
+                "state": "pending"
+              }
+            ]
+          }
+        },
+        "questions": {
+          "target": {
+            "type": "choice",
+            "instructions": "Which peer is the delivery target? Match the intent against each candidate's responsibility and the latest recorded assignment; a display name or an older turn does not override a newer assignment.",
+            "criteria": {
+              "reviewer-old": "alias=reviewer-old; node=urn:onlyne:agent:reviewer-old; display=reviewer; responsibility=review (until last week); relation=domain_member; threads=none; can_post=true; can_read=true",
+              "auditor": "alias=auditor; node=urn:onlyne:agent:auditor; display=auditor; responsibility=review and audit; relation=domain_member; threads=review; can_post=true; can_read=true",
+              "dpdp": "alias=dpdp; node=urn:onlyne:agent:dpdp; display=dpdp; responsibility=research analysis; relation=thread_member; threads=research; can_post=true; can_read=true",
+              "none": "no peer is addressed and nothing is delivered",
+              "unresolved": "a delivery is intended but the context does not determine one peer"
+            }
+          },
+          "response": {
+            "type": "choice",
+            "instructions": "What reply expectation does the sender express?",
+            "criteria": {
+              "none": "the sender asks for no reply and states no question",
+              "async": "the sender keeps working after this send and reads any reply later; a question without a stated pause belongs here",
+              "await": "the sender pauses this work until the reply arrives; only an explicit stop-and-wait belongs here"
+            }
+          }
+        }
+      },
+      "request_sha256": "24634171cd96dd427e1e36ac38ae7afc20c5145fb44283be7628679492139d9b",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "target": {
+            "type": "choice",
+            "choice": "reviewer-old",
+            "confidence": 0.8632,
+            "probabilities": {
+              "reviewer-old": 0.8632,
+              "auditor": 0.0365,
+              "dpdp": 0.0136,
+              "none": 0.0376,
+              "unresolved": 0.0491
+            }
+          },
+          "response": {
+            "type": "choice",
+            "choice": "async",
+            "confidence": 0.8322,
+            "probabilities": {
+              "none": 0.0356,
+              "async": 0.8322,
+              "await": 0.1322
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 1146,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "target": {
+                "type": "choice",
+                "choice": "reviewer-old",
+                "confidence": 0.8632,
+                "probabilities": {
+                  "reviewer-old": 0.8632,
+                  "auditor": 0.0365,
+                  "dpdp": 0.0136,
+                  "none": 0.0376,
+                  "unresolved": 0.0491
+                }
+              },
+              "response": {
+                "type": "choice",
+                "choice": "async",
+                "confidence": 0.8322,
+                "probabilities": {
+                  "none": 0.0356,
+                  "async": 0.8322,
+                  "await": 0.1322
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 1146,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 9191,
+      "expected": {
+        "target": "reviewer-old",
+        "response": "async"
+      },
+      "actual": {
+        "target": "reviewer-old",
+        "response": "async"
+      },
+      "checks": {
+        "target": true,
+        "response": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h06",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of the user accepting a read-only resource integration; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "行，那就按只读接",
+            "msg": "",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "caerulea",
+              "node_id": "urn:onlyne:agent:caerulea",
+              "display": "caerulea",
+              "responsibility": "data engineering",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 252,
+              "authority": "assistant",
+              "at": "2026-10-24T11:30:00Z",
+              "text": "MCP 资源节点先按只读接入，只暴露 list_tools 和 read_resource。"
+            },
+            {
+              "seq": 253,
+              "authority": "user",
+              "at": "2026-10-24T11:31:00Z",
+              "text": "行，那就按只读接。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          }
+        }
+      },
+      "request_sha256": "ec98bf8aef5d3b32304b4b6adf555fbd3636f190b051f3f5d9bf94812d36e078",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "local",
+            "confidence": 0.3778,
+            "probabilities": {
+              "send": 0.3494,
+              "read": 0.1575,
+              "local": 0.3778,
+              "reject": 0.1152
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 559,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "local",
+                "confidence": 0.3778,
+                "probabilities": {
+                  "send": 0.3494,
+                  "read": 0.1575,
+                  "local": 0.3778,
+                  "reject": 0.1152
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 559,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 8998,
+      "expected": {
+        "action": "local"
+      },
+      "actual": {
+        "action": "local"
+      },
+      "checks": {
+        "action": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "sendx-h06",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of the user accepting a read-only resource integration; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "行，那就按只读接",
+            "msg": "",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "caerulea",
+              "node_id": "urn:onlyne:agent:caerulea",
+              "display": "caerulea",
+              "responsibility": "data engineering",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 250,
+              "authority": "user",
+              "at": "2026-10-24T11:20:00Z",
+              "text": "MCP 节点怎么接？"
+            },
+            {
+              "seq": 251,
+              "authority": "assistant",
+              "at": "2026-10-24T11:25:00Z",
+              "text": "写操作没有回执，先只读。"
+            },
+            {
+              "seq": 252,
+              "authority": "assistant",
+              "at": "2026-10-24T11:30:00Z",
+              "text": "MCP 资源节点先按只读接入，只暴露 list_tools 和 read_resource。"
+            },
+            {
+              "seq": 253,
+              "authority": "user",
+              "at": "2026-10-24T11:31:00Z",
+              "text": "行，那就按只读接。"
+            },
+            {
+              "seq": 254,
+              "authority": "peer",
+              "at": "2026-10-24T11:32:00Z",
+              "text": "接入好了吗？",
+              "from": "urn:onlyne:agent:caerulea"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          }
+        }
+      },
+      "request_sha256": "6eb3f507fdf98b91d3adfa7add799ff4b05f9cbd6d15e6820d2e0bcd54be9c31",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.5203,
+            "probabilities": {
+              "send": 0.5203,
+              "read": 0.1161,
+              "local": 0.2458,
+              "reject": 0.1179
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 700,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.5203,
+                "probabilities": {
+                  "send": 0.5203,
+                  "read": 0.1161,
+                  "local": 0.2458,
+                  "reject": 0.1179
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 700,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 8315,
+      "expected": {
+        "action": "local"
+      },
+      "actual": {
+        "action": "send"
+      },
+      "checks": {
+        "action": false
+      },
+      "plan_pass": false
+    },
+    {
+      "id": "sendx-h06",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of the user accepting a read-only resource integration; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "行，那就按只读接",
+            "msg": "",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "caerulea",
+              "node_id": "urn:onlyne:agent:caerulea",
+              "display": "caerulea",
+              "responsibility": "data engineering",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 230,
+              "authority": "user",
+              "at": "2026-10-23T16:00:00Z",
+              "text": "资源节点先做连接。"
+            },
+            {
+              "seq": 252,
+              "authority": "assistant",
+              "at": "2026-10-24T11:30:00Z",
+              "text": "MCP 资源节点先按只读接入，只暴露 list_tools 和 read_resource。"
+            },
+            {
+              "seq": 253,
+              "authority": "user",
+              "at": "2026-10-24T11:31:00Z",
+              "text": "行，那就按只读接。"
+            },
+            {
+              "seq": 254,
+              "authority": "peer",
+              "at": "2026-10-24T11:32:00Z",
+              "text": "接入好了吗？",
+              "from": "urn:onlyne:agent:caerulea"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)",
+          "notes": [
+            {
+              "authority": "note",
+              "source": "experimental_context_notes",
+              "at": "2026-10-23T17:00:00Z",
+              "text": "写入操作的回执还没设计。",
+              "active": true
+            }
+          ],
+          "host": {
+            "session": "main",
+            "idle": true,
+            "idle_source": "ctx.isIdle (includes prompt in flight)",
+            "plan_mode": false,
+            "plan_mode_source": "branch mode_change record",
+            "todo_source": "state.readTodoMore(branch)",
+            "todo_adapter_available": true,
+            "todos": [
+              {
+                "text": "复核第 2 组数据",
+                "state": "pending"
+              }
+            ]
+          }
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          }
+        }
+      },
+      "request_sha256": "8788f5c59ad67daa8c61142285f2d6eb3497bb82df76b1b38f5ceeba5ea463ea",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.7126,
+            "probabilities": {
+              "send": 0.7126,
+              "read": 0.0663,
+              "local": 0.1517,
+              "reject": 0.0695
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 773,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.7126,
+                "probabilities": {
+                  "send": 0.7126,
+                  "read": 0.0663,
+                  "local": 0.1517,
+                  "reject": 0.0695
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 773,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 6102,
+      "expected": {
+        "action": "local"
+      },
+      "actual": {
+        "action": "send"
+      },
+      "checks": {
+        "action": false
+      },
+      "plan_pass": false
+    },
+    {
+      "id": "sendx-h07",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of a topology listing request; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "列一下现在哪些节点在线",
+            "msg": "",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "caerulea",
+              "node_id": "urn:onlyne:agent:caerulea",
+              "display": "caerulea",
+              "responsibility": "data engineering",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 262,
+              "authority": "user",
+              "at": "2026-10-24T12:00:00Z",
+              "text": "列一下现在哪些节点在线。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          }
+        }
+      },
+      "request_sha256": "0d42978e814aa617b8a8a73d4ebf26ec83b4f264448b6fa1f2c390793f78061e",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.8054,
+            "probabilities": {
+              "send": 0.8054,
+              "read": 0.0842,
+              "local": 0.0666,
+              "reject": 0.0437
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 501,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.8054,
+                "probabilities": {
+                  "send": 0.8054,
+                  "read": 0.0842,
+                  "local": 0.0666,
+                  "reject": 0.0437
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 501,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 6813,
+      "expected": {
+        "action": "read"
+      },
+      "actual": {
+        "action": "send"
+      },
+      "checks": {
+        "action": false
+      },
+      "plan_pass": false
+    },
+    {
+      "id": "sendx-h07",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of a topology listing request; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "列一下现在哪些节点在线",
+            "msg": "",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "caerulea",
+              "node_id": "urn:onlyne:agent:caerulea",
+              "display": "caerulea",
+              "responsibility": "data engineering",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 260,
+              "authority": "user",
+              "at": "2026-10-24T11:55:00Z",
+              "text": "先看看拓扑。"
+            },
+            {
+              "seq": 261,
+              "authority": "assistant",
+              "at": "2026-10-24T11:57:00Z",
+              "text": "三个节点可达，我先列出来。"
+            },
+            {
+              "seq": 262,
+              "authority": "user",
+              "at": "2026-10-24T12:00:00Z",
+              "text": "列一下现在哪些节点在线。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)"
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          }
+        }
+      },
+      "request_sha256": "cb6b3e2a550cd4eecafb1e968599dc58c7e7b6f727c23565ce656789410ce400",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.7437,
+            "probabilities": {
+              "send": 0.7437,
+              "read": 0.1243,
+              "local": 0.0841,
+              "reject": 0.0479
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 585,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.7437,
+                "probabilities": {
+                  "send": 0.7437,
+                  "read": 0.1243,
+                  "local": 0.0841,
+                  "reject": 0.0479
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 585,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 8699,
+      "expected": {
+        "action": "read"
+      },
+      "actual": {
+        "action": "send"
+      },
+      "checks": {
+        "action": false
+      },
+      "plan_pass": false
+    },
+    {
+      "id": "sendx-h07",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of a topology listing request; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "列一下现在哪些节点在线",
+            "msg": "",
+            "meta": {}
+          },
+          "peers": [
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "caerulea",
+              "node_id": "urn:onlyne:agent:caerulea",
+              "display": "caerulea",
+              "responsibility": "data engineering",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 240,
+              "authority": "user",
+              "at": "2026-10-23T17:00:00Z",
+              "text": "reviewer 最近可能掉线。"
+            },
+            {
+              "seq": 262,
+              "authority": "user",
+              "at": "2026-10-24T12:00:00Z",
+              "text": "列一下现在哪些节点在线。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)",
+          "notes": [
+            {
+              "authority": "note",
+              "source": "experimental_context_notes",
+              "at": "2026-10-23T18:00:00Z",
+              "text": "拓扑十分钟刷新一次。",
+              "active": true
+            }
+          ],
+          "host": {
+            "session": "main",
+            "idle": true,
+            "idle_source": "ctx.isIdle (includes prompt in flight)",
+            "plan_mode": false,
+            "plan_mode_source": "branch mode_change record",
+            "todo_source": "state.readTodoMore(branch)",
+            "todo_adapter_available": true,
+            "todos": [
+              {
+                "text": "复核第 2 组数据",
+                "state": "pending"
+              }
+            ]
+          }
+        },
+        "questions": {
+          "action": {
+            "type": "choice",
+            "instructions": "Which single action should this turn take?",
+            "criteria": {
+              "send": "deliver one message to the peer the intent addresses",
+              "read": "inspect local onlyne state; deliver nothing",
+              "local": "continue local work or accept a local proposal; deliver nothing, even when peers appear in the branch history",
+              "reject": "the turn cannot become one legal action"
+            }
+          }
+        }
+      },
+      "request_sha256": "ce9c5fdc52b4385e36dd25751d97c6f9433859264be12e1ca78b69a91af98c0f",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "action": {
+            "type": "choice",
+            "choice": "send",
+            "confidence": 0.8197,
+            "probabilities": {
+              "send": 0.8197,
+              "read": 0.0818,
+              "local": 0.0627,
+              "reject": 0.0357
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 662,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "action": {
+                "type": "choice",
+                "choice": "send",
+                "confidence": 0.8197,
+                "probabilities": {
+                  "send": 0.8197,
+                  "read": 0.0818,
+                  "local": 0.0627,
+                  "reject": 0.0357
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 662,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 6611,
+      "expected": {
+        "action": "read"
+      },
+      "actual": {
+        "action": "send"
+      },
+      "checks": {
+        "action": false
+      },
+      "plan_pass": false
+    },
+    {
+      "id": "sendx-h08",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of RFC 0005 new-context rule with a closed prior context; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "接着刚才跟 caerulea 说的那件事，把结论发过去，我继续弄别的",
+            "msg": "第 3 节结论如下。",
+            "meta": {
+              "to": "caerulea"
+            }
+          },
+          "peers": [
+            {
+              "alias": "caerulea",
+              "node_id": "urn:onlyne:agent:caerulea",
+              "display": "caerulea",
+              "responsibility": "data engineering",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "research",
+              "owner": "urn:onlyne:agent:lazuli",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "owner",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "107",
+              "members": [
+                "lazuli",
+                "dpdp",
+                "caerulea"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 272,
+              "authority": "user",
+              "at": "2026-10-24T12:30:00Z",
+              "text": "接着刚才跟 caerulea 说的那件事，把结论发过去，我继续弄别的。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)",
+          "contexts": [
+            {
+              "alias": "c-7",
+              "thread": "research",
+              "root": {
+                "sender": "urn:onlyne:agent:caerulea",
+                "id": "msg-33"
+              },
+              "summary": "讨论第 2 组数据",
+              "state": "closed",
+              "session_file": "/sessions/c-7.jsonl"
+            }
+          ]
+        },
+        "questions": {
+          "response": {
+            "type": "choice",
+            "instructions": "What reply expectation does the sender express?",
+            "criteria": {
+              "none": "the sender asks for no reply and states no question",
+              "async": "the sender keeps working after this send and reads any reply later; a question without a stated pause belongs here",
+              "await": "the sender pauses this work until the reply arrives; only an explicit stop-and-wait belongs here"
+            }
+          },
+          "execution": {
+            "type": "choice",
+            "instructions": "Which execution context should the receiving side use?",
+            "criteria": {
+              "new": "start a fresh execution context; a prior context is reused only when the intent names or describes it",
+              "existing": "reuse the execution context that the intent names or describes"
+            }
+          }
+        }
+      },
+      "request_sha256": "75adb9957d64d077885915489fd84683d7e43ece6da3fd69bde8fe6a8dd2f360",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "response": {
+            "type": "choice",
+            "choice": "async",
+            "confidence": 0.7261,
+            "probabilities": {
+              "none": 0.247,
+              "async": 0.7261,
+              "await": 0.0269
+            }
+          },
+          "execution": {
+            "type": "choice",
+            "choice": "existing",
+            "confidence": 0.8719,
+            "probabilities": {
+              "new": 0.1281,
+              "existing": 0.8719
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 743,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "response": {
+                "type": "choice",
+                "choice": "async",
+                "confidence": 0.7261,
+                "probabilities": {
+                  "none": 0.247,
+                  "async": 0.7261,
+                  "await": 0.0269
+                }
+              },
+              "execution": {
+                "type": "choice",
+                "choice": "existing",
+                "confidence": 0.8719,
+                "probabilities": {
+                  "new": 0.1281,
+                  "existing": 0.8719
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 743,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 8219,
+      "expected": {
+        "execution": "new",
+        "response": "none"
+      },
+      "actual": {
+        "response": "async",
+        "execution": "existing"
+      },
+      "checks": {
+        "execution": false,
+        "response": false
+      },
+      "plan_pass": false
+    },
+    {
+      "id": "sendx-h08",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of RFC 0005 new-context rule with a closed prior context; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "接着刚才跟 caerulea 说的那件事，把结论发过去，我继续弄别的",
+            "msg": "第 3 节结论如下。",
+            "meta": {
+              "to": "caerulea"
+            }
+          },
+          "peers": [
+            {
+              "alias": "caerulea",
+              "node_id": "urn:onlyne:agent:caerulea",
+              "display": "caerulea",
+              "responsibility": "data engineering",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "research",
+              "owner": "urn:onlyne:agent:lazuli",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "owner",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "107",
+              "members": [
+                "lazuli",
+                "dpdp",
+                "caerulea"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 270,
+              "authority": "user",
+              "at": "2026-10-24T12:20:00Z",
+              "text": "刚才跟 caerulea 聊的第 2 组数据，c-7 结束了吗？"
+            },
+            {
+              "seq": 271,
+              "authority": "assistant",
+              "at": "2026-10-24T12:25:00Z",
+              "text": "c-7 已经关了，第 2 组数据聊完。"
+            },
+            {
+              "seq": 272,
+              "authority": "user",
+              "at": "2026-10-24T12:30:00Z",
+              "text": "接着刚才跟 caerulea 说的那件事，把结论发过去，我继续弄别的。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)",
+          "contexts": [
+            {
+              "alias": "c-7",
+              "thread": "research",
+              "root": {
+                "sender": "urn:onlyne:agent:caerulea",
+                "id": "msg-33"
+              },
+              "summary": "讨论第 2 组数据",
+              "state": "closed",
+              "session_file": "/sessions/c-7.jsonl"
+            }
+          ]
+        },
+        "questions": {
+          "response": {
+            "type": "choice",
+            "instructions": "What reply expectation does the sender express?",
+            "criteria": {
+              "none": "the sender asks for no reply and states no question",
+              "async": "the sender keeps working after this send and reads any reply later; a question without a stated pause belongs here",
+              "await": "the sender pauses this work until the reply arrives; only an explicit stop-and-wait belongs here"
+            }
+          },
+          "execution": {
+            "type": "choice",
+            "instructions": "Which execution context should the receiving side use?",
+            "criteria": {
+              "new": "start a fresh execution context; a prior context is reused only when the intent names or describes it",
+              "existing": "reuse the execution context that the intent names or describes"
+            }
+          }
+        }
+      },
+      "request_sha256": "706dcca04c40ac80fcf8e661b08c86bb654b42eac137e26bd96d68a06853b2e5",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "response": {
+            "type": "choice",
+            "choice": "async",
+            "confidence": 0.5149,
+            "probabilities": {
+              "none": 0.4544,
+              "async": 0.5149,
+              "await": 0.0307
+            }
+          },
+          "execution": {
+            "type": "choice",
+            "choice": "existing",
+            "confidence": 0.7607,
+            "probabilities": {
+              "new": 0.2393,
+              "existing": 0.7607
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 852,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "response": {
+                "type": "choice",
+                "choice": "async",
+                "confidence": 0.5149,
+                "probabilities": {
+                  "none": 0.4544,
+                  "async": 0.5149,
+                  "await": 0.0307
+                }
+              },
+              "execution": {
+                "type": "choice",
+                "choice": "existing",
+                "confidence": 0.7607,
+                "probabilities": {
+                  "new": 0.2393,
+                  "existing": 0.7607
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 852,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 8256,
+      "expected": {
+        "execution": "new",
+        "response": "none"
+      },
+      "actual": {
+        "response": "async",
+        "execution": "existing"
+      },
+      "checks": {
+        "execution": false,
+        "response": false
+      },
+      "plan_pass": false
+    },
+    {
+      "id": "sendx-h08",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "order_seed": null,
+      "provenance": "reconstruction of RFC 0005 new-context rule with a closed prior context; hand-authored, not a captured trace",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "decision": "send",
+          "me": {
+            "node_id": "urn:onlyne:agent:lazuli",
+            "display": "lazuli",
+            "domain": "urn:onlyne:domain:research",
+            "limits": {
+              "request_bytes": 1048576,
+              "page_size": 50
+            }
+          },
+          "intent": {
+            "delivery_kind": "接着刚才跟 caerulea 说的那件事，把结论发过去，我继续弄别的",
+            "msg": "第 3 节结论如下。",
+            "meta": {
+              "to": "caerulea"
+            }
+          },
+          "peers": [
+            {
+              "alias": "caerulea",
+              "node_id": "urn:onlyne:agent:caerulea",
+              "display": "caerulea",
+              "responsibility": "data engineering",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "dpdp",
+              "node_id": "urn:onlyne:agent:dpdp",
+              "display": "dpdp",
+              "responsibility": "research analysis",
+              "relation": "thread_member",
+              "threads": [
+                "research"
+              ],
+              "can_post": true,
+              "can_read": true
+            },
+            {
+              "alias": "reviewer",
+              "node_id": "urn:onlyne:agent:reviewer",
+              "display": "reviewer",
+              "responsibility": "release windows",
+              "relation": "domain_member",
+              "threads": [],
+              "can_post": true,
+              "can_read": true
+            }
+          ],
+          "threads": [
+            {
+              "alias": "research",
+              "owner": "urn:onlyne:agent:lazuli",
+              "state": "open",
+              "my_access": [
+                "post",
+                "read"
+              ],
+              "my_role": "owner",
+              "peer_access": [
+                "post",
+                "read"
+              ],
+              "next_seq": "107",
+              "members": [
+                "lazuli",
+                "dpdp",
+                "caerulea"
+              ]
+            }
+          ],
+          "local": {
+            "unknown_outbound": [],
+            "open_waits": []
+          },
+          "conversation": [
+            {
+              "seq": 250,
+              "authority": "user",
+              "at": "2026-10-24T12:00:00Z",
+              "text": "第 3 节文档收尾。"
+            },
+            {
+              "seq": 270,
+              "authority": "user",
+              "at": "2026-10-24T12:20:00Z",
+              "text": "刚才跟 caerulea 聊的第 2 组数据，c-7 结束了吗？"
+            },
+            {
+              "seq": 271,
+              "authority": "assistant",
+              "at": "2026-10-24T12:25:00Z",
+              "text": "c-7 已经关了，第 2 组数据聊完。"
+            },
+            {
+              "seq": 272,
+              "authority": "user",
+              "at": "2026-10-24T12:30:00Z",
+              "text": "接着刚才跟 caerulea 说的那件事，把结论发过去，我继续弄别的。"
+            }
+          ],
+          "conversation_source": "ctx.sessionManager.getBranch() (active branch only)",
+          "contexts": [
+            {
+              "alias": "c-7",
+              "thread": "research",
+              "root": {
+                "sender": "urn:onlyne:agent:caerulea",
+                "id": "msg-33"
+              },
+              "summary": "讨论第 2 组数据",
+              "state": "closed",
+              "session_file": "/sessions/c-7.jsonl"
+            }
+          ],
+          "notes": [
+            {
+              "authority": "note",
+              "source": "experimental_context_notes",
+              "at": "2026-10-24T12:28:00Z",
+              "text": "c-7 已关闭。",
+              "active": true
+            }
+          ],
+          "host": {
+            "session": "main",
+            "idle": true,
+            "idle_source": "ctx.isIdle (includes prompt in flight)",
+            "plan_mode": false,
+            "plan_mode_source": "branch mode_change record",
+            "todo_source": "state.readTodoMore(branch)",
+            "todo_adapter_available": true,
+            "todos": [
+              {
+                "text": "收尾第 3 节文档",
+                "state": "in_progress"
+              }
+            ]
+          }
+        },
+        "questions": {
+          "response": {
+            "type": "choice",
+            "instructions": "What reply expectation does the sender express?",
+            "criteria": {
+              "none": "the sender asks for no reply and states no question",
+              "async": "the sender keeps working after this send and reads any reply later; a question without a stated pause belongs here",
+              "await": "the sender pauses this work until the reply arrives; only an explicit stop-and-wait belongs here"
+            }
+          },
+          "execution": {
+            "type": "choice",
+            "instructions": "Which execution context should the receiving side use?",
+            "criteria": {
+              "new": "start a fresh execution context; a prior context is reused only when the intent names or describes it",
+              "existing": "reuse the execution context that the intent names or describes"
+            }
+          }
+        }
+      },
+      "request_sha256": "8fa8e1ff86d70a714c2beb4ef8e56515bf7b1d64d4693d3fee34dee5fb4fc1a7",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "response": {
+            "type": "choice",
+            "choice": "async",
+            "confidence": 0.4975,
+            "probabilities": {
+              "none": 0.4673,
+              "async": 0.4975,
+              "await": 0.0352
+            }
+          },
+          "execution": {
+            "type": "choice",
+            "choice": "existing",
+            "confidence": 0.7773,
+            "probabilities": {
+              "new": 0.2227,
+              "existing": 0.7773
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 1016,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "response": {
+                "type": "choice",
+                "choice": "async",
+                "confidence": 0.4975,
+                "probabilities": {
+                  "none": 0.4673,
+                  "async": 0.4975,
+                  "await": 0.0352
+                }
+              },
+              "execution": {
+                "type": "choice",
+                "choice": "existing",
+                "confidence": 0.7773,
+                "probabilities": {
+                  "new": 0.2227,
+                  "existing": 0.7773
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 1016,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 7165,
+      "expected": {
+        "execution": "new",
+        "response": "none"
+      },
+      "actual": {
+        "response": "async",
+        "execution": "existing"
+      },
+      "checks": {
+        "execution": false,
+        "response": false
+      },
+      "plan_pass": false
+    }
+  ]
+}

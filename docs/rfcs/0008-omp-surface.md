@@ -32,7 +32,7 @@ OMP 中的 agent 通过一个 `msg` 工具发信、回复、读取消息、管�
 | `to` | 当前目录里的目标别名 | 已认证 endpoint 的稳定身份 |
 | `in_reply_to` | 展示的 `{thread, seq}` | 原 MessageRef、认证来源和本地落点 |
 | `thread` | 需要读取或指定的 thread 别名 | 本地或已授权远端 ThreadRef |
-| `context` | 目标已有执行上下文的别名 | 接收方的一个执行上下文 |
+| `context` | 目标已有执行上下文的别名 | 接收方的一个执行上下文，可以是主会话，或为某条根消息派生的子代理会话 |
 | `resource` | 当前可访问的资源别名 | ResourceRef |
 | `mentions` | `["@all"]` 或 `["@reviewer"]` | 这条消息希望谁主动关注 |
 | `attention` | `inbox` 或 `thread` | 读取模式，默认 inbox |
@@ -69,7 +69,7 @@ OMP 中的 agent 通过一个 `msg` 工具发信、回复、读取消息、管�
 
 省略 `relation` 时，SystemOne 按 `delivery_kind` 判断。意图是进度或补充时使用 `followup`。意图明确是答复时使用 `reply`。两者都无法判断时，返回 `invalid_request` 并要求模型写明关系，不按线上默认值猜成 reply。关系决定是否解除对方的等待，因此工具结果必须回报实际使用的关系。
 
-`execution: existing` 需要唯一接收上下文。目录返回每个目标可用的 context 别名。目标只有一个上下文时接入可以自动选定并在结果中说明；存在多个候选时返回 `ambiguous_target` 和候选列表，模型用 `meta.context` 重试。回复消息由 `in_reply_to` 确定落点，不再要求 context。
+`execution: existing` 需要明确接收上下文。目录返回每个目标的 context 别名。SystemOne 结合用户与模型历史、派发记录、context note、todo 和 thread 对话选择落点。多个候选可以由这些证据消歧，证据不足时返回 `ambiguous_target`。`in_reply_to` 提供原消息证据，插件不能把引用匹配当成全部语义判断。
 
 ## 3. 发现、读取与资源操作
 
@@ -193,9 +193,9 @@ im-sea-ice
 
 ## 6. 持续工作与 todo
 
-OMP 接入按实际投递安排，把持续处理的来信写入 OMP 所用的 todo 提供者。条目包含可读摘要、来源、消息引用和本地上下文关联。已有清单保留原目标和条目，新来信追加到清单。
+OMP 接入按 SystemOne 的决定，把需要持续处理的来信写入 todo 提供者。条目包含可读摘要、来源、消息引用和本地上下文关联。已有清单保留原目标和条目，补充可以关联已有工作，新任务才追加。
 
-18.10.4 上实际运行的是 `omp-todo-more`，原生 todo 已关闭。首版用 `pi.appendEntry` 写入完整快照，再调用 `setTodoPhases` 更新宿主投影。快照携带 goal，重放时以快照为准；投影落后时按快照修复。
+已核对的 OMP 18.12.6 环境使用 `omp-todo-more@0.1.4`，原生 todo 已关闭。拟议接入用 `pi.appendEntry` 写入完整快照，再更新宿主投影。快照携带 goal，重放以快照为准。SystemOne 结合原清单判断新增工作、补充已有任务或仅记录信息，不能对每条来信机械追加。
 
 持续来信的 todo 快照与 MessageRef 来源关联 MUST 由同一可恢复的持久提交记录确定；该记录同时包含新快照及消息引用到待办项的稳定关联。宿主投影与本地索引在该记录成功后派生。恢复 MUST 先重放该提交记录并重建关联，再决定是否为来信建立待办；不得仅因派生的本地关联索引缺失而再次追加。只有该提交记录成功后才向队列确认关联建立。
 
@@ -224,16 +224,23 @@ Source: research/103 from dpdp
 
 ## 7. 上下文、注入和中止
 
-接入显式维护 `(node_id, OMP session_id, context, ThreadRef)` 映射。一个 OMP 会话可以读取多个 thread。新执行上下文获得自己的映射、权限、列表游标和 todo。
+接入显式维护 `(node_id, OMP session_id, context, ThreadRef)` 映射。一个 OMP 会话可以读取多个 thread。新执行上下文获得自己的映射、权限、列表游标和 todo。任务派生的子代理是独立执行上下文，接入把上下文别名与子代理 id 记入目录，供 SystemOne 判定补充说明的落点。
 
-| 宿主状态 | 接入行为 |
+每条来信由 SystemOne 判定处理动作，接入按动作执行：
+
+| SystemOne 判定 | 接入行为 |
 |---|---|
-| 空闲 | 提交来信片段并请求新回合 |
-| 正在推理或运行工具 | 在宿主允许的边界排队注入，工具并发不改变来信归属 |
-| plan 模式 | 保存来信并显示 queued，不自动开始执行回合 |
-| 本地 await 中 | 网络回复直接解除等待，其他来信继续持久排队 |
-| 用户中止 | 通过 AbortSignal 释放当前本地等待 |
-| 恢复会话 | 按持久映射与注入游标补齐，重新检查权限 |
+| `fragment` | 以 `onlyne.inbound` 自定义消息进入下一个上下文装配点，不主动开启回合 |
+| `context` | 投递到目录中的上下文别名，主会话不启动回合，线程视图标注落点 |
+| `queue` | 持久保存并显示 queued，不启动回合 |
+| `wake` | 空闲时启动回合，忙时排到下一步边界 |
+| `wait_result` | 由在途等待返回该回复 |
+
+宿主状态决定执行方式，不改变判定：流式生成期间注入排在下一步边界；plan 模式只保存；用户中止通过 AbortSignal 释放当前本地等待；恢复会话按持久映射与注入游标补齐，并重新检查权限。
+
+宿主状态本身也进入 SystemOne 的判定输入。用户最近的停止或改派、当前工作目标、模型已经发出的任务、thread 历史和资源关系都可以改变应选动作。各处上下文分别构造，完整输入与情景模拟定义在 [RFC 0016](0016-systemone-context.md)。
+
+接入注入来信时使用自定义消息类型，不调用 `sendUserMessage`。`onlyne.inbound` 承载来信，`onlyne.routing` 承载投递去向说明，两者 `attribution` 为 `agent`，在会话中记为 `custom_message`，在 TUI 中以独立样式显示。OMP 把它们转换为 developer 角色的上下文，不冒充本地用户发言。排队条目用 `appendEntry` 写入，不进入模型上下文。
 
 `execution: new` 要求宿主能创建并驱动独立上下文。能力未接通时返回 unsupported_delivery。系统不得把消息发到任意现有会话代替新上下文。
 
@@ -241,19 +248,22 @@ Source: research/103 from dpdp
 
 ## 8. OMP 接线证据
 
-本节记录实际宿主 API 和限制，与拟议界面分别核对。接口证据来自已安装 OMP 源码及当前 todo 提供者。首版接入还需实际运行下列场景才能宣称实现通过。
-
-已核对 OMP 18.10.4 的安装包源码。当前运行二进制是 18.12.6，没有对应源码可供核对，因此行号和接口结论按 18.10.4 记录。以下结论来自 `@oh-my-pi/pi-coding-agent` 与 `pi-agent-core` 的对应文件。
+本节记录实际宿主 API 和限制，与拟议界面分别核对。接口证据来自已安装的 OMP 18.12.6 源码及当前 todo 提供者；安装包自带 `src/`，行号指向该版本。首版接入还需实跑验收场景才能宣称实现通过。
 
 | 能力 | 实际接口 | 对接入的含义 |
 |---|---|---|
 | 注册工具 | `ExtensionAPI.registerTool`，`execute(toolCallId, params, signal, onUpdate, ctx)` | 工具可以持有库的 Promise 并响应中止信号 |
 | 工具中断 | `ToolDefinition` 未声明 `interruptible`，运行时只机械转发自有属性 | 不依赖未声明的中断字段；用 `signal` 和库自己的取消路径 |
-| 主动注入 | `sendMessage`、`sendUserMessage` 返回 `void` | 调用结束不提供排队、注入或唤醒的确认 |
+| 主动注入 | `sendMessage(customMessage, {deliverAs})` 注入自定义消息；`appendEntry` 只持久化本地条目 | 不调用 `sendUserMessage`；`sendMessage` 返回 `void`，调用结束不提供消费确认 |
 | 注入调度 | `deliverAs` 取 `steer`、`nextTurn`、`aside`、`followUp`；忙闲由 `isStreaming` 与 plan 模式决定 | 来信排队与唤醒必须按这个矩阵设计 |
 | 新上下文 | `createAgentSession` 支持 `agentId`、`taskDepth`、`enableIrc` | 新上下文需要自己的身份，不能复用父会话身份 |
 | 进程内投递 | `AgentSession.deliverIrcMessage` 返回 `injected` 或 `woken` | IRC 总线另有 revived/failed，均不证明模型已读或业务完成 |
 | 等待 | `IrcBus.wait(agentId, {from}, timeoutMs, signal)` | 可作为进程内唤醒通道，不替代 Onlyne 的业务答复等待 |
+| 任务派发 | `task` 不复用子会话，重复 `name` 得到 `-2`；子代理 id 在 `details.progress[].id` 或 `details.results[].id` | 上下文登记在模型看到结果之前完成 |
+| 补充投递 | `executeSend({registry, senderId}, {to, message})`，父级发送转为 steer | 追加内容进入原会话，不创建第二个子代理 |
+| 子代理身份 | `ctx.agent` 提供 `kind`、`id`、`depth`、`parentId` | 主会话与子代理共用扩展代码，按 `kind` 分权 |
+| 插件设置页 | `package.json` 的 `omp.settings`；读写 `~/.omp/plugins/omp-plugins.lock.json`；项目覆盖文件只读 | 页面写入用户级配置，项目级配置需由插件自建界面 |
+| Tern 渲染 | `TERM_PROGRAM=tern` 探测加 TSP `hello`；组件实现 `describe(cx)` | 自定义面板与工具视图需要原生描述，未实现时回退逐行输出 |
 | todo 写入 | `pi.appendEntry("mouriya.omp.todo-more", snapshot)` 加 `session.setTodoPhases` | 保留 goal 和 explanation；人类可读来源写进 explanation 首段 |
 | todo 提醒 | `omp-todo-more` 的 stop、turn-end 与 plan-check 提醒 | 提醒归提供者；原生 todo 已关闭 |
 
@@ -265,13 +275,13 @@ Source: research/103 from dpdp
 - 默认 `deliverAs` 只在调用方要求时启动回合，否则只追加并持久化。
 - `isStreaming` 包含已受理但尚未派发的提交，因此“忙”不等于模型正在生成。
 
-首版接入对来信使用 `aside`：忙时在下一步边界注入，空闲时唤醒，plan 模式只记录。扩展的 void 返回只支持记录提交尝试。注入游标必须由上下文消费边界或 SDK 的观察接口确认后推进，调用成功本身不作为注入确认。
+接入按 SystemOne 动作选择宿主调用，不对全部来信固定使用 `aside`。扩展的 void 返回只支持记录提交尝试。宿主未提供通用的模型消费确认；消费边界未接通时保留未确认记录，不能凭调用成功推进游标。
 
 这些是宿主行为，不改变 Onlyne 的消息事实。接入把“已注入”和“已唤醒”记录为本地证据，不提升为持久接纳或业务答复。
 
 todo 路径的额外限制：todo-more 的 schema 会丢弃未知字段，因此来源不能作为独立键挂在条目上；人类可读来源只能放在 explanation 首段，机器可解析来源由 Onlyne 本地记录保存。程序化追加不产生 todo 工具结果，界面是否立即刷新尚未实测。首版必须验证刷新，否则改用会产生工具结果的写入路径，或明确显示待刷新状态。
 
-源码索引以安装包为根：`src/extensibility/extensions/types.ts:1806-1833` 定义注入与持久化 API，`src/session/agent-session.ts:11061-11064` 定义直接 IRC 投递结果。todo-more 的 `src/commit.ts:15-33` 定义快照与投影提交，`src/state.ts:71-107` 定义条目和快照字段。`commitTodoState` 的 saved 表示分支接受记录，源码未承诺磁盘刷写确认，恢复验收必须覆盖这个边界。
+源码索引以安装包为根：`src/extensibility/extensions/types.ts:1861-1872` 定义发送与持久化 API，`src/session/agent-session.ts:11991-11994` 定义直接 IRC 投递结果，`src/irc/messaging.ts:45-107` 定义 `executeSend`。todo-more 的 `src/commit.ts:15-33` 定义快照与投影提交，`src/state.ts:71-107` 定义条目和快照字段。`commitTodoState` 的 saved 表示分支接受记录，源码未承诺磁盘刷写确认，恢复验收必须覆盖这个边界。
 
 IM 会话在本设计里是独立资源节点，不是 agent 的 thread。它由资源 endpoint 持有事件和绑定，经 `resource` 动作操作；本 RFC 不定义它的接入细节。
 

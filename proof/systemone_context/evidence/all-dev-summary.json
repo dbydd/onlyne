@@ -1,0 +1,1621 @@
+{
+  "files": [
+    {
+      "path": "proof/systemone_context/evidence/inbound-dev-tuned.json",
+      "sha256": "89c4074095cc38909255c896940070e98ac2cd63a5488795d98f2a85f7d6a190"
+    },
+    {
+      "path": "proof/systemone_context/evidence/recovery-dev-tuned.json",
+      "sha256": "d26a1f0cbf47d51ea6c900342489e6aa6a00d494e1cc08a191bc4e49adf82b42"
+    },
+    {
+      "path": "proof/systemone_context/evidence/reply-dev-tuned.json",
+      "sha256": "4aee5ccdf4276617082a48c462b0539959f32e96208936cce48ba495dd6ff622"
+    },
+    {
+      "path": "proof/systemone_context/evidence/resource-dev-tuned.json",
+      "sha256": "29433af843dfe43c95c91f560f90f5a3c6efa8a22d0976f1ff407a4dc43c999a"
+    },
+    {
+      "path": "proof/systemone_context/evidence/send-dev-tuned.json",
+      "sha256": "26b8b19e993d013d27210720b4e9b06acf3ebfada3229a3a454fbabb05584769"
+    },
+    {
+      "path": "proof/systemone_context/evidence/send_extended-dev-tuned.json",
+      "sha256": "1cacc8bf2fb3fb026c5fb285be7734db9e2a864cfddfbc0c5f59cf99b2966db6"
+    },
+    {
+      "path": "proof/systemone_context/evidence/structure-dev-tuned.json",
+      "sha256": "7b85bc700da094c6dbfba3fb4063451382da2dd41a00107cb6cf065ddc590b5f"
+    },
+    {
+      "path": "proof/systemone_context/evidence/todo-dev-tuned.json",
+      "sha256": "b2283442af4130ae541de4c3fbf6714cc69f86dd598ae9e4f4baedfa5ffcd8c0"
+    },
+    {
+      "path": "proof/systemone_context/evidence/continuation-dev.json",
+      "sha256": "e46a55ec513154e6f66234013b55b8b8cb6be2a16e055d86beaf36a63b3c17a4"
+    }
+  ],
+  "models": [
+    "clef-flash-oQ4e"
+  ],
+  "requests": 296,
+  "summary": [
+    {
+      "point": "context",
+      "split": "dev",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 3,
+      "questions": 16,
+      "correct": 9,
+      "errors": 1,
+      "mean_input_tokens": 2254.7,
+      "mean_elapsed_ms": 80423.8
+    },
+    {
+      "point": "context",
+      "split": "dev",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 4,
+      "questions": 16,
+      "correct": 10,
+      "errors": 1,
+      "mean_input_tokens": 1692.7,
+      "mean_elapsed_ms": 89966.1
+    },
+    {
+      "point": "continuation",
+      "split": "dev",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 7,
+      "questions": 8,
+      "correct": 7,
+      "errors": 0,
+      "mean_input_tokens": 812.2,
+      "mean_elapsed_ms": 14496.0
+    },
+    {
+      "point": "continuation",
+      "split": "dev",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 7,
+      "questions": 8,
+      "correct": 7,
+      "errors": 0,
+      "mean_input_tokens": 723.2,
+      "mean_elapsed_ms": 12767.4
+    },
+    {
+      "point": "continuation",
+      "split": "dev",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 1,
+      "questions": 8,
+      "correct": 1,
+      "errors": 0,
+      "mean_input_tokens": 602.8,
+      "mean_elapsed_ms": 12247.4
+    },
+    {
+      "point": "domain",
+      "split": "dev",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 7,
+      "questions": 16,
+      "correct": 14,
+      "errors": 0,
+      "mean_input_tokens": 1753.4,
+      "mean_elapsed_ms": 10195.5
+    },
+    {
+      "point": "domain",
+      "split": "dev",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 7,
+      "questions": 16,
+      "correct": 14,
+      "errors": 0,
+      "mean_input_tokens": 1622.0,
+      "mean_elapsed_ms": 10250.2
+    },
+    {
+      "point": "inbound",
+      "split": "dev",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 16,
+      "plans": 15,
+      "questions": 48,
+      "correct": 47,
+      "errors": 0,
+      "mean_input_tokens": 2933.3,
+      "mean_elapsed_ms": 10719.3
+    },
+    {
+      "point": "inbound",
+      "split": "dev",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 16,
+      "plans": 14,
+      "questions": 48,
+      "correct": 46,
+      "errors": 0,
+      "mean_input_tokens": 2806.0,
+      "mean_elapsed_ms": 10122.4
+    },
+    {
+      "point": "inbound",
+      "split": "dev",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 16,
+      "plans": 10,
+      "questions": 48,
+      "correct": 41,
+      "errors": 0,
+      "mean_input_tokens": 1528.9,
+      "mean_elapsed_ms": 9669.9
+    },
+    {
+      "point": "recovery",
+      "split": "dev",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 2,
+      "questions": 16,
+      "correct": 7,
+      "errors": 0,
+      "mean_input_tokens": 2291.9,
+      "mean_elapsed_ms": 35419.2
+    },
+    {
+      "point": "recovery",
+      "split": "dev",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 2,
+      "questions": 16,
+      "correct": 7,
+      "errors": 0,
+      "mean_input_tokens": 1735.2,
+      "mean_elapsed_ms": 19966.6
+    },
+    {
+      "point": "reply",
+      "split": "dev",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 16,
+      "plans": 12,
+      "questions": 65,
+      "correct": 60,
+      "errors": 0,
+      "mean_input_tokens": 1957.5,
+      "mean_elapsed_ms": 19111.6
+    },
+    {
+      "point": "reply",
+      "split": "dev",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 16,
+      "plans": 12,
+      "questions": 65,
+      "correct": 60,
+      "errors": 0,
+      "mean_input_tokens": 1816.8,
+      "mean_elapsed_ms": 18731.9
+    },
+    {
+      "point": "resource",
+      "split": "dev",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 16,
+      "plans": 15,
+      "questions": 32,
+      "correct": 31,
+      "errors": 0,
+      "mean_input_tokens": 1589.0,
+      "mean_elapsed_ms": 7933.5
+    },
+    {
+      "point": "resource",
+      "split": "dev",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 16,
+      "plans": 15,
+      "questions": 32,
+      "correct": 31,
+      "errors": 0,
+      "mean_input_tokens": 1142.6,
+      "mean_elapsed_ms": 7479.9
+    },
+    {
+      "point": "send",
+      "split": "dev",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 32,
+      "plans": 26,
+      "questions": 47,
+      "correct": 40,
+      "errors": 1,
+      "mean_input_tokens": 1202.3,
+      "mean_elapsed_ms": 34051.4
+    },
+    {
+      "point": "send",
+      "split": "dev",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 32,
+      "plans": 24,
+      "questions": 47,
+      "correct": 38,
+      "errors": 1,
+      "mean_input_tokens": 1033.3,
+      "mean_elapsed_ms": 34025.0
+    },
+    {
+      "point": "thread",
+      "split": "dev",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 6,
+      "questions": 24,
+      "correct": 21,
+      "errors": 0,
+      "mean_input_tokens": 2268.9,
+      "mean_elapsed_ms": 8094.2
+    },
+    {
+      "point": "thread",
+      "split": "dev",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 6,
+      "questions": 24,
+      "correct": 21,
+      "errors": 0,
+      "mean_input_tokens": 2132.1,
+      "mean_elapsed_ms": 7959.9
+    },
+    {
+      "point": "todo",
+      "split": "dev",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 16,
+      "plans": 14,
+      "questions": 16,
+      "correct": 14,
+      "errors": 0,
+      "mean_input_tokens": 1475.9,
+      "mean_elapsed_ms": 7526.3
+    },
+    {
+      "point": "todo",
+      "split": "dev",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 16,
+      "plans": 15,
+      "questions": 16,
+      "correct": 15,
+      "errors": 0,
+      "mean_input_tokens": 1062.9,
+      "mean_elapsed_ms": 7489.5
+    }
+  ],
+  "context_effects": [
+    {
+      "id": "continuation-dev-02",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "deliver:c1"
+      },
+      "focused": {
+        "plan": "deliver:c2"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "continuation-dev-03",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "deliver:c1"
+      },
+      "focused": {
+        "plan": "queue:c2"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "continuation-dev-04",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "deliver:c1"
+      },
+      "focused": {
+        "plan": "deliver:c2"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "continuation-dev-05",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "deliver:c1"
+      },
+      "focused": {
+        "plan": "deliver:c3"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "continuation-dev-06",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "deliver:c1"
+      },
+      "focused": {
+        "plan": "clarify"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "continuation-dev-07",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "deliver:c3"
+      },
+      "focused": {
+        "plan": "deliver:c1"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "inbound-dev-01-mention-wake",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "action": "fragment",
+        "context": "none",
+        "clarify": false
+      },
+      "focused": {
+        "action": "wake",
+        "context": "none",
+        "clarify": false
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "inbound-dev-02-mention-hold",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "action": "fragment",
+        "context": "none",
+        "clarify": false
+      },
+      "focused": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "inbound-dev-05-wait-mismatch",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "action": "fragment",
+        "context": "none",
+        "clarify": false
+      },
+      "focused": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "minimal_pass": true,
+      "focused_pass": false
+    },
+    {
+      "id": "inbound-dev-12-injection-peer",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "action": "context",
+        "context": "c-1",
+        "clarify": false
+      },
+      "focused": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "inbound-dev-13-user-authority",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "focused": {
+        "action": "wake",
+        "context": "none",
+        "clarify": false
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "inbound-dev-14-peer-impersonates-user",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "focused": {
+        "action": "wake",
+        "context": "none",
+        "clarify": false
+      },
+      "minimal_pass": false,
+      "focused_pass": false
+    },
+    {
+      "id": "inbound-dev-15-user-focus-answer",
+      "split": "dev",
+      "revision": "tuned",
+      "minimal": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "focused": {
+        "action": "wake",
+        "context": "none",
+        "clarify": false
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    }
+  ],
+  "failures": [
+    {
+      "id": "inbound-dev-01-mention-wake",
+      "point": "inbound",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "action": "wake",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "fragment",
+        "context": "none",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-dev-02-mention-hold",
+      "point": "inbound",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "fragment",
+        "context": "none",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-dev-05-wait-mismatch",
+      "point": "inbound",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "fragment",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-dev-12-injection-peer",
+      "point": "inbound",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "context",
+        "context": "c-1",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-dev-13-user-authority",
+      "point": "inbound",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "action": "wake",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-dev-14-peer-impersonates-user",
+      "point": "inbound",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "action": "fragment",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-dev-14-peer-impersonates-user",
+      "point": "inbound",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "fragment",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "wake",
+        "context": "none",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-dev-14-peer-impersonates-user",
+      "point": "inbound",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "fragment",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-dev-15-user-focus-answer",
+      "point": "inbound",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "action": "wake",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "rec-wait-late-unconsumed",
+      "point": "recovery",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "wake",
+        "context": "none"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-data"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-wait-late-unconsumed",
+      "point": "recovery",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "wake",
+        "context": "none"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-data"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-wait-late-consumed",
+      "point": "recovery",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "arrival_only",
+        "context": "none"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-data"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-wait-late-consumed",
+      "point": "recovery",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "arrival_only",
+        "context": "none"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-data"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-wait-cancelled-redirect",
+      "point": "recovery",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "queue",
+        "context": "none"
+      },
+      "actual": {
+        "action": "context",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-wait-cancelled-redirect",
+      "point": "recovery",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "queue",
+        "context": "none"
+      },
+      "actual": {
+        "action": "context",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-outbound-unknown-reply",
+      "point": "recovery",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "fragment",
+        "context": "none"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-review"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-outbound-unknown-reply",
+      "point": "recovery",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "fragment",
+        "context": "none"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-review"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-outbound-refused",
+      "point": "recovery",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "report",
+        "context": "none"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-outbound-refused",
+      "point": "recovery",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "report",
+        "context": "none"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-child-isolated-lost",
+      "point": "recovery",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "clarify",
+        "context": "none"
+      },
+      "actual": {
+        "action": "fragment",
+        "context": "c-recalc"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-child-isolated-lost",
+      "point": "recovery",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "clarify",
+        "context": "none"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-recalc"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-same-root-other-thread",
+      "point": "context",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "context",
+        "context": "c-review"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-review"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-topic-mismatch",
+      "point": "context",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "context",
+        "context": "c-recalc"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-topic-mismatch",
+      "point": "context",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "context",
+        "context": "c-recalc"
+      },
+      "actual": {},
+      "error": "TimeoutError: timed out"
+    },
+    {
+      "id": "ctx-no-reference-user-note",
+      "point": "context",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "fragment",
+        "context": "none"
+      },
+      "actual": {},
+      "error": "TimeoutError: timed out"
+    },
+    {
+      "id": "ctx-no-reference-user-note",
+      "point": "context",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "fragment",
+        "context": "none"
+      },
+      "actual": {
+        "action": "context",
+        "context": "c-review"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-two-equal-matches",
+      "point": "context",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "clarify",
+        "context": "none"
+      },
+      "actual": {
+        "action": "clarify",
+        "context": "c-review"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-two-equal-matches",
+      "point": "context",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "clarify",
+        "context": "none"
+      },
+      "actual": {
+        "action": "clarify",
+        "context": "c-review"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-nested-child",
+      "point": "context",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "context",
+        "context": "c-review-sub"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-review-sub"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-nested-child",
+      "point": "context",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "context",
+        "context": "c-review-sub"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-review-sub"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-03",
+      "point": "reply",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "relation": "unresolved",
+        "target": "dpdp",
+        "thread": "research",
+        "response": "none"
+      },
+      "actual": {
+        "relation": "followup",
+        "response": "none",
+        "target": "dpdp",
+        "thread": "research"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-03",
+      "point": "reply",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "relation": "unresolved",
+        "target": "dpdp",
+        "thread": "research",
+        "response": "none"
+      },
+      "actual": {
+        "relation": "followup",
+        "response": "none",
+        "target": "dpdp",
+        "thread": "research"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-06",
+      "point": "reply",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "relation": "reply",
+        "target": "none",
+        "thread": "review",
+        "response": "none"
+      },
+      "actual": {
+        "relation": "reply",
+        "response": "none",
+        "target": "arjen",
+        "thread": "review"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-06",
+      "point": "reply",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "relation": "reply",
+        "target": "none",
+        "thread": "review",
+        "response": "none"
+      },
+      "actual": {
+        "relation": "reply",
+        "response": "none",
+        "target": "arjen",
+        "thread": "review"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-12",
+      "point": "reply",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "relation": "followup",
+        "target": "caerulea",
+        "thread": "none",
+        "response": "none"
+      },
+      "actual": {
+        "relation": "unresolved",
+        "response": "none",
+        "target": "none",
+        "thread": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-12",
+      "point": "reply",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "relation": "followup",
+        "target": "caerulea",
+        "thread": "none",
+        "response": "none"
+      },
+      "actual": {
+        "relation": "unresolved",
+        "response": "none",
+        "target": "none",
+        "thread": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-21",
+      "point": "reply",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "relation": "followup",
+        "target": "caerulea",
+        "thread": "research",
+        "response": "none",
+        "view": "result_ref_only"
+      },
+      "actual": {
+        "relation": "reply",
+        "response": "none",
+        "target": "caerulea",
+        "thread": "research",
+        "view": "result_ref_only"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-21",
+      "point": "reply",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "relation": "followup",
+        "target": "caerulea",
+        "thread": "research",
+        "response": "none",
+        "view": "result_ref_only"
+      },
+      "actual": {
+        "relation": "reply",
+        "response": "none",
+        "target": "caerulea",
+        "thread": "research",
+        "view": "result_ref_only"
+      },
+      "error": null
+    },
+    {
+      "id": "resource-07",
+      "point": "resource",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "resource": "dpdp-dm",
+        "operation": "describe"
+      },
+      "actual": {
+        "resource": "dpdp-dm",
+        "operation": "list_events"
+      },
+      "error": null
+    },
+    {
+      "id": "resource-08",
+      "point": "resource",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "resource": "job-99",
+        "operation": "describe"
+      },
+      "actual": {
+        "resource": "job-99",
+        "operation": "list_events"
+      },
+      "error": null
+    },
+    {
+      "id": "send-dev-02",
+      "point": "send",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "plan": "send_caerulea_research_none_existing_c-1"
+      },
+      "actual": {
+        "plan": "send_caerulea_research_async_existing_c-1"
+      },
+      "error": null
+    },
+    {
+      "id": "send-dev-02",
+      "point": "send",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "plan": "send_caerulea_research_none_existing_c-1"
+      },
+      "actual": {
+        "plan": "send_caerulea_research_async_existing_c-1"
+      },
+      "error": null
+    },
+    {
+      "id": "send-dev-06",
+      "point": "send",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "plan": "clarify"
+      },
+      "actual": {
+        "plan": "send_reviewer-b_review_async_new"
+      },
+      "error": null
+    },
+    {
+      "id": "send-dev-06",
+      "point": "send",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "plan": "clarify"
+      },
+      "actual": {
+        "plan": "send_reviewer-b_review_async_new"
+      },
+      "error": null
+    },
+    {
+      "id": "send-dev-11",
+      "point": "send",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "plan": "send_caerulea_research_none_existing_c-1"
+      },
+      "actual": {
+        "plan": "send_caerulea_research_async_existing_c-1"
+      },
+      "error": null
+    },
+    {
+      "id": "send-dev-11",
+      "point": "send",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "plan": "send_caerulea_research_none_existing_c-1"
+      },
+      "actual": {
+        "plan": "send_caerulea_research_async_existing_c-1"
+      },
+      "error": null
+    },
+    {
+      "id": "send-dev-13",
+      "point": "send",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "plan": "read_inbox_thread_research"
+      },
+      "actual": {
+        "plan": "read_messages_thread_research"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-06",
+      "point": "send",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "target": "reviewer",
+        "response": "none"
+      },
+      "actual": {},
+      "error": "TimeoutError: timed out"
+    },
+    {
+      "id": "sendx-06",
+      "point": "send",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "target": "reviewer",
+        "response": "none"
+      },
+      "actual": {},
+      "error": "TimeoutError: timed out"
+    },
+    {
+      "id": "sendx-07",
+      "point": "send",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "target": "auditor",
+        "action": "send"
+      },
+      "actual": {
+        "action": "send",
+        "target": "reviewer"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-10",
+      "point": "send",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "action": "local"
+      },
+      "actual": {
+        "action": "send"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-10",
+      "point": "send",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "action": "local"
+      },
+      "actual": {
+        "action": "send"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-14",
+      "point": "send",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "execution": "new",
+        "response": "none"
+      },
+      "actual": {
+        "response": "none",
+        "execution": "existing"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-14",
+      "point": "send",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "execution": "new",
+        "response": "none"
+      },
+      "actual": {
+        "response": "none",
+        "execution": "existing"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-thread-create-after-close",
+      "point": "thread",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "op": "create",
+        "thread": "none",
+        "peer": "none"
+      },
+      "actual": {
+        "op": "create",
+        "thread": "thr-ops-rota",
+        "peer": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-thread-create-after-close",
+      "point": "thread",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "op": "create",
+        "thread": "none",
+        "peer": "none"
+      },
+      "actual": {
+        "op": "create",
+        "thread": "thr-ops-rota",
+        "peer": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-thread-add-reviewer-scope",
+      "point": "thread",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "op": "member_add",
+        "thread": "thr-sea-ice-review",
+        "peer": "reviewer"
+      },
+      "actual": {
+        "op": "member_add",
+        "thread": "thr-review",
+        "peer": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-thread-add-reviewer-scope",
+      "point": "thread",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "op": "member_add",
+        "thread": "thr-sea-ice-review",
+        "peer": "reviewer"
+      },
+      "actual": {
+        "op": "member_add",
+        "thread": "thr-review",
+        "peer": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-domain-none-remove-unreachable",
+      "point": "domain",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "op": "none",
+        "domain": "none"
+      },
+      "actual": {
+        "op": "leave",
+        "domain": "urn:onlyne:domain:research-chamber"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-domain-none-remove-unreachable",
+      "point": "domain",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "op": "none",
+        "domain": "none"
+      },
+      "actual": {
+        "op": "leave",
+        "domain": "urn:onlyne:domain:research-chamber"
+      },
+      "error": null
+    },
+    {
+      "id": "todo-dev-10",
+      "point": "todo",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "plan": "complete:readme-redesign"
+      },
+      "actual": {
+        "plan": "supp:readme-redesign"
+      },
+      "error": null
+    },
+    {
+      "id": "todo-dev-10",
+      "point": "todo",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "plan": "complete:readme-redesign"
+      },
+      "actual": {
+        "plan": "supp:readme-redesign"
+      },
+      "error": null
+    },
+    {
+      "id": "todo-dev-11",
+      "point": "todo",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "plan": "supp:recheck-section3"
+      },
+      "actual": {
+        "plan": "complete:recheck-section3"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-dev-02",
+      "point": "continuation",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "plan": "deliver:c2"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-dev-03",
+      "point": "continuation",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "plan": "queue:c2"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-dev-04",
+      "point": "continuation",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "plan": "deliver:c2"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-dev-05",
+      "point": "continuation",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "plan": "deliver:c3"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-dev-06",
+      "point": "continuation",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "plan": "clarify"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-dev-07",
+      "point": "continuation",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "plan": "deliver:c1"
+      },
+      "actual": {
+        "plan": "deliver:c3"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-dev-08",
+      "point": "continuation",
+      "split": "dev",
+      "profile": "minimal",
+      "expected": {
+        "plan": "clarify"
+      },
+      "actual": {
+        "plan": "deliver:c2"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-dev-08",
+      "point": "continuation",
+      "split": "dev",
+      "profile": "focused",
+      "expected": {
+        "plan": "clarify"
+      },
+      "actual": {
+        "plan": "deliver:c2"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-dev-08",
+      "point": "continuation",
+      "split": "dev",
+      "profile": "expanded",
+      "expected": {
+        "plan": "clarify"
+      },
+      "actual": {
+        "plan": "fragment"
+      },
+      "error": null
+    }
+  ]
+}

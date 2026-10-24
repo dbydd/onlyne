@@ -1,0 +1,2041 @@
+{
+  "files": [
+    {
+      "path": "proof/systemone_context/evidence/holdout-a.json",
+      "sha256": "948dddb209574bf12e96d72d5c99588efa16fcfbc0375bd9bc97033fec5f4fdb"
+    },
+    {
+      "path": "proof/systemone_context/evidence/holdout-b.json",
+      "sha256": "f48307797a1d0f6a435558ccfe260fa1ef81a83fcad70bb068a32506dd167af0"
+    },
+    {
+      "path": "proof/systemone_context/evidence/holdout-c.json",
+      "sha256": "4e38a4577d072c4d1e5be9ca962ca72a2ce5ce61ab277823dca916457f943672"
+    },
+    {
+      "path": "proof/systemone_context/evidence/continuation-holdout.json",
+      "sha256": "01f37237b42fd6d05175741d3232c892acd62cf49ad852056191c871e421d030"
+    },
+    {
+      "path": "proof/systemone_context/evidence/holdout-extended.json",
+      "sha256": "a0a2a6e6fc503cba25d7a74c5e044485704bb599795c52c973027541d4523dbc"
+    }
+  ],
+  "models": [
+    "clef-flash-oQ4e"
+  ],
+  "requests": 216,
+  "summary": [
+    {
+      "point": "context",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 4,
+      "plans": 1,
+      "questions": 8,
+      "correct": 5,
+      "errors": 0,
+      "mean_input_tokens": 2448.2,
+      "mean_elapsed_ms": 20350.2
+    },
+    {
+      "point": "context",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 4,
+      "plans": 1,
+      "questions": 8,
+      "correct": 5,
+      "errors": 0,
+      "mean_input_tokens": 1893.5,
+      "mean_elapsed_ms": 21645.5
+    },
+    {
+      "point": "context",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 4,
+      "plans": 1,
+      "questions": 8,
+      "correct": 5,
+      "errors": 0,
+      "mean_input_tokens": 1049.2,
+      "mean_elapsed_ms": 22792.2
+    },
+    {
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 7,
+      "questions": 8,
+      "correct": 7,
+      "errors": 0,
+      "mean_input_tokens": 813.2,
+      "mean_elapsed_ms": 11230.4
+    },
+    {
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 5,
+      "questions": 8,
+      "correct": 5,
+      "errors": 0,
+      "mean_input_tokens": 724.2,
+      "mean_elapsed_ms": 11098.0
+    },
+    {
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 2,
+      "questions": 8,
+      "correct": 2,
+      "errors": 0,
+      "mean_input_tokens": 603.2,
+      "mean_elapsed_ms": 10779.0
+    },
+    {
+      "point": "domain",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 4,
+      "plans": 2,
+      "questions": 8,
+      "correct": 5,
+      "errors": 0,
+      "mean_input_tokens": 1667.0,
+      "mean_elapsed_ms": 18999.5
+    },
+    {
+      "point": "domain",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 4,
+      "plans": 2,
+      "questions": 8,
+      "correct": 5,
+      "errors": 0,
+      "mean_input_tokens": 1518.5,
+      "mean_elapsed_ms": 16154.2
+    },
+    {
+      "point": "domain",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 4,
+      "plans": 2,
+      "questions": 8,
+      "correct": 5,
+      "errors": 0,
+      "mean_input_tokens": 788.5,
+      "mean_elapsed_ms": 15858.0
+    },
+    {
+      "point": "inbound",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 7,
+      "questions": 24,
+      "correct": 23,
+      "errors": 0,
+      "mean_input_tokens": 2924.2,
+      "mean_elapsed_ms": 16993.5
+    },
+    {
+      "point": "inbound",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 7,
+      "questions": 24,
+      "correct": 23,
+      "errors": 0,
+      "mean_input_tokens": 2798.6,
+      "mean_elapsed_ms": 15915.2
+    },
+    {
+      "point": "inbound",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 5,
+      "questions": 24,
+      "correct": 20,
+      "errors": 0,
+      "mean_input_tokens": 1534.5,
+      "mean_elapsed_ms": 11572.8
+    },
+    {
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 4,
+      "plans": 0,
+      "questions": 8,
+      "correct": 3,
+      "errors": 0,
+      "mean_input_tokens": 2386.5,
+      "mean_elapsed_ms": 21167.0
+    },
+    {
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 4,
+      "plans": 0,
+      "questions": 8,
+      "correct": 4,
+      "errors": 0,
+      "mean_input_tokens": 1831.8,
+      "mean_elapsed_ms": 17584.8
+    },
+    {
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 4,
+      "plans": 0,
+      "questions": 8,
+      "correct": 4,
+      "errors": 0,
+      "mean_input_tokens": 1011.2,
+      "mean_elapsed_ms": 16845.2
+    },
+    {
+      "point": "reply",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 4,
+      "questions": 35,
+      "correct": 30,
+      "errors": 0,
+      "mean_input_tokens": 2023.2,
+      "mean_elapsed_ms": 20957.6
+    },
+    {
+      "point": "reply",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 4,
+      "questions": 35,
+      "correct": 30,
+      "errors": 0,
+      "mean_input_tokens": 1948.5,
+      "mean_elapsed_ms": 20312.5
+    },
+    {
+      "point": "reply",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 5,
+      "questions": 35,
+      "correct": 32,
+      "errors": 0,
+      "mean_input_tokens": 1856.2,
+      "mean_elapsed_ms": 20187.5
+    },
+    {
+      "point": "resource",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 7,
+      "questions": 16,
+      "correct": 15,
+      "errors": 0,
+      "mean_input_tokens": 1350.0,
+      "mean_elapsed_ms": 17392.6
+    },
+    {
+      "point": "resource",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 6,
+      "questions": 16,
+      "correct": 14,
+      "errors": 0,
+      "mean_input_tokens": 923.9,
+      "mean_elapsed_ms": 17472.8
+    },
+    {
+      "point": "resource",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 7,
+      "questions": 16,
+      "correct": 15,
+      "errors": 0,
+      "mean_input_tokens": 822.5,
+      "mean_elapsed_ms": 17035.0
+    },
+    {
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 16,
+      "plans": 10,
+      "questions": 22,
+      "correct": 15,
+      "errors": 0,
+      "mean_input_tokens": 1160.9,
+      "mean_elapsed_ms": 11366.9
+    },
+    {
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 16,
+      "plans": 10,
+      "questions": 22,
+      "correct": 15,
+      "errors": 0,
+      "mean_input_tokens": 1013.5,
+      "mean_elapsed_ms": 11115.9
+    },
+    {
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 16,
+      "plans": 11,
+      "questions": 22,
+      "correct": 16,
+      "errors": 0,
+      "mean_input_tokens": 827.2,
+      "mean_elapsed_ms": 11459.6
+    },
+    {
+      "point": "thread",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 4,
+      "plans": 3,
+      "questions": 12,
+      "correct": 10,
+      "errors": 0,
+      "mean_input_tokens": 2293.8,
+      "mean_elapsed_ms": 15548.5
+    },
+    {
+      "point": "thread",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 4,
+      "plans": 3,
+      "questions": 12,
+      "correct": 10,
+      "errors": 0,
+      "mean_input_tokens": 2177.0,
+      "mean_elapsed_ms": 16302.2
+    },
+    {
+      "point": "thread",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 4,
+      "plans": 2,
+      "questions": 12,
+      "correct": 9,
+      "errors": 0,
+      "mean_input_tokens": 1116.8,
+      "mean_elapsed_ms": 15828.0
+    },
+    {
+      "point": "todo",
+      "split": "holdout",
+      "profile": "expanded",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 6,
+      "questions": 8,
+      "correct": 6,
+      "errors": 0,
+      "mean_input_tokens": 1441.5,
+      "mean_elapsed_ms": 12488.5
+    },
+    {
+      "point": "todo",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 6,
+      "questions": 8,
+      "correct": 6,
+      "errors": 0,
+      "mean_input_tokens": 1019.1,
+      "mean_elapsed_ms": 12443.2
+    },
+    {
+      "point": "todo",
+      "split": "holdout",
+      "profile": "minimal",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 6,
+      "questions": 8,
+      "correct": 6,
+      "errors": 0,
+      "mean_input_tokens": 923.6,
+      "mean_elapsed_ms": 12700.9
+    }
+  ],
+  "context_effects": [
+    {
+      "id": "continuation-hold-02",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "deliver:c1"
+      },
+      "focused": {
+        "plan": "deliver:c3"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "continuation-hold-03",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "fragment"
+      },
+      "focused": {
+        "plan": "deliver:c1"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "continuation-hold-04",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "fragment"
+      },
+      "focused": {
+        "plan": "clarify"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "ctx-note-compaction-binding",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "action": "context",
+        "context": "c-data"
+      },
+      "focused": {
+        "action": "arrival_only",
+        "context": "c-recalc"
+      },
+      "minimal_pass": false,
+      "focused_pass": false
+    },
+    {
+      "id": "ctx-stale-registry-lost",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "action": "arrival_only",
+        "context": "none"
+      },
+      "focused": {
+        "action": "context",
+        "context": "none"
+      },
+      "minimal_pass": false,
+      "focused_pass": false
+    },
+    {
+      "id": "inbound-hold-01-plan-mode-mention",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "action": "context",
+        "context": "none",
+        "clarify": false
+      },
+      "focused": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "minimal_pass": false,
+      "focused_pass": false
+    },
+    {
+      "id": "inbound-hold-05-injection-standing",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "action": "context",
+        "context": "c-1",
+        "clarify": false
+      },
+      "focused": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "inbound-hold-07-all-announcement-wake",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "focused": {
+        "action": "wake",
+        "context": "none",
+        "clarify": false
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "rec-queued-spawn",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "action": "wake",
+        "context": "none"
+      },
+      "focused": {
+        "action": "context",
+        "context": "none"
+      },
+      "minimal_pass": false,
+      "focused_pass": false
+    },
+    {
+      "id": "rec-stale-registry-redirect",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "action": "arrival_only",
+        "context": "none"
+      },
+      "focused": {
+        "action": "report",
+        "context": "none"
+      },
+      "minimal_pass": false,
+      "focused_pass": false
+    },
+    {
+      "id": "reply-17",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "relation": "reply",
+        "response": "none",
+        "target": "dpdp",
+        "thread": "research"
+      },
+      "focused": {
+        "relation": "followup",
+        "response": "none",
+        "target": "caerulea",
+        "thread": "research"
+      },
+      "minimal_pass": false,
+      "focused_pass": false
+    },
+    {
+      "id": "reply-19",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "relation": "reply",
+        "response": "await",
+        "target": "dpdp",
+        "thread": "research"
+      },
+      "focused": {
+        "relation": "reply",
+        "response": "none",
+        "target": "dpdp",
+        "thread": "research"
+      },
+      "minimal_pass": true,
+      "focused_pass": false
+    },
+    {
+      "id": "reply-23",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "relation": "followup",
+        "response": "none",
+        "target": "lazuli",
+        "thread": "research",
+        "view": "replay_full"
+      },
+      "focused": {
+        "relation": "reply",
+        "response": "none",
+        "target": "lazuli",
+        "thread": "research",
+        "view": "result_ref_is_full"
+      },
+      "minimal_pass": false,
+      "focused_pass": false
+    },
+    {
+      "id": "resource-h06",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "resource": "unresolved",
+        "operation": "describe"
+      },
+      "focused": {
+        "resource": "ops-room",
+        "operation": "describe"
+      },
+      "minimal_pass": false,
+      "focused_pass": false
+    },
+    {
+      "id": "resource-h08",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "resource": "sea-ice-chat",
+        "operation": "read"
+      },
+      "focused": {
+        "resource": "sea-ice-chat",
+        "operation": "handover"
+      },
+      "minimal_pass": true,
+      "focused_pass": false
+    },
+    {
+      "id": "send-hold-02",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "send_reviewer-local_direct_async_new"
+      },
+      "focused": {
+        "plan": "send_reviewer-local_review_async_new"
+      },
+      "minimal_pass": true,
+      "focused_pass": false
+    },
+    {
+      "id": "send-hold-05",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "target": "dpdp"
+      },
+      "focused": {
+        "target": "caerulea"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "send-hold-07",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "read_inbox_thread_review"
+      },
+      "focused": {
+        "plan": "read_messages_thread_review"
+      },
+      "minimal_pass": true,
+      "focused_pass": false
+    },
+    {
+      "id": "send-hold-08",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "target": "reviewer-a"
+      },
+      "focused": {
+        "target": "caerulea"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "sendx-h06",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "action": "local"
+      },
+      "focused": {
+        "action": "send"
+      },
+      "minimal_pass": true,
+      "focused_pass": false
+    },
+    {
+      "id": "structure-thread-create-handoff",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "op": "create",
+        "thread": "thr-handoff-1020",
+        "peer": "none"
+      },
+      "focused": {
+        "op": "create",
+        "thread": "none",
+        "peer": "none"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    },
+    {
+      "id": "todo-hold-06",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "info"
+      },
+      "focused": {
+        "plan": "complete:recheck-section3"
+      },
+      "minimal_pass": true,
+      "focused_pass": false
+    },
+    {
+      "id": "todo-hold-08",
+      "split": "holdout",
+      "revision": "tuned",
+      "minimal": {
+        "plan": "info"
+      },
+      "focused": {
+        "plan": "complete:publish"
+      },
+      "minimal_pass": false,
+      "focused_pass": true
+    }
+  ],
+  "failures": [
+    {
+      "id": "send-hold-02",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "plan": "send_reviewer-local_direct_async_new"
+      },
+      "actual": {
+        "plan": "send_reviewer-local_review_async_new"
+      },
+      "error": null
+    },
+    {
+      "id": "send-hold-02",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "plan": "send_reviewer-local_direct_async_new"
+      },
+      "actual": {
+        "plan": "send_reviewer-local_review_async_new"
+      },
+      "error": null
+    },
+    {
+      "id": "send-hold-05",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "target": "caerulea"
+      },
+      "actual": {
+        "target": "dpdp"
+      },
+      "error": null
+    },
+    {
+      "id": "send-hold-06",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "target": "clarify"
+      },
+      "actual": {
+        "target": "dpdp"
+      },
+      "error": null
+    },
+    {
+      "id": "send-hold-06",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "target": "clarify"
+      },
+      "actual": {
+        "target": "dpdp"
+      },
+      "error": null
+    },
+    {
+      "id": "send-hold-06",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "target": "clarify"
+      },
+      "actual": {
+        "target": "dpdp"
+      },
+      "error": null
+    },
+    {
+      "id": "send-hold-07",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "plan": "read_inbox_thread_review"
+      },
+      "actual": {
+        "plan": "read_messages_thread_review"
+      },
+      "error": null
+    },
+    {
+      "id": "send-hold-08",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "target": "caerulea"
+      },
+      "actual": {
+        "target": "reviewer-a"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-queued-spawn",
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "action": "new_context",
+        "context": "none"
+      },
+      "actual": {
+        "action": "wake",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-queued-spawn",
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "action": "new_context",
+        "context": "none"
+      },
+      "actual": {
+        "action": "context",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-queued-spawn",
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "action": "new_context",
+        "context": "none"
+      },
+      "actual": {
+        "action": "context",
+        "context": "c-data"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-wait-result-child-compacted",
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "action": "context",
+        "context": "c-recalc"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-recalc"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-wait-result-child-compacted",
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "action": "context",
+        "context": "c-recalc"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-recalc"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-wait-result-child-compacted",
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "action": "context",
+        "context": "c-recalc"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-recalc"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-stale-registry-redirect",
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "action": "queue",
+        "context": "none"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-stale-registry-redirect",
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "action": "queue",
+        "context": "none"
+      },
+      "actual": {
+        "action": "report",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-stale-registry-redirect",
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "action": "queue",
+        "context": "none"
+      },
+      "actual": {
+        "action": "context",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-open-wait-followup",
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "action": "fragment",
+        "context": "none"
+      },
+      "actual": {
+        "action": "await",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-open-wait-followup",
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "action": "fragment",
+        "context": "none"
+      },
+      "actual": {
+        "action": "await",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "rec-open-wait-followup",
+      "point": "recovery",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "action": "fragment",
+        "context": "none"
+      },
+      "actual": {
+        "action": "await",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-note-compaction-binding",
+      "point": "context",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "action": "context",
+        "context": "c-recalc"
+      },
+      "actual": {
+        "action": "context",
+        "context": "c-data"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-note-compaction-binding",
+      "point": "context",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "action": "context",
+        "context": "c-recalc"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-recalc"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-note-compaction-binding",
+      "point": "context",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "action": "context",
+        "context": "c-recalc"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "c-recalc"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-untrusted-peer-instruction",
+      "point": "context",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "action": "context",
+        "context": "c-review"
+      },
+      "actual": {
+        "action": "context",
+        "context": "c-ops"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-untrusted-peer-instruction",
+      "point": "context",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "action": "context",
+        "context": "c-review"
+      },
+      "actual": {
+        "action": "context",
+        "context": "c-ops"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-untrusted-peer-instruction",
+      "point": "context",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "action": "context",
+        "context": "c-review"
+      },
+      "actual": {
+        "action": "context",
+        "context": "c-ops"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-stale-registry-lost",
+      "point": "context",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "action": "clarify",
+        "context": "none"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-stale-registry-lost",
+      "point": "context",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "action": "clarify",
+        "context": "none"
+      },
+      "actual": {
+        "action": "context",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "ctx-stale-registry-lost",
+      "point": "context",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "action": "clarify",
+        "context": "none"
+      },
+      "actual": {
+        "action": "arrival_only",
+        "context": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-thread-create-handoff",
+      "point": "thread",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "op": "create",
+        "thread": "none",
+        "peer": "none"
+      },
+      "actual": {
+        "op": "create",
+        "thread": "thr-handoff-1020",
+        "peer": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-thread-clarify-two-review-threads",
+      "point": "thread",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "op": "clarify",
+        "thread": "none",
+        "peer": "none"
+      },
+      "actual": {
+        "op": "reuse",
+        "thread": "thr-sea-ice-review",
+        "peer": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-thread-clarify-two-review-threads",
+      "point": "thread",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "op": "clarify",
+        "thread": "none",
+        "peer": "none"
+      },
+      "actual": {
+        "op": "reuse",
+        "thread": "thr-sea-ice-review",
+        "peer": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-thread-clarify-two-review-threads",
+      "point": "thread",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "op": "clarify",
+        "thread": "none",
+        "peer": "none"
+      },
+      "actual": {
+        "op": "reuse",
+        "thread": "thr-sea-ice-review",
+        "peer": "none"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-domain-clarify-two-research-ids",
+      "point": "domain",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "op": "clarify",
+        "domain": "none"
+      },
+      "actual": {
+        "op": "join",
+        "domain": "urn:onlyne:domain:research"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-domain-clarify-two-research-ids",
+      "point": "domain",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "op": "clarify",
+        "domain": "none"
+      },
+      "actual": {
+        "op": "join",
+        "domain": "urn:onlyne:domain:research"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-domain-clarify-two-research-ids",
+      "point": "domain",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "op": "clarify",
+        "domain": "none"
+      },
+      "actual": {
+        "op": "join",
+        "domain": "urn:onlyne:domain:research"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-domain-none-proxy-membership",
+      "point": "domain",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "op": "none",
+        "domain": "none"
+      },
+      "actual": {
+        "op": "none",
+        "domain": "urn:onlyne:domain:packaging"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-domain-none-proxy-membership",
+      "point": "domain",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "op": "none",
+        "domain": "none"
+      },
+      "actual": {
+        "op": "none",
+        "domain": "urn:onlyne:domain:packaging"
+      },
+      "error": null
+    },
+    {
+      "id": "structure-domain-none-proxy-membership",
+      "point": "domain",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "op": "none",
+        "domain": "none"
+      },
+      "actual": {
+        "op": "none",
+        "domain": "urn:onlyne:domain:packaging"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-14",
+      "point": "reply",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "relation": "followup",
+        "target": "dpdp",
+        "thread": "research",
+        "response": "none"
+      },
+      "actual": {
+        "relation": "reply",
+        "response": "none",
+        "target": "dpdp",
+        "thread": "research"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-17",
+      "point": "reply",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "relation": "reply",
+        "target": "caerulea",
+        "thread": "research",
+        "response": "none"
+      },
+      "actual": {
+        "relation": "reply",
+        "response": "none",
+        "target": "dpdp",
+        "thread": "research"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-17",
+      "point": "reply",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "relation": "reply",
+        "target": "caerulea",
+        "thread": "research",
+        "response": "none"
+      },
+      "actual": {
+        "relation": "followup",
+        "response": "none",
+        "target": "caerulea",
+        "thread": "research"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-17",
+      "point": "reply",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "relation": "reply",
+        "target": "caerulea",
+        "thread": "research",
+        "response": "none"
+      },
+      "actual": {
+        "relation": "followup",
+        "response": "none",
+        "target": "caerulea",
+        "thread": "research"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-19",
+      "point": "reply",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "relation": "reply",
+        "target": "dpdp",
+        "thread": "research",
+        "response": "await"
+      },
+      "actual": {
+        "relation": "reply",
+        "response": "none",
+        "target": "dpdp",
+        "thread": "research"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-20",
+      "point": "reply",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "relation": "reply",
+        "target": "reviewer",
+        "thread": "review",
+        "response": "await"
+      },
+      "actual": {
+        "relation": "reply",
+        "response": "none",
+        "target": "reviewer",
+        "thread": "review"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-20",
+      "point": "reply",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "relation": "reply",
+        "target": "reviewer",
+        "thread": "review",
+        "response": "await"
+      },
+      "actual": {
+        "relation": "reply",
+        "response": "none",
+        "target": "reviewer",
+        "thread": "review"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-20",
+      "point": "reply",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "relation": "reply",
+        "target": "reviewer",
+        "thread": "review",
+        "response": "await"
+      },
+      "actual": {
+        "relation": "reply",
+        "response": "none",
+        "target": "reviewer",
+        "thread": "review"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-23",
+      "point": "reply",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "relation": "followup",
+        "target": "lazuli",
+        "thread": "research",
+        "response": "none",
+        "view": "result_ref_only"
+      },
+      "actual": {
+        "relation": "followup",
+        "response": "none",
+        "target": "lazuli",
+        "thread": "research",
+        "view": "replay_full"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-23",
+      "point": "reply",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "relation": "followup",
+        "target": "lazuli",
+        "thread": "research",
+        "response": "none",
+        "view": "result_ref_only"
+      },
+      "actual": {
+        "relation": "reply",
+        "response": "none",
+        "target": "lazuli",
+        "thread": "research",
+        "view": "result_ref_is_full"
+      },
+      "error": null
+    },
+    {
+      "id": "reply-23",
+      "point": "reply",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "relation": "followup",
+        "target": "lazuli",
+        "thread": "research",
+        "response": "none",
+        "view": "result_ref_only"
+      },
+      "actual": {
+        "relation": "reply",
+        "response": "none",
+        "target": "lazuli",
+        "thread": "research",
+        "view": "result_ref_is_full"
+      },
+      "error": null
+    },
+    {
+      "id": "resource-h06",
+      "point": "resource",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "resource": "sea-ice-chat",
+        "operation": "describe"
+      },
+      "actual": {
+        "resource": "unresolved",
+        "operation": "describe"
+      },
+      "error": null
+    },
+    {
+      "id": "resource-h06",
+      "point": "resource",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "resource": "sea-ice-chat",
+        "operation": "describe"
+      },
+      "actual": {
+        "resource": "ops-room",
+        "operation": "describe"
+      },
+      "error": null
+    },
+    {
+      "id": "resource-h06",
+      "point": "resource",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "resource": "sea-ice-chat",
+        "operation": "describe"
+      },
+      "actual": {
+        "resource": "ops-room",
+        "operation": "describe"
+      },
+      "error": null
+    },
+    {
+      "id": "resource-h08",
+      "point": "resource",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "resource": "sea-ice-chat",
+        "operation": "read"
+      },
+      "actual": {
+        "resource": "sea-ice-chat",
+        "operation": "handover"
+      },
+      "error": null
+    },
+    {
+      "id": "todo-hold-03",
+      "point": "todo",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "plan": "clarify"
+      },
+      "actual": {
+        "plan": "supp:rerun-bench"
+      },
+      "error": null
+    },
+    {
+      "id": "todo-hold-03",
+      "point": "todo",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "plan": "clarify"
+      },
+      "actual": {
+        "plan": "supp:rerun-bench"
+      },
+      "error": null
+    },
+    {
+      "id": "todo-hold-03",
+      "point": "todo",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "plan": "clarify"
+      },
+      "actual": {
+        "plan": "supp:rerun-bench"
+      },
+      "error": null
+    },
+    {
+      "id": "todo-hold-06",
+      "point": "todo",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "plan": "info"
+      },
+      "actual": {
+        "plan": "complete:recheck-section3"
+      },
+      "error": null
+    },
+    {
+      "id": "todo-hold-06",
+      "point": "todo",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "plan": "info"
+      },
+      "actual": {
+        "plan": "complete:recheck-section3"
+      },
+      "error": null
+    },
+    {
+      "id": "todo-hold-08",
+      "point": "todo",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "plan": "complete:publish"
+      },
+      "actual": {
+        "plan": "info"
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-hold-01-plan-mode-mention",
+      "point": "inbound",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "action": "fragment",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "context",
+        "context": "none",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-hold-01-plan-mode-mention",
+      "point": "inbound",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "action": "fragment",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-hold-01-plan-mode-mention",
+      "point": "inbound",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "action": "fragment",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-hold-05-injection-standing",
+      "point": "inbound",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "context",
+        "context": "c-1",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "inbound-hold-07-all-announcement-wake",
+      "point": "inbound",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "action": "wake",
+        "context": "none",
+        "clarify": false
+      },
+      "actual": {
+        "action": "queue",
+        "context": "none",
+        "clarify": false
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-hold-01",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "plan": "deliver:c2"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-hold-01",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "plan": "deliver:c2"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-hold-02",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "plan": "deliver:c3"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-hold-03",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "plan": "deliver:c1"
+      },
+      "actual": {
+        "plan": "fragment"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-hold-04",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "plan": "clarify"
+      },
+      "actual": {
+        "plan": "fragment"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-hold-06",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "plan": "wake"
+      },
+      "actual": {
+        "plan": "fragment"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-hold-06",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "plan": "wake"
+      },
+      "actual": {
+        "plan": "fragment"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-hold-07",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "plan": "queue:c1"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-hold-07",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "plan": "queue:c1"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "error": null
+    },
+    {
+      "id": "continuation-hold-07",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "plan": "queue:c1"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-h02",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "action": "send",
+        "target": "auditor"
+      },
+      "actual": {
+        "action": "send",
+        "target": "reviewer"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-h06",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "action": "local"
+      },
+      "actual": {
+        "action": "send"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-h06",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "action": "local"
+      },
+      "actual": {
+        "action": "send"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-h07",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "action": "read"
+      },
+      "actual": {
+        "action": "send"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-h07",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "action": "read"
+      },
+      "actual": {
+        "action": "send"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-h07",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "action": "read"
+      },
+      "actual": {
+        "action": "send"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-h08",
+      "point": "send",
+      "split": "holdout",
+      "profile": "minimal",
+      "expected": {
+        "execution": "new",
+        "response": "none"
+      },
+      "actual": {
+        "response": "async",
+        "execution": "existing"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-h08",
+      "point": "send",
+      "split": "holdout",
+      "profile": "focused",
+      "expected": {
+        "execution": "new",
+        "response": "none"
+      },
+      "actual": {
+        "response": "async",
+        "execution": "existing"
+      },
+      "error": null
+    },
+    {
+      "id": "sendx-h08",
+      "point": "send",
+      "split": "holdout",
+      "profile": "expanded",
+      "expected": {
+        "execution": "new",
+        "response": "none"
+      },
+      "actual": {
+        "response": "async",
+        "execution": "existing"
+      },
+      "error": null
+    }
+  ]
+}

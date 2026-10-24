@@ -31,6 +31,7 @@ A2A 和 ANP 是外部绑定的规范来源，不是 Onlyne 内部语义的模板
 | [0013](0013-compute-job-resource.md) | 计算作业资源节点：三项授权分离、产物与恢复 |
 | [0014](0014-data-source-resource.md) | 数据源资源节点：分级授权、订阅与恢复 |
 | [0015](0015-mcp-resource-node.md) | MCP server 作为无状态资源节点接入 |
+| [0016](0016-systemone-context.md) | SystemOne 各判定点的上下文结构与模拟调优 |
 
 RFC 2119 的 MUST、MUST NOT、SHOULD、MAY 分别表示必须、禁止、建议、可选。Draft 中的这些词约束拟议实现，不表示已有实现通过验收。
 

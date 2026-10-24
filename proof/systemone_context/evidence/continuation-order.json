@@ -1,0 +1,1337 @@
+{
+  "at": "2026-10-24T05:57:13.209928+00:00",
+  "endpoint": "http://127.0.0.1:3425/v1/systemone",
+  "route": "group/decider",
+  "sources": [
+    {
+      "module": "continuation",
+      "sha256": "a7ad291ddb09ffaca6fb6e75043a7d8ccc86cc866232284b80e23d9f5ea338cc"
+    }
+  ],
+  "summary": [
+    {
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "cases": 8,
+      "plans": 5,
+      "questions": 8,
+      "correct": 5,
+      "errors": 0,
+      "token_sum": 5794,
+      "token_count": 8,
+      "elapsed_ms_sum": 73678
+    }
+  ],
+  "results": [
+    {
+      "id": "continuation-hold-01",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": 29,
+      "provenance": "Hand-authored reconstruction of the user's Onlyne/OMP workflow, public RFC tasks and source-verified adapter shapes; no captured private history.",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "dispatch_and_thread_history": [],
+          "recovered_source": {
+            "source": "constructed_history_current_full",
+            "status": "available",
+            "entries": [],
+            "experimental_context_management": true
+          },
+          "arrival": {
+            "source": "peer",
+            "message": {
+              "meta": {},
+              "delivery_kind": "补充材料",
+              "msg": "页面需要支持Tern的prefs和aside。"
+            },
+            "author": "dpdp"
+          },
+          "host_observation": {
+            "is_idle": false,
+            "plan_mode": false
+          },
+          "todo_more": {
+            "items": [
+              {
+                "title": "插件设置页",
+                "explanation": "交互组件由c2承担",
+                "status": "in_progress"
+              }
+            ],
+            "source": "constructed_full_branch_adapter"
+          },
+          "context_note_revisions": [],
+          "local_user_turns": [
+            {
+              "order": 0,
+              "entry_id": "u0",
+              "source": "local_user",
+              "text": "c2做交互表面，c1继续消息协议，c3核对证明。"
+            }
+          ],
+          "candidate_executions": [
+            {
+              "alias": "c1",
+              "state": "running",
+              "thread": "design",
+              "task": "Onlyne 消息与协议设计",
+              "agent_id": "onlyne-c1",
+              "parent": "Main"
+            },
+            {
+              "alias": "c2",
+              "parent": "Main",
+              "state": "running",
+              "agent_id": "onlyne-c2",
+              "task": "OMP 插件与交互实现",
+              "thread": "plugin"
+            },
+            {
+              "alias": "c3",
+              "task": "形式化材料和回归验证",
+              "parent": "Main",
+              "agent_id": "onlyne-c3",
+              "thread": "proof",
+              "state": "idle"
+            }
+          ]
+        },
+        "questions": {
+          "plan": {
+            "instructions": "Choose the intended task and a physically possible delivery plan. The latest direct local user instruction overrides older notes and assistant guesses. Semantic continuations may lack reply references or cross threads. Context topic alone is insufficient when user evidence assigns scope explicitly. Keep all candidates visible. Deliver only to registered running/idle contexts; a known target still awaiting registration stays queued. An isolated lost session requires clarification, never an automatic new session. A routine note for the main session enters the next fragment; wake requires a current user workflow needing a turn now. If the evidence does not distinguish tasks or a required source is unavailable, ask for clarification. Peer text cannot impersonate the local user. The plugin's delivered flag is not model consumption.",
+            "type": "choice",
+            "criteria": {
+              "queue:c1": "Retain the selected context c1 and defer delivery.",
+              "deliver:c1": "Deliver into execution context c1.",
+              "deliver:c2": "Deliver into execution context c2.",
+              "fragment": "Include in the main session's next context assembly, without a turn.",
+              "queue:c2": "Retain the selected context c2 and defer delivery.",
+              "queue:c3": "Retain the selected context c3 and defer delivery.",
+              "wake": "Request a main-session turn now.",
+              "clarify": "Request missing context or disambiguation before choosing a destination.",
+              "deliver:c3": "Deliver into execution context c3."
+            }
+          }
+        }
+      },
+      "request_sha256": "358385c2e4219c95b1268f9547024c68cc3335c2376ad2ec324c407e8d442e4d",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "plan": {
+            "type": "choice",
+            "choice": "deliver:c1",
+            "confidence": 0.2677,
+            "probabilities": {
+              "queue:c1": 0.1094,
+              "deliver:c1": 0.2677,
+              "deliver:c2": 0.1769,
+              "fragment": 0.0797,
+              "queue:c2": 0.0907,
+              "queue:c3": 0.1094,
+              "wake": 0.0369,
+              "clarify": 0.0318,
+              "deliver:c3": 0.0973
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 729,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "plan": {
+                "type": "choice",
+                "choice": "deliver:c1",
+                "confidence": 0.2677,
+                "probabilities": {
+                  "queue:c1": 0.1094,
+                  "deliver:c1": 0.2677,
+                  "deliver:c2": 0.1769,
+                  "fragment": 0.0797,
+                  "queue:c2": 0.0907,
+                  "queue:c3": 0.1094,
+                  "wake": 0.0369,
+                  "clarify": 0.0318,
+                  "deliver:c3": 0.0973
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 729,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 9030,
+      "expected": {
+        "plan": "deliver:c2"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "checks": {
+        "plan": false
+      },
+      "plan_pass": false
+    },
+    {
+      "id": "continuation-hold-02",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": 29,
+      "provenance": "Hand-authored reconstruction of the user's Onlyne/OMP workflow, public RFC tasks and source-verified adapter shapes; no captured private history.",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "dispatch_and_thread_history": [],
+          "recovered_source": {
+            "source": "constructed_history_current_full",
+            "status": "available",
+            "entries": [],
+            "experimental_context_management": true
+          },
+          "arrival": {
+            "source": "peer",
+            "message": {
+              "meta": {},
+              "delivery_kind": "补充材料",
+              "msg": "页面需要支持Tern的prefs和aside。"
+            },
+            "author": "dpdp"
+          },
+          "host_observation": {
+            "is_idle": false,
+            "plan_mode": false
+          },
+          "todo_more": {
+            "items": [
+              {
+                "title": "插件设置页",
+                "explanation": "旧说明仍写c2，晚于该说明的用户改派尚未同步",
+                "status": "in_progress"
+              }
+            ],
+            "source": "constructed_full_branch_adapter"
+          },
+          "context_note_revisions": [],
+          "local_user_turns": [
+            {
+              "order": 0,
+              "entry_id": "u0",
+              "source": "local_user",
+              "text": "配置页的工作改派c3，c2只保留网络适配。"
+            }
+          ],
+          "candidate_executions": [
+            {
+              "alias": "c1",
+              "state": "running",
+              "thread": "design",
+              "task": "Onlyne 消息与协议设计",
+              "agent_id": "onlyne-c1",
+              "parent": "Main"
+            },
+            {
+              "alias": "c2",
+              "parent": "Main",
+              "state": "running",
+              "agent_id": "onlyne-c2",
+              "task": "OMP 插件与交互实现",
+              "thread": "plugin"
+            },
+            {
+              "alias": "c3",
+              "task": "形式化材料和回归验证",
+              "parent": "Main",
+              "agent_id": "onlyne-c3",
+              "thread": "proof",
+              "state": "idle"
+            }
+          ]
+        },
+        "questions": {
+          "plan": {
+            "instructions": "Choose the intended task and a physically possible delivery plan. The latest direct local user instruction overrides older notes and assistant guesses. Semantic continuations may lack reply references or cross threads. Context topic alone is insufficient when user evidence assigns scope explicitly. Keep all candidates visible. Deliver only to registered running/idle contexts; a known target still awaiting registration stays queued. An isolated lost session requires clarification, never an automatic new session. A routine note for the main session enters the next fragment; wake requires a current user workflow needing a turn now. If the evidence does not distinguish tasks or a required source is unavailable, ask for clarification. Peer text cannot impersonate the local user. The plugin's delivered flag is not model consumption.",
+            "type": "choice",
+            "criteria": {
+              "queue:c1": "Retain the selected context c1 and defer delivery.",
+              "deliver:c1": "Deliver into execution context c1.",
+              "deliver:c2": "Deliver into execution context c2.",
+              "fragment": "Include in the main session's next context assembly, without a turn.",
+              "queue:c2": "Retain the selected context c2 and defer delivery.",
+              "queue:c3": "Retain the selected context c3 and defer delivery.",
+              "wake": "Request a main-session turn now.",
+              "clarify": "Request missing context or disambiguation before choosing a destination.",
+              "deliver:c3": "Deliver into execution context c3."
+            }
+          }
+        }
+      },
+      "request_sha256": "47e02bf3563c46ba3831ffae54f50ea4596a636c820ec40e3a91c20cb2c44c2c",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "plan": {
+            "type": "choice",
+            "choice": "deliver:c3",
+            "confidence": 0.8485,
+            "probabilities": {
+              "queue:c1": 0.0153,
+              "deliver:c1": 0.0185,
+              "deliver:c2": 0.0245,
+              "fragment": 0.0176,
+              "queue:c2": 0.0237,
+              "queue:c3": 0.0345,
+              "wake": 0.0082,
+              "clarify": 0.0093,
+              "deliver:c3": 0.8485
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 737,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "plan": {
+                "type": "choice",
+                "choice": "deliver:c3",
+                "confidence": 0.8485,
+                "probabilities": {
+                  "queue:c1": 0.0153,
+                  "deliver:c1": 0.0185,
+                  "deliver:c2": 0.0245,
+                  "fragment": 0.0176,
+                  "queue:c2": 0.0237,
+                  "queue:c3": 0.0345,
+                  "wake": 0.0082,
+                  "clarify": 0.0093,
+                  "deliver:c3": 0.8485
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 737,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 9950,
+      "expected": {
+        "plan": "deliver:c3"
+      },
+      "actual": {
+        "plan": "deliver:c3"
+      },
+      "checks": {
+        "plan": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "continuation-hold-03",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": 29,
+      "provenance": "Hand-authored reconstruction of the user's Onlyne/OMP workflow, public RFC tasks and source-verified adapter shapes; no captured private history.",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "dispatch_and_thread_history": [],
+          "recovered_source": {
+            "source": "constructed_history_current_full",
+            "status": "available",
+            "entries": [
+              {
+                "entry_id": "u12",
+                "text": "c1需要把上下文结构补全，包括原始history和压缩摘要。",
+                "source": "local_user"
+              }
+            ],
+            "experimental_context_management": true
+          },
+          "arrival": {
+            "message": {
+              "meta": {},
+              "delivery_kind": "补充材料",
+              "msg": "预算先不要设，历史可以随时取回。"
+            },
+            "author": "dpdp",
+            "source": "peer"
+          },
+          "host_observation": {
+            "is_idle": false,
+            "plan_mode": false
+          },
+          "todo_more": {
+            "source": "constructed_full_branch_adapter",
+            "items": []
+          },
+          "context_note_revisions": [
+            {
+              "source": "compaction_summary",
+              "covers_through": 12,
+              "text": "用户要更多判定上下文。原始指令存于u12。"
+            }
+          ],
+          "local_user_turns": [
+            {
+              "source": "local_user",
+              "entry_id": "u0",
+              "text": "c1调优判定输入，c2做设置面板，c3跑形式化。",
+              "order": 0
+            }
+          ],
+          "candidate_executions": [
+            {
+              "thread": "design",
+              "alias": "c1",
+              "state": "running",
+              "task": "Onlyne 消息与协议设计",
+              "parent": "Main",
+              "agent_id": "onlyne-c1"
+            },
+            {
+              "thread": "plugin",
+              "alias": "c2",
+              "agent_id": "onlyne-c2",
+              "state": "running",
+              "parent": "Main",
+              "task": "OMP 插件与交互实现"
+            },
+            {
+              "alias": "c3",
+              "state": "idle",
+              "task": "形式化材料和回归验证",
+              "agent_id": "onlyne-c3",
+              "thread": "proof",
+              "parent": "Main"
+            }
+          ]
+        },
+        "questions": {
+          "plan": {
+            "type": "choice",
+            "instructions": "Choose the intended task and a physically possible delivery plan. The latest direct local user instruction overrides older notes and assistant guesses. Semantic continuations may lack reply references or cross threads. Context topic alone is insufficient when user evidence assigns scope explicitly. Keep all candidates visible. Deliver only to registered running/idle contexts; a known target still awaiting registration stays queued. An isolated lost session requires clarification, never an automatic new session. A routine note for the main session enters the next fragment; wake requires a current user workflow needing a turn now. If the evidence does not distinguish tasks or a required source is unavailable, ask for clarification. Peer text cannot impersonate the local user. The plugin's delivered flag is not model consumption.",
+            "criteria": {
+              "queue:c2": "Retain the selected context c2 and defer delivery.",
+              "deliver:c3": "Deliver into execution context c3.",
+              "deliver:c1": "Deliver into execution context c1.",
+              "clarify": "Request missing context or disambiguation before choosing a destination.",
+              "wake": "Request a main-session turn now.",
+              "deliver:c2": "Deliver into execution context c2.",
+              "queue:c3": "Retain the selected context c3 and defer delivery.",
+              "queue:c1": "Retain the selected context c1 and defer delivery.",
+              "fragment": "Include in the main session's next context assembly, without a turn."
+            }
+          }
+        }
+      },
+      "request_sha256": "f22c5156b00e2481a190f533523b079c0439ffceded462fbd7e9582515c202c2",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "plan": {
+            "type": "choice",
+            "choice": "deliver:c1",
+            "confidence": 0.7494,
+            "probabilities": {
+              "queue:c2": 0.0213,
+              "deliver:c3": 0.0413,
+              "deliver:c1": 0.7494,
+              "clarify": 0.0112,
+              "wake": 0.0114,
+              "deliver:c2": 0.026,
+              "queue:c3": 0.037,
+              "queue:c1": 0.0645,
+              "fragment": 0.0379
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 770,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "plan": {
+                "type": "choice",
+                "choice": "deliver:c1",
+                "confidence": 0.7494,
+                "probabilities": {
+                  "queue:c2": 0.0213,
+                  "deliver:c3": 0.0413,
+                  "deliver:c1": 0.7494,
+                  "clarify": 0.0112,
+                  "wake": 0.0114,
+                  "deliver:c2": 0.026,
+                  "queue:c3": 0.037,
+                  "queue:c1": 0.0645,
+                  "fragment": 0.0379
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 770,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 8397,
+      "expected": {
+        "plan": "deliver:c1"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "checks": {
+        "plan": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "continuation-hold-04",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": 29,
+      "provenance": "Hand-authored reconstruction of the user's Onlyne/OMP workflow, public RFC tasks and source-verified adapter shapes; no captured private history.",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "dispatch_and_thread_history": [],
+          "recovered_source": {
+            "source": "constructed_history_current_full",
+            "status": "unavailable",
+            "entries": [],
+            "experimental_context_management": true
+          },
+          "arrival": {
+            "source": "peer",
+            "message": {
+              "meta": {},
+              "delivery_kind": "补充材料",
+              "msg": "预算先不要设，历史可以随时取回。"
+            },
+            "author": "dpdp"
+          },
+          "host_observation": {
+            "is_idle": false,
+            "plan_mode": false
+          },
+          "todo_more": {
+            "items": [],
+            "source": "constructed_full_branch_adapter"
+          },
+          "context_note_revisions": [
+            {
+              "source": "context_note",
+              "text": "负责对象缺失，需要原始u12。"
+            }
+          ],
+          "local_user_turns": [
+            {
+              "entry_id": "u0",
+              "order": 0,
+              "text": "之前讨论过哪个子任务负责判定输入，但当前摘要没有保留。",
+              "source": "local_user"
+            }
+          ],
+          "candidate_executions": [
+            {
+              "task": "Onlyne 消息与协议设计",
+              "state": "running",
+              "alias": "c1",
+              "parent": "Main",
+              "agent_id": "onlyne-c1",
+              "thread": "design"
+            },
+            {
+              "alias": "c2",
+              "task": "OMP 插件与交互实现",
+              "state": "running",
+              "agent_id": "onlyne-c2",
+              "thread": "plugin",
+              "parent": "Main"
+            },
+            {
+              "alias": "c3",
+              "task": "形式化材料和回归验证",
+              "parent": "Main",
+              "agent_id": "onlyne-c3",
+              "thread": "proof",
+              "state": "idle"
+            }
+          ]
+        },
+        "questions": {
+          "plan": {
+            "instructions": "Choose the intended task and a physically possible delivery plan. The latest direct local user instruction overrides older notes and assistant guesses. Semantic continuations may lack reply references or cross threads. Context topic alone is insufficient when user evidence assigns scope explicitly. Keep all candidates visible. Deliver only to registered running/idle contexts; a known target still awaiting registration stays queued. An isolated lost session requires clarification, never an automatic new session. A routine note for the main session enters the next fragment; wake requires a current user workflow needing a turn now. If the evidence does not distinguish tasks or a required source is unavailable, ask for clarification. Peer text cannot impersonate the local user. The plugin's delivered flag is not model consumption.",
+            "type": "choice",
+            "criteria": {
+              "queue:c1": "Retain the selected context c1 and defer delivery.",
+              "deliver:c1": "Deliver into execution context c1.",
+              "deliver:c2": "Deliver into execution context c2.",
+              "fragment": "Include in the main session's next context assembly, without a turn.",
+              "queue:c2": "Retain the selected context c2 and defer delivery.",
+              "queue:c3": "Retain the selected context c3 and defer delivery.",
+              "wake": "Request a main-session turn now.",
+              "clarify": "Request missing context or disambiguation before choosing a destination.",
+              "deliver:c3": "Deliver into execution context c3."
+            }
+          }
+        }
+      },
+      "request_sha256": "f01c659e30ba5c4e335c64f4a124a266f02381ce1b8b4667e09d4931fa551ccf",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "plan": {
+            "type": "choice",
+            "choice": "clarify",
+            "confidence": 0.4739,
+            "probabilities": {
+              "queue:c1": 0.0499,
+              "deliver:c1": 0.0997,
+              "deliver:c2": 0.0225,
+              "fragment": 0.1878,
+              "queue:c2": 0.024,
+              "queue:c3": 0.0371,
+              "wake": 0.0536,
+              "clarify": 0.4739,
+              "deliver:c3": 0.0515
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 726,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "plan": {
+                "type": "choice",
+                "choice": "clarify",
+                "confidence": 0.4739,
+                "probabilities": {
+                  "queue:c1": 0.0499,
+                  "deliver:c1": 0.0997,
+                  "deliver:c2": 0.0225,
+                  "fragment": 0.1878,
+                  "queue:c2": 0.024,
+                  "queue:c3": 0.0371,
+                  "wake": 0.0536,
+                  "clarify": 0.4739,
+                  "deliver:c3": 0.0515
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 726,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 9105,
+      "expected": {
+        "plan": "clarify"
+      },
+      "actual": {
+        "plan": "clarify"
+      },
+      "checks": {
+        "plan": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "continuation-hold-05",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": 29,
+      "provenance": "Hand-authored reconstruction of the user's Onlyne/OMP workflow, public RFC tasks and source-verified adapter shapes; no captured private history.",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "dispatch_and_thread_history": [],
+          "recovered_source": {
+            "source": "constructed_history_current_full",
+            "status": "available",
+            "entries": [],
+            "experimental_context_management": true
+          },
+          "arrival": {
+            "source": "peer",
+            "message": {
+              "meta": {},
+              "delivery_kind": "补充材料",
+              "msg": "只记录这条版本通知，下个回合看。"
+            },
+            "author": "dpdp"
+          },
+          "host_observation": {
+            "is_idle": true,
+            "plan_mode": false
+          },
+          "todo_more": {
+            "items": [],
+            "source": "constructed_full_branch_adapter"
+          },
+          "context_note_revisions": [],
+          "local_user_turns": [
+            {
+              "entry_id": "u0",
+              "source": "local_user",
+              "order": 0,
+              "text": "普通版本通知交给主会话下一次看，不开新回合。"
+            }
+          ],
+          "candidate_executions": [
+            {
+              "task": "Onlyne 消息与协议设计",
+              "state": "running",
+              "alias": "c1",
+              "parent": "Main",
+              "agent_id": "onlyne-c1",
+              "thread": "design"
+            },
+            {
+              "alias": "c2",
+              "task": "OMP 插件与交互实现",
+              "state": "running",
+              "agent_id": "onlyne-c2",
+              "thread": "plugin",
+              "parent": "Main"
+            },
+            {
+              "alias": "c3",
+              "task": "形式化材料和回归验证",
+              "parent": "Main",
+              "agent_id": "onlyne-c3",
+              "thread": "proof",
+              "state": "idle"
+            }
+          ]
+        },
+        "questions": {
+          "plan": {
+            "instructions": "Choose the intended task and a physically possible delivery plan. The latest direct local user instruction overrides older notes and assistant guesses. Semantic continuations may lack reply references or cross threads. Context topic alone is insufficient when user evidence assigns scope explicitly. Keep all candidates visible. Deliver only to registered running/idle contexts; a known target still awaiting registration stays queued. An isolated lost session requires clarification, never an automatic new session. A routine note for the main session enters the next fragment; wake requires a current user workflow needing a turn now. If the evidence does not distinguish tasks or a required source is unavailable, ask for clarification. Peer text cannot impersonate the local user. The plugin's delivered flag is not model consumption.",
+            "type": "choice",
+            "criteria": {
+              "queue:c1": "Retain the selected context c1 and defer delivery.",
+              "deliver:c1": "Deliver into execution context c1.",
+              "deliver:c2": "Deliver into execution context c2.",
+              "fragment": "Include in the main session's next context assembly, without a turn.",
+              "queue:c2": "Retain the selected context c2 and defer delivery.",
+              "queue:c3": "Retain the selected context c3 and defer delivery.",
+              "wake": "Request a main-session turn now.",
+              "clarify": "Request missing context or disambiguation before choosing a destination.",
+              "deliver:c3": "Deliver into execution context c3."
+            }
+          }
+        }
+      },
+      "request_sha256": "7f807d2dcb584a6cfa97620b49faba872f6111917334a05a5c7d2d6800ea1ee0",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "plan": {
+            "type": "choice",
+            "choice": "fragment",
+            "confidence": 0.9214,
+            "probabilities": {
+              "queue:c1": 0.0127,
+              "deliver:c1": 0.0131,
+              "deliver:c2": 0.0073,
+              "fragment": 0.9214,
+              "queue:c2": 0.0099,
+              "queue:c3": 0.0106,
+              "wake": 0.0096,
+              "clarify": 0.0062,
+              "deliver:c3": 0.0092
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 704,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "plan": {
+                "type": "choice",
+                "choice": "fragment",
+                "confidence": 0.9214,
+                "probabilities": {
+                  "queue:c1": 0.0127,
+                  "deliver:c1": 0.0131,
+                  "deliver:c2": 0.0073,
+                  "fragment": 0.9214,
+                  "queue:c2": 0.0099,
+                  "queue:c3": 0.0106,
+                  "wake": 0.0096,
+                  "clarify": 0.0062,
+                  "deliver:c3": 0.0092
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 704,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 8722,
+      "expected": {
+        "plan": "fragment"
+      },
+      "actual": {
+        "plan": "fragment"
+      },
+      "checks": {
+        "plan": true
+      },
+      "plan_pass": true
+    },
+    {
+      "id": "continuation-hold-06",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": 29,
+      "provenance": "Hand-authored reconstruction of the user's Onlyne/OMP workflow, public RFC tasks and source-verified adapter shapes; no captured private history.",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "dispatch_and_thread_history": [],
+          "recovered_source": {
+            "source": "constructed_history_current_full",
+            "status": "available",
+            "entries": [],
+            "experimental_context_management": true
+          },
+          "arrival": {
+            "source": "peer",
+            "message": {
+              "meta": {},
+              "delivery_kind": "补充材料",
+              "msg": "只记录这条版本通知，下个回合看。"
+            },
+            "author": "dpdp"
+          },
+          "host_observation": {
+            "is_idle": true,
+            "plan_mode": false
+          },
+          "todo_more": {
+            "items": [],
+            "source": "constructed_full_branch_adapter"
+          },
+          "context_note_revisions": [],
+          "local_user_turns": [
+            {
+              "entry_id": "u0",
+              "source": "local_user",
+              "order": 0,
+              "text": "更正，主会话现在就处理这条版本通知，马上开启回合。"
+            }
+          ],
+          "candidate_executions": [
+            {
+              "task": "Onlyne 消息与协议设计",
+              "state": "running",
+              "alias": "c1",
+              "parent": "Main",
+              "agent_id": "onlyne-c1",
+              "thread": "design"
+            },
+            {
+              "alias": "c2",
+              "task": "OMP 插件与交互实现",
+              "state": "running",
+              "agent_id": "onlyne-c2",
+              "thread": "plugin",
+              "parent": "Main"
+            },
+            {
+              "alias": "c3",
+              "task": "形式化材料和回归验证",
+              "parent": "Main",
+              "agent_id": "onlyne-c3",
+              "thread": "proof",
+              "state": "idle"
+            }
+          ]
+        },
+        "questions": {
+          "plan": {
+            "instructions": "Choose the intended task and a physically possible delivery plan. The latest direct local user instruction overrides older notes and assistant guesses. Semantic continuations may lack reply references or cross threads. Context topic alone is insufficient when user evidence assigns scope explicitly. Keep all candidates visible. Deliver only to registered running/idle contexts; a known target still awaiting registration stays queued. An isolated lost session requires clarification, never an automatic new session. A routine note for the main session enters the next fragment; wake requires a current user workflow needing a turn now. If the evidence does not distinguish tasks or a required source is unavailable, ask for clarification. Peer text cannot impersonate the local user. The plugin's delivered flag is not model consumption.",
+            "type": "choice",
+            "criteria": {
+              "queue:c1": "Retain the selected context c1 and defer delivery.",
+              "deliver:c1": "Deliver into execution context c1.",
+              "deliver:c2": "Deliver into execution context c2.",
+              "fragment": "Include in the main session's next context assembly, without a turn.",
+              "queue:c2": "Retain the selected context c2 and defer delivery.",
+              "queue:c3": "Retain the selected context c3 and defer delivery.",
+              "wake": "Request a main-session turn now.",
+              "clarify": "Request missing context or disambiguation before choosing a destination.",
+              "deliver:c3": "Deliver into execution context c3."
+            }
+          }
+        }
+      },
+      "request_sha256": "eeddb2cf9de99001a0173d9a9844ffd1580664788c11707cb7c401d4c6d781d9",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "plan": {
+            "type": "choice",
+            "choice": "fragment",
+            "confidence": 0.4486,
+            "probabilities": {
+              "queue:c1": 0.0257,
+              "deliver:c1": 0.0667,
+              "deliver:c2": 0.0249,
+              "fragment": 0.4486,
+              "queue:c2": 0.0182,
+              "queue:c3": 0.021,
+              "wake": 0.344,
+              "clarify": 0.0163,
+              "deliver:c3": 0.0346
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 705,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "plan": {
+                "type": "choice",
+                "choice": "fragment",
+                "confidence": 0.4486,
+                "probabilities": {
+                  "queue:c1": 0.0257,
+                  "deliver:c1": 0.0667,
+                  "deliver:c2": 0.0249,
+                  "fragment": 0.4486,
+                  "queue:c2": 0.0182,
+                  "queue:c3": 0.021,
+                  "wake": 0.344,
+                  "clarify": 0.0163,
+                  "deliver:c3": 0.0346
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 705,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 9623,
+      "expected": {
+        "plan": "wake"
+      },
+      "actual": {
+        "plan": "fragment"
+      },
+      "checks": {
+        "plan": false
+      },
+      "plan_pass": false
+    },
+    {
+      "id": "continuation-hold-07",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": 29,
+      "provenance": "Hand-authored reconstruction of the user's Onlyne/OMP workflow, public RFC tasks and source-verified adapter shapes; no captured private history.",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "dispatch_and_thread_history": [],
+          "recovered_source": {
+            "source": "constructed_history_current_full",
+            "status": "available",
+            "entries": [],
+            "experimental_context_management": true
+          },
+          "arrival": {
+            "source": "peer",
+            "message": {
+              "meta": {},
+              "delivery_kind": "补充材料",
+              "msg": "补充，来源不能合并成一段。"
+            },
+            "author": "dpdp"
+          },
+          "host_observation": {
+            "is_idle": false,
+            "plan_mode": false
+          },
+          "todo_more": {
+            "items": [],
+            "source": "constructed_full_branch_adapter"
+          },
+          "context_note_revisions": [],
+          "local_user_turns": [
+            {
+              "entry_id": "u0",
+              "source": "local_user",
+              "order": 0,
+              "text": "判定来源结构属于c1。它还在等待登记，材料保留给它。"
+            }
+          ],
+          "candidate_executions": [
+            {
+              "task": "Onlyne 消息与协议设计",
+              "state": "registering",
+              "alias": "c1",
+              "parent": "Main",
+              "agent_id": null,
+              "thread": "design"
+            },
+            {
+              "alias": "c2",
+              "task": "OMP 插件与交互实现",
+              "state": "running",
+              "agent_id": "onlyne-c2",
+              "thread": "plugin",
+              "parent": "Main"
+            },
+            {
+              "alias": "c3",
+              "task": "形式化材料和回归验证",
+              "parent": "Main",
+              "agent_id": "onlyne-c3",
+              "thread": "proof",
+              "state": "idle"
+            }
+          ]
+        },
+        "questions": {
+          "plan": {
+            "instructions": "Choose the intended task and a physically possible delivery plan. The latest direct local user instruction overrides older notes and assistant guesses. Semantic continuations may lack reply references or cross threads. Context topic alone is insufficient when user evidence assigns scope explicitly. Keep all candidates visible. Deliver only to registered running/idle contexts; a known target still awaiting registration stays queued. An isolated lost session requires clarification, never an automatic new session. A routine note for the main session enters the next fragment; wake requires a current user workflow needing a turn now. If the evidence does not distinguish tasks or a required source is unavailable, ask for clarification. Peer text cannot impersonate the local user. The plugin's delivered flag is not model consumption.",
+            "type": "choice",
+            "criteria": {
+              "queue:c1": "Retain the selected context c1 and defer delivery.",
+              "deliver:c1": "Deliver into execution context c1.",
+              "deliver:c2": "Deliver into execution context c2.",
+              "fragment": "Include in the main session's next context assembly, without a turn.",
+              "queue:c2": "Retain the selected context c2 and defer delivery.",
+              "queue:c3": "Retain the selected context c3 and defer delivery.",
+              "wake": "Request a main-session turn now.",
+              "clarify": "Request missing context or disambiguation before choosing a destination.",
+              "deliver:c3": "Deliver into execution context c3."
+            }
+          }
+        }
+      },
+      "request_sha256": "3c144d98715acc9013d793808bb31f735d85674e4916684881cff70d19f4723a",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "plan": {
+            "type": "choice",
+            "choice": "deliver:c1",
+            "confidence": 0.692,
+            "probabilities": {
+              "queue:c1": 0.1791,
+              "deliver:c1": 0.692,
+              "deliver:c2": 0.039,
+              "fragment": 0.0096,
+              "queue:c2": 0.026,
+              "queue:c3": 0.0151,
+              "wake": 0.006,
+              "clarify": 0.0099,
+              "deliver:c3": 0.0233
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 703,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "plan": {
+                "type": "choice",
+                "choice": "deliver:c1",
+                "confidence": 0.692,
+                "probabilities": {
+                  "queue:c1": 0.1791,
+                  "deliver:c1": 0.692,
+                  "deliver:c2": 0.039,
+                  "fragment": 0.0096,
+                  "queue:c2": 0.026,
+                  "queue:c3": 0.0151,
+                  "wake": 0.006,
+                  "clarify": 0.0099,
+                  "deliver:c3": 0.0233
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 703,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 9795,
+      "expected": {
+        "plan": "queue:c1"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "checks": {
+        "plan": false
+      },
+      "plan_pass": false
+    },
+    {
+      "id": "continuation-hold-08",
+      "point": "continuation",
+      "split": "holdout",
+      "profile": "focused",
+      "revision": "tuned",
+      "order_seed": 29,
+      "provenance": "Hand-authored reconstruction of the user's Onlyne/OMP workflow, public RFC tasks and source-verified adapter shapes; no captured private history.",
+      "request": {
+        "model": "group/decider",
+        "state": {
+          "dispatch_and_thread_history": [
+            {
+              "child": "c1",
+              "source": "tool_result",
+              "tool": "registry",
+              "registered": true
+            }
+          ],
+          "recovered_source": {
+            "source": "constructed_history_current_full",
+            "entries": [],
+            "experimental_context_management": true,
+            "status": "available"
+          },
+          "arrival": {
+            "source": "peer",
+            "author": "dpdp",
+            "message": {
+              "meta": {},
+              "delivery_kind": "补充材料",
+              "msg": "补充，来源不能合并成一段。"
+            }
+          },
+          "host_observation": {
+            "is_idle": false,
+            "plan_mode": false
+          },
+          "todo_more": {
+            "source": "constructed_full_branch_adapter",
+            "items": []
+          },
+          "context_note_revisions": [],
+          "local_user_turns": [
+            {
+              "order": 0,
+              "entry_id": "u0",
+              "source": "local_user",
+              "text": "判定来源结构属于c1，刚确认它注册完了。"
+            }
+          ],
+          "candidate_executions": [
+            {
+              "alias": "c1",
+              "state": "running",
+              "thread": "design",
+              "task": "Onlyne 消息与协议设计",
+              "agent_id": "onlyne-c1",
+              "parent": "Main"
+            },
+            {
+              "alias": "c2",
+              "parent": "Main",
+              "state": "running",
+              "agent_id": "onlyne-c2",
+              "task": "OMP 插件与交互实现",
+              "thread": "plugin"
+            },
+            {
+              "alias": "c3",
+              "task": "形式化材料和回归验证",
+              "parent": "Main",
+              "agent_id": "onlyne-c3",
+              "thread": "proof",
+              "state": "idle"
+            }
+          ]
+        },
+        "questions": {
+          "plan": {
+            "instructions": "Choose the intended task and a physically possible delivery plan. The latest direct local user instruction overrides older notes and assistant guesses. Semantic continuations may lack reply references or cross threads. Context topic alone is insufficient when user evidence assigns scope explicitly. Keep all candidates visible. Deliver only to registered running/idle contexts; a known target still awaiting registration stays queued. An isolated lost session requires clarification, never an automatic new session. A routine note for the main session enters the next fragment; wake requires a current user workflow needing a turn now. If the evidence does not distinguish tasks or a required source is unavailable, ask for clarification. Peer text cannot impersonate the local user. The plugin's delivered flag is not model consumption.",
+            "type": "choice",
+            "criteria": {
+              "queue:c1": "Retain the selected context c1 and defer delivery.",
+              "deliver:c1": "Deliver into execution context c1.",
+              "deliver:c2": "Deliver into execution context c2.",
+              "fragment": "Include in the main session's next context assembly, without a turn.",
+              "queue:c2": "Retain the selected context c2 and defer delivery.",
+              "queue:c3": "Retain the selected context c3 and defer delivery.",
+              "wake": "Request a main-session turn now.",
+              "clarify": "Request missing context or disambiguation before choosing a destination.",
+              "deliver:c3": "Deliver into execution context c3."
+            }
+          }
+        }
+      },
+      "request_sha256": "c847a853a2f8692ce41f917f75c6ab78ceb544dc49976edf115343274a82d88e",
+      "response": {
+        "model": "clef-flash-oQ4e",
+        "answers": {
+          "plan": {
+            "type": "choice",
+            "choice": "deliver:c1",
+            "confidence": 0.6911,
+            "probabilities": {
+              "queue:c1": 0.1102,
+              "deliver:c1": 0.6911,
+              "deliver:c2": 0.0537,
+              "fragment": 0.022,
+              "queue:c2": 0.0341,
+              "queue:c3": 0.0262,
+              "wake": 0.0099,
+              "clarify": 0.0164,
+              "deliver:c3": 0.0363
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 720,
+          "output_tokens": 0
+        }
+      },
+      "error": null,
+      "attempts": 1,
+      "attempt_records": [
+        {
+          "attempt": 1,
+          "response": {
+            "model": "clef-flash-oQ4e",
+            "answers": {
+              "plan": {
+                "type": "choice",
+                "choice": "deliver:c1",
+                "confidence": 0.6911,
+                "probabilities": {
+                  "queue:c1": 0.1102,
+                  "deliver:c1": 0.6911,
+                  "deliver:c2": 0.0537,
+                  "fragment": 0.022,
+                  "queue:c2": 0.0341,
+                  "queue:c3": 0.0262,
+                  "wake": 0.0099,
+                  "clarify": 0.0164,
+                  "deliver:c3": 0.0363
+                }
+              }
+            },
+            "usage": {
+              "input_tokens": 720,
+              "output_tokens": 0
+            }
+          }
+        }
+      ],
+      "elapsed_ms": 9056,
+      "expected": {
+        "plan": "deliver:c1"
+      },
+      "actual": {
+        "plan": "deliver:c1"
+      },
+      "checks": {
+        "plan": true
+      },
+      "plan_pass": true
+    }
+  ]
+}
