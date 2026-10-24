@@ -471,7 +471,7 @@ pi.sendMessage(payload, { triggerTurn: true });
 1. **region**：必填。有 Tern 时提供当前 session 名作为建议值，用户确认后保存独立的 region URI。普通终端由用户填写，同样具备网络发现能力。
 2. **node.id**：必填，初始为空，由用户填写稳定唯一标识。
 3. **server.bind**：必填，默认 `127.0.0.1`。端口由操作系统在启动时分配。
-4. **node.key_ref**：可选，初始为空；首次回环 E2E 可使用 none 开发绑定。
+4. **node.key_ref**：可选，初始为空。当前回环开发绑定只使用 `Onlyne-Actor`，非空值会被拒绝；凭据交换属于独立的安全提案。
 5. **threads.page_size**：默认 50，范围 1～100。
 
 提交时生成配置、启动监听、提交 region 成员关系并发布发现，界面逐项报告实际结果。对端自动发现后存入 SQLite。多播不可达时，引导可以请用户提供一个已有节点地址，立即联系并读取 HTTP 候选目录。取消时不写文件、不启动节点。Tern 原生使用 `nativeOverlay`，普通终端提供完整的逐行界面。

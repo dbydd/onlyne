@@ -39,9 +39,10 @@ address supplied during bootstrap and an HTTP candidate exchange stored in
 `bonjour-service` to enable it. The configuration does not contain endpoint,
 port, peers, task-spawn policy or supplement windows.
 
-`key_ref` is optional and accepts `env:NAME`, `file:/path` or `literal:value`.
-The loopback development binding uses `Onlyne-Actor`; credential exchange and
-proof of possession remain a separate security proposal.
+`key_ref` is parsed but not enforced. The current development binding refuses a
+non-empty value and a non-loopback `bind`, because it authenticates with
+`Onlyne-Actor` only. Credential exchange and proof of possession remain a
+separate security proposal; leave both at their defaults for the first E2E.
 
 ## Surface
 
