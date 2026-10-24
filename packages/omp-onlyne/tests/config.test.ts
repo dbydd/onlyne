@@ -6,10 +6,12 @@ import {
 	ConfigError,
 	configPath,
 	loadConfig,
+	normalizeNodeId,
 	normalizeRegion,
 	parseConfig,
 	saveConfig,
 	serializeConfig,
+	shortNodeId,
 } from "../src/config.ts";
 import type { OnlyneConfig } from "../src/types.ts";
 
@@ -73,6 +75,11 @@ describe("config", () => {
 		expect(parseConfig(text, PATH).region).toBe("urn:onlyne:region:research-chamber");
 	});
 
+	test("normalizes a short stored node id on load", () => {
+		const text = SAMPLE.replace('id = "urn:onlyne:agent:lazuli"', 'id = "lazuli"');
+		expect(parseConfig(text, PATH).node.id).toBe("urn:onlyne:agent:lazuli");
+	});
+
 	test("defaults bind and page size", () => {
 		const text = `[node]\nid = "urn:onlyne:agent:a"\nregion = "urn:onlyne:region:r"\n`;
 		expect(parseConfig(text, PATH)).toMatchObject({
@@ -81,12 +88,34 @@ describe("config", () => {
 		});
 	});
 
-	test("rejects a missing or non-URI node id", () => {
+	test("rejects a missing or empty node id", () => {
 		expect(() => parseConfig(SAMPLE.replace('id = "urn:onlyne:agent:lazuli"\n', ""), PATH)).toThrow(ConfigError);
-		expect(() => parseConfig(SAMPLE.replace('id = "urn:onlyne:agent:lazuli"', 'id = "lazuli"'), PATH)).toThrow(
+		expect(() => parseConfig(SAMPLE.replace('id = "urn:onlyne:agent:lazuli"', 'id = ""'), PATH)).toThrow(ConfigError);
+		expect(() => parseConfig(SAMPLE.replace('id = "urn:onlyne:agent:lazuli"', 'id = "   "'), PATH)).toThrow(
 			ConfigError,
 		);
-		expect(() => parseConfig(SAMPLE.replace('id = "urn:onlyne:agent:lazuli"', 'id = ""'), PATH)).toThrow(ConfigError);
+	});
+
+	test("normalizes short node ids and keeps absolute URIs", () => {
+		expect(normalizeNodeId("lazuli")).toBe("urn:onlyne:agent:lazuli");
+		expect(normalizeNodeId("research chamber")).toBe("urn:onlyne:agent:research%20chamber");
+		expect(normalizeNodeId("  lazuli  ")).toBe("urn:onlyne:agent:lazuli");
+		expect(normalizeNodeId("urn:onlyne:agent:lazuli")).toBe("urn:onlyne:agent:lazuli");
+		expect(normalizeNodeId("https://example.com/node")).toBe("https://example.com/node");
+		expect(() => normalizeNodeId("   ")).toThrow(ConfigError);
+	});
+
+	test("shows the short name of a node id", () => {
+		expect(shortNodeId("urn:onlyne:agent:lazuli")).toBe("lazuli");
+		expect(shortNodeId("urn:onlyne:agent:research%20chamber")).toBe("research chamber");
+		expect(shortNodeId("urn:onlyne:region:research-chamber")).toBe("urn:onlyne:region:research-chamber");
+		expect(shortNodeId("https://example.com/node")).toBe("https://example.com/node");
+	});
+
+	test("round-trips short names through the node id", () => {
+		for (const name of ["lazuli", "research chamber", "hash#tag", "agent/one"]) {
+			expect(shortNodeId(normalizeNodeId(name))).toBe(name);
+		}
 	});
 
 	test("rejects a missing or empty region", () => {
@@ -141,7 +170,7 @@ describe("config", () => {
 
 	test("does not write an invalid configuration", async () => {
 		const cwd = await project();
-		await expect(saveConfig({ ...draft(cwd), node: { id: "lazuli" } })).rejects.toBeInstanceOf(ConfigError);
+		await expect(saveConfig({ ...draft(cwd), node: { id: "   " } })).rejects.toBeInstanceOf(ConfigError);
 		await expect(loadConfig(cwd)).rejects.toMatchObject({ code: "missing" });
 	});
 

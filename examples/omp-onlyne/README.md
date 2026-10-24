@@ -36,7 +36,8 @@ Run `/onlyne init`. The form asks for:
 
 - region: required; a Tern session name is only a suggestion, and the saved
   value is an absolute `urn:onlyne:region:...` URI;
-- node id: required, initially empty;
+- node id: required, initially empty; a short name such as `lazuli` is saved as
+  `urn:onlyne:agent:lazuli`;
 - bind: default `127.0.0.1`;
 - key ref: optional; leave empty for the first loopback E2E;
 - page size: default 50;
@@ -44,6 +45,9 @@ Run `/onlyne init`. The form asks for:
 
 Saving starts the node, joins the region and begins network discovery. Cancel
 writes nothing. `/onlyne settings` edits the same fields later.
+
+The status row above the editor shows
+`region | nodes N | neighbors M | alert A | unread U` for the running node.
 
 ## Join the other roles
 
@@ -70,6 +74,10 @@ a suggested region and a native rendering surface.
 3. Reply from `lazuli` with `in_reply_to`; `dpdp` shows the reply in its thread.
 4. `/onlyne settings` edits that role's project config in place. Cancel writes
    nothing.
+5. `/onlyne` page 3 lists every discovered node with `[x]`/`[ ]`. Move with
+   `j`/`k` and press Space to request a connection; page 4 lists the reachable
+   contacts. Different regions still appear here; region membership only
+   affects domain-scoped routing.
 
 Each node stores protocol records in `.onlyne/omp.db` beside its config. That
 file is local test state and is ignored by git.

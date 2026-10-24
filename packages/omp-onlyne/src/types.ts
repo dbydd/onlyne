@@ -67,6 +67,29 @@ export interface ViewerThread {
 	messages: ViewerMessage[];
 }
 
+/** One discovery record row the viewer lists as an automatic-discovery candidate. */
+export interface ViewerDiscovery {
+	node_id: NodeId;
+	instance_id: string;
+	base_url: string;
+	source: string;
+	region?: string;
+	membership_state?: "active" | "left";
+	verified_at?: string;
+	expires_at: string;
+	last_seen: string;
+	error?: string;
+}
+
+/** One reachable peer the viewer lists on its contacts page. */
+export interface ViewerContact {
+	node_id: NodeId;
+	instance_id: string;
+	base_url: string;
+	region?: string;
+	last_seen: string;
+}
+
 /** Read-only snapshot the viewer renders. */
 export interface ViewerSnapshot {
 	region?: string;
@@ -74,4 +97,18 @@ export interface ViewerSnapshot {
 	queue: QueueItem[];
 	threads: ViewerThread[];
 	contexts: ContextRecord[];
+	discovery: ViewerDiscovery[];
+	contacts: ViewerContact[];
+	discovery_error?: string;
+}
+
+/** The one-line runtime status a status widget renders. */
+export interface OnlyneStatus {
+	region: string;
+	node_id: NodeId;
+	nodes: number;
+	neighbors: number;
+	alerts: number;
+	unread: number;
+	discovery_error?: string;
 }

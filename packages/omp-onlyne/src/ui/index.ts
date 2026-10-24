@@ -7,6 +7,8 @@ import { OnlyneBootstrap, type BootstrapDefaults } from "./bootstrap.ts";
 import { OnlyneSettings } from "./settings.ts";
 import { OnlyneViewer } from "./viewer.ts";
 
+export { attachStatus, OnlyneStatus } from "./status.ts";
+
 const USAGE = "用法：/onlyne 打开查看界面，/onlyne init 初始化项目配置，/onlyne settings 编辑项目配置。";
 
 export function registerUi(pi: ExtensionAPI): void {
@@ -105,6 +107,7 @@ export function registerUi(pi: ExtensionAPI): void {
 								() => tui.requestRender(),
 								() => done(),
 								controller.signal,
+								() => tui.terminal.rows,
 							),
 						{
 							overlay: true,

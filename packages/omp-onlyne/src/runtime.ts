@@ -1,5 +1,5 @@
 import { dirname, join } from "node:path";
-import { FetchTransport, OnlyneError, type Entry, type LocalAttention, type OnlyneNode, type Outbound, type Page, type Thread, type DiscoveryCandidate } from "@onlyne/lib";
+import { FetchTransport, OnlyneError, type DiscoveryCandidate, type DiscoveryRecord, type Entry, type LocalAttention, type OnlyneNode, type Outbound, type Page, type Thread } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { currentDecision, JudgeDecider } from "./decider.ts";
 import { ConfigError, loadConfig, saveConfig } from "./config.ts";
@@ -7,7 +7,7 @@ import { createRuntimeBridge } from "./messages.ts";
 import { advertisedHost, createOnlyneNode } from "./node.ts";
 import { NetworkDiscovery } from "./network.ts";
 import { ContextRegistry, SqliteStorage } from "./store.ts";
-import type { OnlyneConfig, QueueItem, ViewerMessage, ViewerSnapshot, ViewerThread } from "./types.ts";
+import type { OnlyneConfig, OnlyneStatus, QueueItem, ViewerContact, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "./types.ts";
 
 export interface PluginRuntime {
 	readonly config: OnlyneConfig;
@@ -20,8 +20,10 @@ export interface PluginRuntime {
 	readonly storage: SqliteStorage;
 	readonly decider: JudgeDecider;
 	snapshot(): Promise<ViewerSnapshot>;
+	status(): Promise<OnlyneStatus>;
 	onChange(listener: () => void): () => void;
 	contact(endpoint: string): Promise<void>;
+	refreshDiscovery(): Promise<void>;
 	updateConfig(next: OnlyneConfig): Promise<void>;
 	close(): Promise<void>;
 }
@@ -53,6 +55,7 @@ class OmpRuntime implements PluginRuntime {
 	private network?: NetworkDiscovery;
 	private timer?: ReturnType<ExtensionContext["setInterval"]>;
 	private maintenance?: Promise<void>;
+	private discoveryError?: string;
 	private controller = new AbortController();
 	private listeners = new Set<() => void>();
 	private closed = false;
@@ -101,8 +104,13 @@ class OmpRuntime implements PluginRuntime {
 		}
 		handler = request => this.node.fetch(request);
 		this.network = new NetworkDiscovery({ node_id: this.config.node.id, instance_id: instanceId, endpoint: this.endpoint, bind: this.config.server.bind,
-			onCandidate: async (url, source, expectedNode) => { if (expectedNode === this.config.node.id) return; await this.node.discovery.observe(url, source, expectedNode, this.controller.signal); this.changed(); },
-			onError: error => this.pi.logger.warn("onlyne discovery failed", { error: errorText(error) }),
+			onCandidate: async (url, source, expectedNode) => {
+				if (expectedNode === this.config.node.id) return;
+				await this.node.discovery.observe(url, source, expectedNode, this.controller.signal);
+				this.discoveryError = undefined;
+				this.changed();
+			},
+			onError: error => { this.discoveryError = errorText(error); this.pi.logger.warn("onlyne discovery failed", { error: errorText(error) }); },
 		});
 		try { await this.network.start(); } catch (error) { this.pi.logger.warn("onlyne DNS-SD discovery is unavailable", { error: errorText(error) }); }
 		await this.contexts.ensureMain();
@@ -138,8 +146,28 @@ class OmpRuntime implements PluginRuntime {
 		} while (cursor);
 		this.changed();
 	}
+	async refreshDiscovery(): Promise<void> {
+		await this.node.discovery.refresh(this.controller.signal);
+		this.changed();
+	}
+	async status(): Promise<OnlyneStatus> {
+		const records = await this.node.discovery.listRecords();
+		const inbox = await allPages(cursor => this.node.messages.inbox(this.node.auth, { page_size: 100, cursor }));
+		const at = Date.now();
+		const nodes = new Set(records.map(record => record.node_id));
+		nodes.add(this.config.node.id);
+		const neighbors = new Set(records
+			.filter(record => record.node_id !== this.config.node.id && record.verified_at !== undefined && Date.parse(record.expires_at) > at)
+			.map(record => record.node_id));
+		return {
+			region: this.config.region, node_id: this.config.node.id, nodes: nodes.size, neighbors: neighbors.size,
+			alerts: inbox.length, unread: inbox.filter(item => !item.injected).length,
+			...(this.discoveryError === undefined ? {} : { discovery_error: this.discoveryError }),
+		};
+	}
 	async snapshot(): Promise<ViewerSnapshot> {
 		const contexts = await this.contexts.list();
+		const records = await this.node.discovery.listRecords();
 		const inbox = await allPages(cursor => this.node.messages.inbox(this.node.auth, { page_size: 100, cursor }));
 		const threads = await allPages(cursor => this.node.threads.list(this.node.auth, { page_size: 100, cursor }));
 		const views: ViewerThread[] = [];
@@ -154,7 +182,28 @@ class OmpRuntime implements PluginRuntime {
 		const queue: QueueItem[] = inbox.filter(item => !item.injected).map(item => ({ id: `inbound:${item.attention.obligation_id}`, kind: "inbound", label: `${item.attention.thread_ref.id}/${item.attention.seq}`, detail: `${item.attention.authenticated_author} · pending consumption`, at: item.attention.entry?.at }));
 		queue.push(...contexts.filter(record => record.state === "running" || record.state === "unbound").map(record => ({ id: `context:${record.alias}`, kind: "context" as const, label: record.alias, detail: `${record.summary} · ${record.state}`, at: record.created_at })));
 		queue.push(...outbound.filter(row => row.value.state === "unknown" || row.value.state === "pending").map(row => ({ id: row.key, kind: "outbound" as const, label: row.value.request.target_endpoint, detail: row.value.state })));
-		return { region: this.config.region, endpoint: this.endpoint, contexts, queue, threads: views };
+		const at = Date.now();
+		const discovery: ViewerDiscovery[] = records.map(record => ({
+			node_id: record.node_id, instance_id: record.instance_id, base_url: record.base_url, source: record.source,
+			...(record.membership?.domain_id === undefined ? {} : { region: record.membership.domain_id }),
+			...(record.membership?.state === undefined ? {} : { membership_state: record.membership.state }),
+			...(record.verified_at === undefined ? {} : { verified_at: record.verified_at }),
+			expires_at: record.expires_at, last_seen: record.last_seen,
+			...(record.error === undefined ? {} : { error: record.error.message }),
+		}));
+		const newest = new Map<string, DiscoveryRecord>();
+		for (const record of records) {
+			if (record.node_id === this.config.node.id || record.verified_at === undefined || Date.parse(record.expires_at) <= at) continue;
+			const kept = newest.get(record.node_id);
+			if (kept === undefined || Date.parse(record.last_seen) > Date.parse(kept.last_seen)) newest.set(record.node_id, record);
+		}
+		const contacts: ViewerContact[] = [...newest.values()].map(record => ({
+			node_id: record.node_id, instance_id: record.instance_id, base_url: record.base_url,
+			...(record.membership?.domain_id === undefined ? {} : { region: record.membership.domain_id }),
+			last_seen: record.last_seen,
+		}));
+		return { region: this.config.region, endpoint: this.endpoint, contexts, queue, threads: views, discovery, contacts,
+			...(this.discoveryError === undefined ? {} : { discovery_error: this.discoveryError }) };
 	}
 	async updateConfig(next: OnlyneConfig): Promise<void> { await saveConfig(next); await restartRuntime(next, this.pi, this.main); }
 	async close(): Promise<void> {

@@ -6,7 +6,7 @@ import { registerTodoRecovery } from "./src/todo.ts";
 import { startRuntime, stopRuntime } from "./src/runtime.ts";
 import { registerMsgTool } from "./src/tool.ts";
 import { registerOnlyneUrls } from "./src/urls.ts";
-import { registerUi } from "./src/ui/index.ts";
+import { attachStatus, registerUi } from "./src/ui/index.ts";
 
 /**
  * OMP extension entry. The factory runs for every session, including subagents;
@@ -21,9 +21,20 @@ export default function ompOnlyne(pi: ExtensionAPI): void {
 	registerContextBinding(pi);
 	registerTodoRecovery(pi);
 	registerUi(pi);
+	let detachStatus: (() => void) | undefined;
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.agent.kind !== "main") return;
+		if (ctx.hasUI) {
+			try {
+				detachStatus?.();
+				detachStatus = attachStatus(ctx);
+			} catch (error) {
+				pi.logger.warn("onlyne status widget could not be attached", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
 		try {
 			await startRuntime(pi, ctx);
 		} catch (error) {
@@ -37,6 +48,8 @@ export default function ompOnlyne(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		if (ctx.agent.kind !== "main") return;
+		detachStatus?.();
+		detachStatus = undefined;
 		await stopRuntime();
 	});
 }

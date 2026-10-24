@@ -122,7 +122,7 @@ bind = "127.0.0.1"
 page_size = 50
 ```
 
-node.id 在引导中初始为空，用户填写稳定唯一身份。region 是独立的协议归属，启动时提交域成员记录。监听端口由操作系统分配，实际 endpoint 由运行时公布。对端候选通过引导种子地址和 HTTP 目录取得，逐节点核对后存入 SQLite；同链路 DNS-SD 是可选加速器。配置不保存 endpoint、port、peers 或语义调度参数。任务派生与补充调度使用 OMP judge 角色的实际判定与宿主观察。
+node.id 在引导中初始为空，用户只填写短名；保存时规范化为 `urn:onlyne:agent:<短名>`，已经完整的绝对 URI 原样保留。region 是独立的协议归属，启动时提交域成员记录。监听端口由操作系统分配，实际 endpoint 由运行时公布。对端候选通过引导种子地址、HTTP 目录和 SQLite 发现记录取得；同链路 DNS-SD 是可选加速器。配置不保存 endpoint、port、peers 或语义调度参数。任务派生与补充调度使用 OMP judge 角色的实际判定与宿主观察。
 
 ## 3. 会话隔离与 Subagent 协作模型
 
@@ -469,7 +469,7 @@ pi.sendMessage(payload, { triggerTurn: true });
 引导界面收集最小必需配置并提供默认值：
 
 1. **region**：必填。有 Tern 时提供当前 session 名作为建议值，用户确认后保存独立的 region URI。普通终端由用户填写，同样具备网络发现能力。
-2. **node.id**：必填，初始为空，由用户填写稳定唯一标识。
+2. **node.id**：必填，初始为空，由用户填写稳定唯一短名；保存为 `urn:onlyne:agent:<短名>`。完整的绝对 URI 也接受。
 3. **server.bind**：必填，默认 `127.0.0.1`。端口由操作系统在启动时分配。
 4. **node.key_ref**：可选，初始为空。当前回环开发绑定只使用 `Onlyne-Actor`，非空值会被拒绝；凭据交换属于独立的安全提案。
 5. **threads.page_size**：默认 50，范围 1～100。
@@ -484,14 +484,16 @@ pi.sendMessage(payload, { triggerTurn: true });
 
 `/onlyne` 打开查看界面。`/onlyne settings` 打开配置界面。两个界面互不替代。
 
-查看界面分两页，页签固定为 `1 队列`、`2 对话`。页脚显示 `1/2`、thread 总数与未读总数。
+查看界面分四页，页签固定为 `1 队列`、`2 对话`、`3 发现`、`4 联系人`。页脚显示 `1/4`、thread 总数、未读总数与可达联系人数。
 
 | 页 | 内容 |
 |---|---|
 | 1 队列 | 待处理来信、排队条目、运行中上下文、未决等待、未知出站结果。每项显示来源、目标、状态与等待时长 |
 | 2 对话 | 左侧 thread 列表，右侧消息流。消息按 seq 排列，区分 in/out，显示作者、时间、关系、路由标记与消费状态 |
+| 3 发现 | 自动发现与手动地址留下的全部记录；`[x]` 表示已验证且未过期，`[ ]` 表示待连接。勾选或按空格请求连接，当前无认证所以默认放行。首行提供刷新发现 |
+| 4 联系人 | 已验证、未过期且非本节点的可达节点，显示短 id、region、endpoint 与最近可见时间 |
 
-队列页按状态分组，组内按时间排序。对话页的 thread 列表按最近活动排序，未读 thread 带计数。消息流的选中条目显示完整正文，其余条目显示首行。
+队列页按类型与时间排序。对话页的 thread 列表按最近活动排序，未读 thread 带计数。消息流的选中条目在固定详情区显示正文，其余条目显示首行。所有页面共用同一固定高度：正文窗口由终端行数计算，列表在窗口内滚动，内容长度不改变界面高度。
 
 操作：
 
@@ -502,21 +504,33 @@ pi.sendMessage(payload, { triggerTurn: true });
 | `g` / `G` | 到顶 / 到底 |
 | `Ctrl+d` / `Ctrl+u` | 半页滚动 |
 | `[` / `]` | 对话页切换 thread |
+| `1`–`4` | 直接切页 |
+| `Space` | 发现页连接选中记录 |
 | `r` | 重新读取本地状态 |
 | `Esc` / `q` | 关闭 |
 | `Enter` | 在对话页打开选中消息的全文 |
 
 ### 9.2 数据与刷新
 
-查看界面读取插件已持有的状态：上下文登记表、活动分支里的队列条目、Onlyne 的 thread 与消息记录。它不调用 SystemOne，不改变消费记录，不发送消息。对话页对 `onlyne.inbound` 与 `onlyne.routing` 使用与消息渲染器相同的样式，队列页显示它们的投递状态。
+查看界面读取插件已持有的状态：上下文登记表、活动分支里的队列条目、Onlyne 的 thread、消息与发现记录。它不调用 SystemOne，不改变消费记录，不发送消息。发现页的连接动作是唯一的网络动作。对话页对 `onlyne.inbound` 与 `onlyne.routing` 使用与消息渲染器相同的样式，队列页显示它们的投递状态。
 
 数据变化时界面按事件刷新。刷新失败时保留上一帧并显示 `刷新失败: <原因>`，不把旧数据当成当前状态。没有数据时显示 `没有待处理消息`，与读取失败分开。
 
-### 9.3 Tern 下的呈现
+### 9.3 状态行
+
+主会话挂载一行固定状态组件，位置在编辑器上方，每两秒和运行时变更时刷新：
+
+```text
+research-chamber | nodes 4 | neighbors 3 | alert 1 | unread 2
+```
+
+字段依次是 region 短名、已知节点数、已验证邻居数、待处理来信数和未确认消费数。发现错误附加在末尾，并只占同一行。Tern 原生模式使用 `omp.widget.onlyne` 的 bare card 与 `head` spans；普通终端逐行渲染同一字符串。没有运行时显示 `onlyne | unconfigured`。
+
+### 9.4 Tern 下的呈现
 
 查看界面实现 `describe(cx)`，按终端能力选择形态：
 
-1. 使用 `nativeOverlay`，`role` 为 `omp.overlay.onlyne`，`size` 为 `lg`，`head` 显示 `Onlyne`。两页是组件内部的页签，不使用 `prefs`。
+1. 使用 `nativeOverlay`，`role` 为 `onlyne.viewer`，`size` 为 `lg`，`head` 显示 `Onlyne`。四页是组件内部的页签，不使用 `prefs`。
 2. 终端支持 `aside` 时，OMP 把该 overlay 描述为可停靠的 sheet；TSP v1 没有左侧锚点，实际停靠边由终端决定。终端不支持 `aside` 时居中浮动。
 3. 原生描述返回 `null` 时回退逐行输出。
 
@@ -564,7 +578,7 @@ Tern 下的原生渲染由 Tern Surface Protocol（TSP）驱动。OMP 用 `TERM_
 | Todo | todo-more 可选；存在时原子写 rich+native，缺失时写原生 `user_todo_edit` 与决策标记。用户将在实战验证 |
 | 子代理读取 | msg 写路径受限；onlyne:// 与 decider 读取按 agent 与 context source 过滤。未验收 |
 | 配置与调度 | endpoint、port、peers、default_attention、spawn、supplement_window 已从配置和执行路径删除 |
-| 界面 | 两页、bootstrap 与设置组件；真实 Tern 操作、刷新和分页未验收 |
+| 界面 | 四页、固定高度、内部滚动、状态行、bootstrap 与设置组件；真实 Tern 操作、刷新和连接未验收 |
 
 已按 18.12.6 源码核对：
 
@@ -584,8 +598,8 @@ Tern 下的原生渲染由 Tern Surface Protocol（TSP）驱动。OMP 用 `TERM_
 已运行：
 
 - 根目录 `bun run check`：`@onlyne/lib` 与 `omp-onlyne` 类型检查通过。
-- 根目录 `bun run test`：库的 verify、domain、first-contact 套件全部通过；插件 28 个测试通过。
-- 该证据只覆盖库行为、插件单元路径和单机两节点发现/首次接触；没有启动真实 OMP 集群或 GUI 操作。
+- 根目录 `bun run test`：库的 verify、domain、first-contact 套件全部通过；插件 32 个测试通过。
+- 该证据覆盖库行为、插件单元路径和单机两节点发现/首次接触。真实 OMP 集群已启动并通过 SQLite 记录确认四个节点互相发现；重启后的状态行与四页界面仍待用户手动验收。
 
 尚未实跑：
 

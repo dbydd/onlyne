@@ -15,7 +15,7 @@ import {
 	span,
 	text as textNode,
 } from "@oh-my-pi/pi-tui";
-import { configPath, normalizeRegion, saveConfig } from "../config.ts";
+import { configPath, normalizeNodeId, normalizeRegion, saveConfig, shortNodeId } from "../config.ts";
 import { startRuntime } from "../runtime.ts";
 import type { OnlyneConfig } from "../types.ts";
 
@@ -33,7 +33,7 @@ const LABELS: Record<FieldName, string> = {
 
 const HINTS: Record<FieldName, string> = {
 	region: "短名保存为 urn:onlyne:region:<短名>",
-	nodeId: "urn:onlyne:agent:<name>",
+	nodeId: "短名保存为 urn:onlyne:agent:<短名>",
 	bind: "127.0.0.1",
 	keyRef: "env:NAME 或 file:/path；回环测试可留空",
 	pageSize: "1..100，默认 50",
@@ -82,7 +82,7 @@ export class OnlyneBootstrap implements Component {
 	) {
 		this.fields = {
 			region: this.makeField(LABELS.region, defaults.region, HINTS.region),
-			nodeId: this.makeField(LABELS.nodeId, defaults.nodeId, HINTS.nodeId),
+			nodeId: this.makeField(LABELS.nodeId, shortNodeId(defaults.nodeId), HINTS.nodeId),
 			bind: this.makeField(LABELS.bind, defaults.bind, HINTS.bind),
 			keyRef: this.makeField(LABELS.keyRef, defaults.keyRef, HINTS.keyRef),
 			pageSize: this.makeField(LABELS.pageSize, String(defaults.pageSize), HINTS.pageSize),
@@ -138,7 +138,7 @@ export class OnlyneBootstrap implements Component {
 		const config: OnlyneConfig = {
 			path: configPath(this.ctx.cwd),
 			region: normalizeRegion(region),
-			node: { id: nodeId, ...(keyRef.length === 0 ? {} : { key_ref: keyRef }) },
+			node: { id: normalizeNodeId(nodeId), ...(keyRef.length === 0 ? {} : { key_ref: keyRef }) },
 			server: { bind },
 			threads: { page_size: Number(this.value("pageSize")) },
 		};

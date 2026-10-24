@@ -4,6 +4,7 @@ import type { OnlyneConfig } from "./types.ts";
 
 const CONFIG_RELATIVE_PATH = join(".onlyne", "config.toml");
 const REGION_PREFIX = "urn:onlyne:region:";
+const AGENT_PREFIX = "urn:onlyne:agent:";
 const DEFAULT_BIND = "127.0.0.1";
 const DEFAULT_PAGE_SIZE = 50;
 
@@ -33,6 +34,27 @@ export function normalizeRegion(value: string): string {
 	const trimmed = value.trim();
 	if (trimmed.length === 0) throw new ConfigError("invalid", "region must not be empty.");
 	return ABSOLUTE_URI.test(trimmed) && !/\s/.test(trimmed) ? trimmed : `${REGION_PREFIX}${encodeURIComponent(trimmed)}`;
+}
+
+/**
+ * A node id is a stable absolute URI. A short name is accepted from the user and
+ * saved as `urn:onlyne:agent:<URI-encoded name>`; an absolute URI is kept as is.
+ */
+export function normalizeNodeId(value: string): string {
+	const trimmed = value.trim();
+	if (trimmed.length === 0) throw new ConfigError("invalid", "node.id must not be empty.");
+	return ABSOLUTE_URI.test(trimmed) && !/\s/.test(trimmed) ? trimmed : `${AGENT_PREFIX}${encodeURIComponent(trimmed)}`;
+}
+
+/** The short name of an agent URN, for display in a form; a value without that prefix is returned unchanged. */
+export function shortNodeId(value: string): string {
+	if (!value.startsWith(AGENT_PREFIX)) return value;
+	const name = value.slice(AGENT_PREFIX.length);
+	try {
+		return decodeURIComponent(name);
+	} catch {
+		return name;
+	}
 }
 
 /** Read and validate the project configuration. A missing file is an error, not defaults. */
@@ -112,11 +134,7 @@ export function serializeConfig(config: OnlyneConfig): string {
 
 function validateConfig(config: OnlyneConfig): OnlyneConfig {
 	const region = normalizeRegion(config.region);
-	const id = config.node.id.trim();
-	if (id.length === 0) throw new ConfigError("invalid", "node.id must not be empty.");
-	if (!ABSOLUTE_URI.test(id) || /\s/.test(id)) {
-		throw new ConfigError("invalid", `node.id must be an absolute URI, for example urn:onlyne:agent:<name>, got ${JSON.stringify(id)}.`);
-	}
+	const id = normalizeNodeId(config.node.id);
 	const keyRef = config.node.key_ref?.trim();
 	const bind = config.server.bind.trim();
 	if (bind.length === 0) throw new ConfigError("invalid", "server.bind must not be empty.");

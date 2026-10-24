@@ -14,7 +14,7 @@ import {
 	span,
 	text as textNode,
 } from "@oh-my-pi/pi-tui";
-import { configPath, loadConfig, normalizeRegion, saveConfig } from "../config.ts";
+import { configPath, loadConfig, normalizeNodeId, normalizeRegion, saveConfig, shortNodeId } from "../config.ts";
 import { getRuntime } from "../runtime.ts";
 import type { OnlyneConfig } from "../types.ts";
 
@@ -31,7 +31,7 @@ const LABELS: Record<FieldName, string> = {
 
 const HINTS: Record<FieldName, string> = {
 	region: "短名保存为 urn:onlyne:region:<短名>",
-	nodeId: "urn:onlyne:agent:<name>",
+	nodeId: "短名保存为 urn:onlyne:agent:<短名>",
 	bind: "127.0.0.1",
 	keyRef: "env:NAME 或 file:/path；可留空",
 	pageSize: "1..100",
@@ -123,7 +123,7 @@ export class OnlyneSettings implements Component {
 		this.discardFields();
 		this.fields = {
 			region: this.makeField(LABELS.region, config.region, HINTS.region),
-			nodeId: this.makeField(LABELS.nodeId, config.node.id, HINTS.nodeId),
+			nodeId: this.makeField(LABELS.nodeId, shortNodeId(config.node.id), HINTS.nodeId),
 			bind: this.makeField(LABELS.bind, config.server.bind, HINTS.bind),
 			keyRef: this.makeField(LABELS.keyRef, config.node.key_ref ?? "", HINTS.keyRef),
 			pageSize: this.makeField(LABELS.pageSize, String(config.threads.page_size), HINTS.pageSize),
@@ -166,7 +166,7 @@ export class OnlyneSettings implements Component {
 			...base,
 			path: base.path.length > 0 ? base.path : configPath(this.cwd),
 			region: normalizeRegion(region),
-			node: { id: this.value("nodeId"), ...(keyRef.length === 0 ? {} : { key_ref: keyRef }) },
+			node: { id: normalizeNodeId(this.value("nodeId")), ...(keyRef.length === 0 ? {} : { key_ref: keyRef }) },
 			server: { bind: this.value("bind") },
 			threads: { page_size: Number(this.value("pageSize")) },
 		};
