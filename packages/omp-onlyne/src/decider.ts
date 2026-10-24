@@ -128,6 +128,10 @@ const MAX_TAIL_PAGES = 100;
  */
 const STATE_BUDGET_CHARS = 40_000;
 const TRIM_ORDER = ["history", "task_dispatches", "context_note"] as const;
+/** Newest branch rows that may reach the judge; older work is history, not decision material. */
+const HISTORY_ROWS = 40;
+/** One row's text cap: a pasted terminal dump must not crowd out the rest of the state. */
+const TEXT_CHARS = 4_000;
 
 function stateSize(state: Row): number {
 	return JSON.stringify(state).length;
@@ -178,9 +182,11 @@ export class JudgeDecider {
 
 	async decideInbound(scope: ExtensionContext, entry: Entry): Promise<InboundDecision> {
 		const base = this.#base(scope);
+		const incoming = entryFacts(entry);
 		const state: Row = {
+			brief: { node: base.node, region: base.region, host: base.host, incoming },
 			...base,
-			incoming: entryFacts(entry),
+			incoming,
 			contexts: await this.#contextRows(),
 			threads: await this.#threadRows(),
 			thread_dialogue: await this.#threadEvidenceFor([entry.thread_ref]),
@@ -210,10 +216,12 @@ export class JudgeDecider {
 		const candidates = todoCandidates(entry);
 		const existing = todoTitles(snapshot);
 		const base = this.#base(ctx);
+		const incoming = entryFacts(entry);
 		const state: Row = {
+			brief: { node: base.node, host: base.host, incoming, todo: snapshot },
 			...base,
 			todo: snapshot,
-			incoming: entryFacts(entry),
+			incoming,
 			title_candidates: candidates.titles,
 			explanation_candidates: candidates.explanations,
 			thread_dialogue: await this.#threadEvidenceFor([entry.thread_ref]),
@@ -586,6 +594,8 @@ export class JudgeDecider {
 	async #state(scope: DecisionScope): Promise<Row> {
 		const meta = scope.input.meta ?? {};
 		const explicitTarget = await this.#target(meta);
+		const request = { delivery_kind: scope.input.delivery_kind, msg: scope.input.msg, meta };
+		const base = this.#base(scope.ctx);
 		const threads = await this.#threadRows();
 		const contexts = await this.#contextRows();
 		const referenced: ThreadRef[] = [];
@@ -598,8 +608,9 @@ export class JudgeDecider {
 			if (ref !== null) referenced.push(ref);
 		}
 		return {
-			...this.#base(scope.ctx),
-			request: { delivery_kind: scope.input.delivery_kind, msg: scope.input.msg, meta },
+			brief: { node: base.node, region: base.region, host: base.host, request },
+			...base,
+			request,
 			peers: await this.#peers(),
 			threads,
 			thread_dialogue: await this.#threadEvidenceFor(referenced),
@@ -990,14 +1001,14 @@ export class JudgeDecider {
 		}
 	}
 
-	/** The active branch as ordered, id-bearing rows; no window and no text cut. */
+	/** The active branch as ordered, id-bearing rows: the newest rows, each text bounded. */
 	#history(ctx: ExtensionContext): Row[] {
 		const rows: Row[] = [];
 		for (const entry of branchOf(ctx)) {
 			const row = entryRow(entry);
 			if (row !== undefined) rows.push(row);
 		}
-		return rows;
+		return rows.slice(-HISTORY_ROWS);
 	}
 
 	#plan(ctx: ExtensionContext): unknown {
@@ -1294,9 +1305,14 @@ function entryRow(entry: SessionEntry): Row | undefined {
 	}
 }
 
+/** One pasted terminal dump must not become the whole decision prompt. */
+function boundText(text: string): string {
+	return text.length <= TEXT_CHARS ? text : `${text.slice(0, TEXT_CHARS)}… [${String(text.length - TEXT_CHARS)} more characters]`;
+}
+
 /** Content parts keep their text; image bytes are not decision material and are named, not embedded. */
 function contentOf(value: unknown): unknown {
-	if (typeof value === "string") return value;
+	if (typeof value === "string") return boundText(value);
 	if (!Array.isArray(value)) return value ?? null;
 	return value.map(part => {
 		const row = asRecord(part);
@@ -1308,6 +1324,7 @@ function contentOf(value: unknown): unknown {
 				bytes: "omitted: image bytes are not decision input",
 			};
 		}
+		if (typeof row.text === "string") return { ...row, text: boundText(row.text) };
 		return row;
 	});
 }

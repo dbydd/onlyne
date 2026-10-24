@@ -173,6 +173,23 @@ describe("subagent slices", () => {
 describe("judge state budget", () => {
 	const request = { delivery_kind: "ask", msg: "review this", meta: { to: other } };
 
+	/** The Clef backend serializes with sort_keys=True, so key order decides what a cut keeps. */
+	const sortedJson = (value: unknown): string => {
+		if (Array.isArray(value)) return `[${value.map(sortedJson).join(",")}]`;
+		if (value === null || typeof value !== "object") return JSON.stringify(value);
+		const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+		return `{${entries.map(([name, item]) => `${JSON.stringify(name)}:${sortedJson(item)}`).join(",")}}`;
+	};
+
+	test("the brief survives a cut that the backend applies to sorted state", () => {
+		const history = Array.from({ length: 200 }, (_, index) => ({ role: "tool", text: "x".repeat(500), index }));
+		const brief = { node, host: { idle: true }, request };
+		const serialized = sortedJson(fitState({ brief, history, request }).fitted);
+		expect(serialized.indexOf('"brief"')).toBeLessThan(serialized.indexOf('"history"'));
+		// 16384 tokens is the backend cap; a conservative 3 characters per token still keeps the request.
+		expect(serialized.slice(0, 16384 * 3)).toContain(request.msg);
+	});
+
 	test("a long history is dropped before the current request", () => {
 		const history = Array.from({ length: 200 }, (_, index) => ({ role: "tool", text: "x".repeat(500), index }));
 		const { fitted, dropped, chars } = fitState({ history, request, node });

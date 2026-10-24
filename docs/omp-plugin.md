@@ -332,7 +332,11 @@ pi.registerTool({
 
 判定通过 OMP 的 `judge` 模型角色执行（`resolveJudge`），插件不直连判定服务 URL。角色链、凭据、候选回退与用量记账由 OMP 管理；没有可用候选时返回 `decision_unavailable`，插件不自行补一个判定。
 
-判定输入有字符预算。Clef 后端把一次判定限制在 16 384 token，序列化时按键排序并保留前缀，`history` 排在 `request` 之前，所以长历史会先占满额度、把当前请求整段切掉，模型随后基于残缺输入给出答案。插件在提交前按 `history` → `task_dispatches` → `context_note` 的顺序整段丢弃背景，保留最新证据，`request` 与判定问题永不裁剪；仍然超预算时返回 `decision_unavailable` 并写明所需字符数，不做静默截断。
+判定输入分两层组装。Clef 后端按字母序序列化 state 并保留前缀，所以第一层是 `brief`：名字以 `b` 开头，任何前缀截断都会保留它，里面只放本次判定必需的事实——出站判定的 `request`、入站判定的 `incoming`、todo 判定的 `todo`，外加节点、区域与宿主忙闲。第二层是完整材料（`history`、`task_dispatches`、`thread_dialogue`、`children` 等），装得下就一起给。
+
+第二层自带上限：历史只取最近 40 行、每行文本上限 4 000 字符，超出部分写明省略了多少字符；提交前再按 `history` → `task_dispatches` → `context_note` 的顺序整段丢弃背景，保留最新证据。`request` 与判定问题永不裁剪；仍超预算时返回 `decision_unavailable` 并写明所需字符数。
+
+截断本身被接受：后端切掉的是背景，`brief` 已在最前，模型仍拿得到本次请求与宿主状态。插件不再假定判定窗口会无限增长。
 
 ### 6.1 判定与执行
 
