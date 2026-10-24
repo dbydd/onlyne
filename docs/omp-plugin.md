@@ -569,9 +569,48 @@ Tern 下的原生渲染由 Tern Surface Protocol（TSP）驱动。OMP 用 `TERM_
 2. **上下文清理**：子代理进入 `aborted` 且会话文件不可恢复时，上下文记录标记为 `lost`。不删除记录，历史查询仍需要它。
 3. **故障隔离**：对端不可达、超时或服务崩溃时，操作明确记录为 `unknown`，保留原始报错至 `details.source`，严禁伪报失败或静默丢弃。
 4. **降级路径**：Tern 能力缺失时按 `describe` 返回 `null` 回退到逐行输出。原生渲染不可用时功能保持完整。
-5. **日志排查**：插件运行日志写入 `<project>/.onlyne/logs/plugin.log`，记录节点握手、线索订阅、补充说明路由与消费确认流水。日志不输出认证凭据。
+5. **日志排查**：插件日志走宿主的 `pi.logger`，落在 OMP 的日志文件 `~/.omp/logs/omp.<date>.<pid>.log`，不另建项目内日志文件。事件与字段见 §12。
 
-## 12. 验证状态
+## 12. 日志与静态诊断
+
+每次生命周期转换写一行结构化日志：`message` 是事件名，字段是标识符、状态名或计数。正文、`parts`、`data` 与 `key_ref` 不进入日志；需要正文时按 `(thread, seq)` 回查本地记录。`msg` 的调用意图（`delivery_kind`）会记录，因为它是判定输入的一部分。
+
+事件名统一为 `onlyne.<area>.<verb>`，一次投递可以用同一套 grep 从头跟到尾。
+
+| 事件 | 级别 | 主要字段 | 出现时机 |
+|---|---|---|---|
+| `onlyne.inbound.received` | info | obligation, thread, seq, sender, relation, context, injected | 本地收件行建立 |
+| `onlyne.inbound.duplicate` | debug | sender, message | 同一消息身份再次到达 |
+| `onlyne.inbound.acked` | info | obligation, thread, seq | 关注义务回执完成 |
+| `onlyne.inbound.inject` | debug | thread, seq, context, outcome, reason | 每次注入尝试；outcome 为 `delivered`/`queued`/`waiting`/`skipped`/`consumed` |
+| `onlyne.judge.answered` | info | entry, action, context, ms | 判官给出入站动作，每个条目一次 |
+| `onlyne.judge.failed` | warn | entry, ms, error | 判官不可用或答案不合法 |
+| `onlyne.delivery.sent` | info | entry, action, target, turn/running | 正文交给宿主 |
+| `onlyne.delivery.held` | debug | entry, reason, context | 未投递：判官排队或此前已投递 |
+| `onlyne.consumption.confirmed` | info | thread, seq, context, via | 宿主确认模型读过该条目 |
+| `onlyne.consumption.failed` | warn | entry, context, via, error | 消费确认提交失败 |
+| `onlyne.outbound.admitted` | info | sender, message, target, state, guarantee, code | 出站接纳结果 |
+| `onlyne.outbound.redriven` | info | sender, message, target | 恢复流程重投 |
+| `onlyne.outbound.expired` | info | sender, message, code | 重试窗口关闭 |
+| `onlyne.await.settled` | info | thread, seq, waiters | 在途等待被答复解除 |
+| `onlyne.msg.result` | info | kind, admission, wait, withheld, seq, entry, code, ms | `msg` 工具调用结果 |
+| `onlyne.msg.failed` | warn | kind, ms, error | `msg` 工具调用失败 |
+| `onlyne.maintain.failed` | warn | error | 维护轮次内的步骤失败 |
+| `onlyne.discovery.failed` / `onlyne.discovery.unavailable` | warn | error | 发现源报错或 DNS-SD 不可用 |
+| `onlyne.context.binding.failed` / `onlyne.context.state.failed` | warn | error | 上下文登记或状态更新失败 |
+| `onlyne.ui.failed` | warn | error | 界面动作失败 |
+| `onlyne.listening` | info | endpoint, node, region | 节点启动完成 |
+
+诊断按事件名过滤：
+
+- 来信卡住：先 `grep onlyne.inbound.received`，拿到 `thread/seq`；再查同一 `entry` 的 `inbound.inject`。`outcome=queued` 表示判官选择了排队，只有 `wake` 事件会让它重判；`outcome=delivered` 却没有 `consumption.confirmed`，说明正文已交给宿主但模型没读到，`fragment` 按设计不开启回合。
+- 判官成本异常：统计 `onlyne.judge.answered` 中同一 `entry` 的出现次数。同一 `entry` 多次出现即判定被重放，属于缺陷。
+- 等待不返回：`grep onlyne.await.settled`，再看同一 thread 的 `onlyne.msg.result` 中 `wait` 值。
+- 出站丢失：`onlyne.outbound.admitted` 的 `state` 为 `unknown`/`pending` 时，跟进 `onlyne.outbound.redriven` 与 `onlyne.outbound.expired`。
+
+一轮维护中同一条目可能出现两行 `inbound.inject`（`reconcile` 与 `replayInbox` 各一次）。第二行前必有 `onlyne.delivery.held`，其 `reason` 说明未重复投递；判官只被调用一次。
+
+## 13. 验证状态
 
 当前代码已经接入 SQLite 事务存储、HTTP 节点、msg 调库、OMP judge 角色和自定义消息 API，bootstrap 与查看界面也有组件代码。此前实际运行证明了扩展可加载和显式 msg 列表查询；这些证据没有覆盖集群消息往返或界面操作。
 

@@ -53,6 +53,7 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 				...(signal === undefined ? {} : { signal }),
 				...(ctx.agent.kind === "sub" ? { readOnly: true } : {}),
 			};
+			const started = Date.now();
 			try {
 				const result = await runDecision(scope, () =>
 					runtime.node.client.msg(input, {
@@ -62,15 +63,34 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 				);
 				recordAwaitResult(pi, toolCallId, result, ctx);
 				const visible = visibleResult(result);
+				pi.logger.info("onlyne.msg.result", { kind: input.delivery_kind, ms: Date.now() - started, ...outcomeFacts(result) });
 				return {
 					content: [{ type: "text", text: JSON.stringify({ result: visible }, null, 2) }],
 					details: { result: visible },
 				};
 			} catch (error) {
+				pi.logger.warn("onlyne.msg.failed", {
+					kind: input.delivery_kind, ms: Date.now() - started,
+					error: error instanceof Error ? error.message : String(error),
+				});
 				return failure(error instanceof Error ? error.message : String(error));
 			}
 		},
 	});
+}
+
+/** The facts one `msg` call produced, without the reply body. */
+function outcomeFacts(result: unknown): Record<string, unknown> {
+	if (result === null || typeof result !== "object") return {};
+	const outcome = result as Partial<SendOutcome>;
+	return {
+		...(outcome.admission === undefined ? {} : { admission: outcome.admission }),
+		...(outcome.wait === undefined ? {} : { wait: outcome.wait }),
+		...(outcome.reply_body === undefined ? {} : { withheld: outcome.reply_body === "withheld" }),
+		...(outcome.receipt?.seq === undefined ? {} : { seq: outcome.receipt.seq }),
+		...(outcome.reply === undefined ? {} : { entry: `${outcome.reply.thread_ref.owner}/${outcome.reply.thread_ref.id}/${outcome.reply.seq}` }),
+		...(outcome.error === undefined ? {} : { code: outcome.error.code }),
+	};
 }
 
 /**

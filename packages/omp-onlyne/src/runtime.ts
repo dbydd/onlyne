@@ -123,13 +123,13 @@ class OmpRuntime implements PluginRuntime {
 				this.discoveryError = undefined;
 				this.changed();
 			},
-			onError: error => { this.discoveryError = errorText(error); this.pi.logger.warn("onlyne discovery failed", { error: errorText(error) }); },
+			onError: error => { this.discoveryError = errorText(error); this.pi.logger.warn("onlyne.discovery.failed", { error: errorText(error) }); },
 		});
-		try { await this.network.start(); } catch (error) { this.pi.logger.warn("onlyne DNS-SD discovery is unavailable", { error: errorText(error) }); }
+		try { await this.network.start(); } catch (error) { this.pi.logger.warn("onlyne.discovery.unavailable", { error: errorText(error) }); }
 		await this.contexts.ensureMain();
 		await this.node.client.recover(this.controller.signal);
 		this.timer = this.main.setInterval(() => this.maintain(), this.timerMs);
-		this.pi.logger.info("onlyne listening", { endpoint: this.endpoint, node: this.config.node.id, region: this.config.region });
+		this.pi.logger.info("onlyne.listening", { endpoint: this.endpoint, node: this.config.node.id, region: this.config.region });
 	}
 	/** An inbound admission or a send flips the loop back to its active cadence. */
 	wake(): void {
@@ -156,7 +156,7 @@ class OmpRuntime implements PluginRuntime {
 			// candidate be dropped rather than lingering as a permanent stale row.
 			if (rediscover) steps.push(() => this.node.discovery.refresh(this.controller.signal));
 			for (const step of steps) {
-				try { await step(); } catch (error) { if (!this.closed) this.pi.logger.warn("onlyne maintenance failed", { error: errorText(error) }); }
+				try { await step(); } catch (error) { if (!this.closed) this.pi.logger.warn("onlyne.maintain.failed", { error: errorText(error) }); }
 			}
 			void this.rearm();
 		})();

@@ -129,7 +129,7 @@ export function registerUi(pi: ExtensionAPI): void {
 			} catch (error) {
 				if (!controller.signal.aborted) {
 					const message = error instanceof Error ? error.message : String(error);
-					pi.logger.warn("onlyne UI failed", { error: message });
+					pi.logger.warn("onlyne.ui.failed", { error: message });
 					ctx.ui.notify(message, "error");
 				}
 			} finally {

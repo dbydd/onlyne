@@ -134,13 +134,34 @@ export type Action =
   | { kind: 'read'; scope: 'directory' | 'threads' | 'inbox' | 'messages' | 'message' | 'evidence'; thread?: ThreadRef; message?: MessageRef; seq?: string; cursor?: string; page_size?: number; attention?: 'inbox' | 'thread' }
   | { kind: 'thread'; op: 'create' | 'close' | 'list' | 'describe' | 'member_add' | 'member_remove'; thread?: ThreadRef; to?: NodeId; title?: string }
   | { kind: 'resource'; resource: ResourceRef; operation: string; data?: Json; expected_revision?: string };
+/**
+ * One lifecycle transition of the local node, emitted for offline diagnosis. Every field is an
+ * identifier, a state name or a count: message bodies and credentials never appear here.
+ */
+export type TraceEvent =
+  | { event: 'inbound.received'; obligation: string; thread: ThreadRef; seq: string; sender: NodeId; relation?: 'reply' | 'followup'; valid: boolean; context?: string; injected: boolean }
+  | { event: 'inbound.duplicate'; sender: NodeId; message: string }
+  | { event: 'inbound.acked'; obligation: string; thread: ThreadRef; seq: string }
+  | { event: 'inbound.inject'; thread: ThreadRef; seq: string; context: string; outcome: InjectOutcome; reason?: string }
+  | { event: 'consumption.confirmed'; thread: ThreadRef; seq: string; context: string; via: 'fragment' | 'tool_result' }
+  | { event: 'outbound.admitted'; sender: NodeId; message: string; target: string; state: string; guarantee?: string; code?: string }
+  | { event: 'outbound.redriven'; sender: NodeId; message: string; target: string }
+  | { event: 'outbound.expired'; sender: NodeId; message: string; code: string }
+  | { event: 'await.settled'; thread: ThreadRef; seq: string; waiters: number };
+/** What the host did with one inbound entry, reported back with the injection result. */
+export type InjectOutcome = 'delivered' | 'queued' | 'waiting' | 'skipped' | 'consumed';
 export interface Runtime {
   supports(plan: DeliveryPlan): Promise<boolean>;
   /** Submission returns consumed:false; an observed request boundary may confirm it later. */
-  inject(entry: Entry, context?: string, plan?: DeliveryPlan): Promise<{ context: string; consumed: boolean }>;
+  inject(entry: Entry, context?: string, plan?: DeliveryPlan): Promise<{ context: string; consumed: boolean; outcome?: InjectOutcome }>;
   todo?(entry: Entry, context: string): Promise<void>;
   /** The host may drop to an idle cadence; an admission or a settled reply flips it back. */
   wake?(): void;
+  /**
+   * Optional structured trace. The node calls it on every lifecycle transition; the host maps
+   * it onto its own log, so a delivery can be followed from admission to consumption offline.
+   */
+  trace?(event: TraceEvent): void;
   /**
    * Called by the host once it observes that the model consumed an `await` tool result
    * (RFC 0008 §5). The library records that as the shared consumption for the entry's

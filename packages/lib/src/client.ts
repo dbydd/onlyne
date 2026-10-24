@@ -2,7 +2,7 @@ import type { Context } from './core.js';
 import { canonical, decimal, fail, key, requireValue, utc } from './core.js';
 import type {
   Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Json, LocalAttention,
-  Message, MessageQuery, MsgInput, Mutation, Outbound, Page, PageOptions, SendRequest,
+  InjectOutcome, Message, MessageQuery, MsgInput, Mutation, Outbound, Page, PageOptions, SendRequest, TraceEvent,
   Thread, ThreadRef, Transaction, Transport,
 } from './types.js';
 import type { MessageService } from './messages.js';
@@ -255,13 +255,28 @@ export class OnlyneClient {
             state: 'unknown',
             error: { code: 'retry_window_expired', message: 'The window closed before this node learned the admission.', retryable: false },
           });
+          this.#trace({ event: 'outbound.expired', sender: row.request.message.sender, message: row.request.message.id, code: 'retry_window_expired' });
         }
         continue;
       }
       // A recovered record has no caller left to consume a reply, so recovery re-drives the
       // delivery and lets reconciliation surface any answer through the local inbox.
+      this.#trace({ event: 'outbound.redriven', sender: row.request.message.sender, message: row.request.message.id, target: row.request.target_endpoint });
       await this.#transmit({ ...row, state: 'pending' }, signal);
     }
+  }
+
+  /** One structured line per lifecycle transition; the host decides where the line lands. */
+  #trace(event: TraceEvent): void {
+    try { this.#ctx.options.plugins.runtime?.trace?.(event); } catch { /* a tracing fault never breaks delivery */ }
+  }
+
+  #injectTrace(entry: Entry, record: LocalAttention, outcome: InjectOutcome, reason?: string, context?: string): void {
+    this.#trace({
+      event: 'inbound.inject', thread: entry.thread_ref, seq: entry.seq,
+      context: context ?? record.context ?? this.#ctx.options.node_id, outcome,
+      ...(reason === undefined ? {} : { reason }),
+    });
   }
 
   /** Appends to a thread this node hosts: no outbound record, no peer, no network. */
@@ -296,15 +311,29 @@ export class OnlyneClient {
   async receive(entry: Entry, obligation_id: string, context?: string): Promise<LocalAttention> {
     const attention: Attention = attentionOf(entry, obligation_id, this.#ctx.options.node_id);
     const valid = this.#attest(attention, entry.thread_ref.owner);
+    let duplicate = false;
     const queued: LocalAttention = valid
       ? await this.#ctx.storage.transaction(async tx => {
           const stored = await tx.get<LocalAttention>(inboxKey(obligation_id));
-          if (stored !== undefined) return stored;
+          if (stored !== undefined) {
+            duplicate = true;
+            return stored;
+          }
           const record: LocalAttention = { attention, ...(context === undefined ? {} : { context }), injected: false };
           await tx.put(inboxKey(obligation_id), record);
           return record;
         })
       : { attention, ...(context === undefined ? {} : { context }), injected: false };
+
+    const relation = entry.message.meta?.relation;
+    this.#trace(duplicate
+      ? { event: 'inbound.duplicate', sender: entry.message.sender, message: entry.message.id }
+      : {
+          event: 'inbound.received', obligation: obligation_id, thread: entry.thread_ref, seq: entry.seq,
+          sender: entry.message.sender, valid, injected: queued.injected,
+          ...(relation === 'reply' || relation === 'followup' ? { relation } : {}),
+          ...(queued.context === undefined ? {} : { context: queued.context }),
+        });
 
     // `receipt` and `followup` never release a waiter; only a reply to the original does.
     if (valid) this.#settle(entry);
@@ -563,11 +592,20 @@ export class OnlyneClient {
       const receipt = await this.#remote<NonNullable<Outbound['receipt']>>(
         request.target_endpoint, 'POST', path, request, signal, this.#attempt(record));
       await this.#commit(record, { state: 'accepted', receipt });
+      const guarantee = (receipt as { guarantee?: unknown }).guarantee;
+      this.#trace({
+        event: 'outbound.admitted', sender: request.message.sender, message: request.message.id,
+        target: request.target_endpoint, state: 'accepted', ...(typeof guarantee === 'string' ? { guarantee } : {}),
+      });
       return { admission: 'accepted', receipt };
     } catch (error) {
       if (signal?.aborted) throw error;
       const failure = failureOf(error);
       await this.#commit(record, { state: admissionOf(failure), error: failure });
+      this.#trace({
+        event: 'outbound.admitted', sender: request.message.sender, message: request.message.id,
+        target: request.target_endpoint, state: admissionOf(failure), code: failure.code,
+      });
       const stored = await this.#ctx.storage.transaction(tx => tx.get<StoredOutbound>(outboundKey(request.message.sender, request.message.id)));
       return {
         admission: stored?.state ?? admissionOf(failure),
@@ -650,6 +688,7 @@ export class OnlyneClient {
       held.delete(consumedIn);
       if (held.size === 0) this.#held.delete(identity);
     }
+    this.#trace({ event: 'consumption.confirmed', thread: entry.thread_ref, seq: entry.seq, context: consumedIn, via });
     await this.#deliverTodo(entry, consumedIn);
   }
 
@@ -801,9 +840,14 @@ export class OnlyneClient {
 
   /** Releases every live await whose original this entry answers, in this process. */
   #settle(entry: Entry): void {
+    let settled = 0;
     for (const waiter of this.#waiters.values()) {
-      if (waiter.expected_author === entry.authenticated_author && isReply(waiter.original, entry)) waiter.settle(entry);
+      if (waiter.expected_author === entry.authenticated_author && isReply(waiter.original, entry)) {
+        waiter.settle(entry);
+        settled++;
+      }
     }
+    if (settled > 0) this.#trace({ event: 'await.settled', thread: entry.thread_ref, seq: entry.seq, waiters: settled });
   }
 
   /**
@@ -832,6 +876,7 @@ export class OnlyneClient {
   async #ack(ref: ThreadRef, obligation_id: string): Promise<void> {
     const mutation: Mutation = { idempotency_key: this.#ctx.id(), retry_until: this.#window(undefined) };
     const path = `/threads/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}/attention/${encodeURIComponent(obligation_id)}/ack`;
+    let acked: { thread: ThreadRef; seq: string } | undefined;
     try {
       if (ref.owner === this.#ctx.options.node_id) await this.#messages.ack(this.#auth(), ref, obligation_id, mutation);
       else await this.#remote(ref.owner, 'POST', path, mutation, undefined, this.#ctx.options.wait_ms ?? 60_000);
@@ -843,8 +888,10 @@ export class OnlyneClient {
       const stored = await tx.get<LocalAttention>(inboxKey(obligation_id));
       if (stored !== undefined && !stored.attention.acked) {
         await tx.put(inboxKey(obligation_id), { ...stored, attention: { ...stored.attention, acked: true } });
+        acked = { thread: stored.attention.thread_ref, seq: stored.attention.seq };
       }
     });
+    if (acked !== undefined) this.#trace({ event: 'inbound.acked', obligation: obligation_id, thread: acked.thread, seq: acked.seq });
   }
 
   /**
@@ -854,7 +901,8 @@ export class OnlyneClient {
    */
   async #consume(entry: Entry, record: LocalAttention): Promise<void> {
     const runtime = this.#ctx.options.plugins.runtime;
-    if (runtime === undefined || record.injected) return;
+    if (runtime === undefined) { this.#injectTrace(entry, record, 'skipped', 'no-runtime'); return; }
+    if (record.injected) { this.#injectTrace(entry, record, 'skipped', 'injected'); return; }
     const related = entry.message.meta?.in_reply_to;
     const outbound = related?.sender === this.#ctx.options.node_id
       ? await this.#ctx.storage.transaction(tx => tx.get<StoredOutbound>(outboundKey(related.sender, related.id)))
@@ -865,17 +913,19 @@ export class OnlyneClient {
     // An await that owns this reply's body in that context either still holds the call or
     // already returned it as a tool result. Presenting the same body as a fragment here
     // would duplicate it; the await's confirmation releases the hold.
-    if (this.isWaitingReply(entry, requested)) return;
+    if (this.isWaitingReply(entry, requested)) { this.#injectTrace(entry, record, 'waiting', 'await-hold', requested); return; }
     // The entry may already be confirmed consumed in that context through an awaited tool
     // result; presenting it again as a fragment is the duplicate RFC 0008 §5 forbids. The
     // shared record and the todo it owes are then all that is left to write.
     if (await this.#alreadyConsumed(entry, requested)) {
+      this.#injectTrace(entry, record, 'consumed', 'already-consumed', requested);
       await this.confirmConsumption(entry, requested, 'tool_result');
       return;
     }
-    const { context, consumed } = await runtime.inject(entry, requested, record.attention.plan);
-    if (!consumed) return;
-    await this.confirmConsumption(entry, context, 'fragment');
+    const injected = await runtime.inject(entry, requested, record.attention.plan);
+    this.#injectTrace(entry, record, injected.outcome ?? (injected.consumed ? 'consumed' : 'delivered'), undefined, injected.context);
+    if (!injected.consumed) return;
+    await this.confirmConsumption(entry, injected.context, 'fragment');
   }
 
   /**

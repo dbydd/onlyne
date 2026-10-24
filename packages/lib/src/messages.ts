@@ -39,6 +39,7 @@ export class MessageService {
       if (bound && (bound.digest !== requestDigest || bound.identity !== identity)) fail('id_conflict', 'The idempotency key is bound to another request.');
       const old = await tx.get<Remembered>(identity);
       if (old) {
+        this.ctx.options.plugins.runtime?.trace?.({ event: 'inbound.duplicate', sender: message.sender, message: message.id });
         // A different body never replaces the identity already recorded, accepted or refused.
         if (old.digest !== digest) return { error: new OnlyneError('id_conflict', 'This message identity has different content.').error };
         if (old.error) return { error: old.error };
@@ -204,6 +205,13 @@ export class MessageService {
       attention: attested,
       ...(plan.context === undefined ? {} : { context: plan.context }),
       injected: false,
+    });
+    this.ctx.options.plugins.runtime?.trace?.({
+      event: 'inbound.received', obligation: attested.obligation_id, thread: attested.thread_ref,
+      seq: attested.seq, sender: attested.message_ref.sender, valid: true, injected: false,
+      ...(plan.context === undefined ? {} : { context: plan.context }),
+      ...(attested.entry?.message.meta?.relation === 'reply' || attested.entry?.message.meta?.relation === 'followup'
+        ? { relation: attested.entry.message.meta.relation } : {}),
     });
   }
 

@@ -30,7 +30,7 @@ export function registerContextBinding(pi: ExtensionAPI): void {
 				await bind(runtime, alias, id);
 			}
 		} catch (error) {
-			pi.logger.warn("onlyne context binding failed", {
+			pi.logger.warn("onlyne.context.binding.failed", {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
@@ -125,7 +125,7 @@ function stateOf(status: string): "idle" | "running" | "parked" | "lost" {
 
 function report(pi: ExtensionAPI): (error: unknown) => void {
 	return error => {
-		pi.logger.warn("onlyne context state update failed", {
+		pi.logger.warn("onlyne.context.state.failed", {
 			error: error instanceof Error ? error.message : String(error),
 		});
 	};

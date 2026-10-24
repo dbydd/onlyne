@@ -1,4 +1,4 @@
-import { OnlyneError, type DeliveryPlan, type Entry, type Runtime } from "@onlyne/lib";
+import { OnlyneError, type DeliveryPlan, type Entry, type Runtime, type TraceEvent } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -35,26 +35,61 @@ const inboundAttempts = new Map<string, InboundAttempt>();
 function inboundKey(entry: Entry): string {
 	return `${entry.thread_ref.owner}/${entry.thread_ref.id}/${entry.seq}`;
 }
+/** Transitions that repeat every maintenance pass once a record is decided. */
+const TRACE_DEBUG = new Set(["inbound.inject", "inbound.duplicate"]);
+
 export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 	return {
 		async supports(plan: DeliveryPlan): Promise<boolean> {
 			if (plan.execution !== "new") return true;
 			return taskTool(deps.main) !== undefined;
 		},
+		trace: (event: TraceEvent) => {
+			const fields = { ...event } as Record<string, unknown>;
+			const name = String(fields.event);
+			delete fields.event;
+			const thread = fields.thread as { owner?: unknown; id?: unknown } | undefined;
+			if (thread !== undefined) fields.thread = `${String(thread.owner)}/${String(thread.id)}`;
+			if (TRACE_DEBUG.has(name)) deps.pi.logger.debug(`onlyne.${name}`, fields);
+			else deps.pi.logger.info(`onlyne.${name}`, fields);
+		},
 		async inject(entry: Entry, context?: string, plan?: DeliveryPlan) {
-			if (plan?.execution === "new") return { context: await startSubagent(deps, entry), consumed: true };
+			if (plan?.execution === "new") return { context: await startSubagent(deps, entry), consumed: true, outcome: "consumed" as const };
 			const key = inboundKey(entry);
-			const attempt = inboundAttempts.get(key) ?? { decision: await deps.decider.decideInbound(deps.main, entry) };
-			inboundAttempts.set(key, attempt);
+			let attempt = inboundAttempts.get(key);
+			if (attempt === undefined) {
+				const started = Date.now();
+				let decision: InboundDecision;
+				try {
+					decision = await deps.decider.decideInbound(deps.main, entry);
+				} catch (error) {
+					deps.pi.logger.warn("onlyne.judge.failed", {
+						entry: key, ms: Date.now() - started, error: error instanceof Error ? error.message : String(error),
+					});
+					throw error;
+				}
+				attempt = { decision };
+				inboundAttempts.set(key, attempt);
+				deps.pi.logger.info("onlyne.judge.answered", {
+					entry: key, action: decision.action, ms: Date.now() - started,
+					...(decision.context === undefined ? {} : { context: decision.context }),
+				});
+			}
 			const { decision } = attempt;
-			if (decision.action === "queue") return { context: context ?? deps.main.agent.id, consumed: false };
+			if (decision.action === "queue") {
+				deps.pi.logger.debug("onlyne.delivery.held", { entry: key, reason: "queue" });
+				return { context: context ?? deps.main.agent.id, consumed: false, outcome: "queued" as const };
+			}
 			if (decision.action === "new_subagent") {
 				attempt.landed ??= await startSubagent(deps, entry);
-				return { context: attempt.landed, consumed: true };
+				return { context: attempt.landed, consumed: true, outcome: "consumed" as const };
 			}
 			// The body is already where the decision put it; re-sending it would append a
 			// second copy that the cursor can only confirm once.
-			if (attempt.landed !== undefined) return { context: attempt.landed, consumed: false };
+			if (attempt.landed !== undefined) {
+				deps.pi.logger.debug("onlyne.delivery.held", { entry: key, reason: "already-delivered", context: attempt.landed });
+				return { context: attempt.landed, consumed: false, outcome: "delivered" as const };
+			}
 			if (decision.action === "context") {
 				const alias = decision.context;
 				if (alias === undefined) throw new OnlyneError("decision_unavailable", "The inbound decision named no context.");
@@ -63,13 +98,15 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				const token = registerPending(entry, record.agent_id, "fragment");
 				await deliverToContext(record.agent_id, payload(entry, SUPPLEMENT, token), record.state === "running");
 				attempt.landed = record.agent_id;
-				return { context: record.agent_id, consumed: false };
+				deps.pi.logger.info("onlyne.delivery.sent", { entry: key, action: "context", target: record.agent_id, running: record.state === "running" });
+				return { context: record.agent_id, consumed: false, outcome: "delivered" as const };
 			}
 			const token = registerPending(entry, deps.main.agent.id, "fragment");
 			if (decision.action === "wake") deps.pi.sendMessage(payload(entry, INBOUND, token), { triggerTurn: true });
 			else deps.pi.sendMessage(payload(entry, INBOUND, token), { deliverAs: "nextTurn" });
 			attempt.landed = deps.main.agent.id;
-			return { context: deps.main.agent.id, consumed: false };
+			deps.pi.logger.info("onlyne.delivery.sent", { entry: key, action: decision.action, target: deps.main.agent.id, turn: decision.action === "wake" });
+			return { context: deps.main.agent.id, consumed: false, outcome: "delivered" as const };
 		},
 		todo: async (entry, context) => {
 			inboundAttempts.delete(inboundKey(entry));
@@ -139,7 +176,10 @@ export function registerProviderBoundary(pi: ExtensionAPI): void {
 				});
 				pending.delete(token);
 			} catch (error) {
-				pi.logger.warn("onlyne consumption confirmation failed", { error: error instanceof Error ? error.message : String(error) });
+				pi.logger.warn("onlyne.consumption.failed", {
+					entry: inboundKey(record.entry), context: record.context, via: record.kind,
+					error: error instanceof Error ? error.message : String(error),
+				});
 			}
 		}
 	});
