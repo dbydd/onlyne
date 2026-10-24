@@ -6,6 +6,7 @@ export { MessageService } from './messages.js';
 export { createResourceService } from './resources.js';
 export type { ResourceService, HandoverInvitation } from './resources.js';
 export { DomainService } from './domains.js';
+export { DiscoveryService } from './discovery.js';
 export { OnlyneClient } from './client.js';
 export type { SendOutcome, SendOptions, MsgOptions } from './client.js';
 export { FetchTransport } from './transport.js';

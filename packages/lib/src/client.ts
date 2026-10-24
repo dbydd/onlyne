@@ -3,7 +3,7 @@ import { canonical, decimal, fail, key, requireValue, utc } from './core.js';
 import type {
   Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Json, LocalAttention,
   Message, MessageQuery, MsgInput, Mutation, Outbound, Page, PageOptions, SendRequest,
-  Thread, ThreadRef, Transport,
+  Thread, ThreadRef, Transaction, Transport,
 } from './types.js';
 import type { MessageService } from './messages.js';
 import type { ResourceService } from './resources.js';
@@ -30,23 +30,30 @@ export interface SendOptions {
   retry_until?: string;
   idempotency_key?: string;
   expected_author?: string;
+  /**
+   * The sender's own consumption identity for the awaited reply (RFC 0008 §5). It stays
+   * local and never stands in for the wire plan's receiver-side context.
+   */
+  context?: string;
 }
 
 export interface MsgOptions {
   signal?: AbortSignal;
-  /** Runtime context an injected entry lands in; the host decides, the library never guesses. */
+  /** The sender's own consumption identity for an awaited reply; `msg` passes it to `send`. */
   context?: string;
 }
 
 interface Waiter {
   original: Message;
   expected_author: string;
+  /** The sender-local context this await consumes its reply in; absent for a generic caller. */
+  local_context?: string;
   outcome: Promise<Entry>;
   settle(entry: Entry): void;
 }
 
-/** An outbound record plus the digest that fixes its message identity. */
-interface StoredOutbound extends Outbound { digest?: string }
+/** An outbound record plus the digest that fixes its message identity and the sender's own consumption identity. */
+interface StoredOutbound extends Outbound { digest?: string; local_context?: string }
 
 /** Codes the peer records as a terminal refusal before acceptance (RFC 0003 §5). */
 const TERMINAL: Record<string, true> = {
@@ -103,17 +110,35 @@ function isReply(original: Pick<Message, 'sender' | 'id'>, entry: Entry): boolea
   return entry.authenticated_author !== original.sender;
 }
 
+/** Replay order is the thread's own: `(owner, id)` then `seq` as a number, never a UUID sort. */
+function replayOrder(a: Entry | undefined, b: Entry | undefined): number {
+  if (a === undefined) return b === undefined ? 0 : -1;
+  if (b === undefined) return 1;
+  if (a.thread_ref.owner !== b.thread_ref.owner) return a.thread_ref.owner < b.thread_ref.owner ? -1 : 1;
+  if (a.thread_ref.id !== b.thread_ref.id) return a.thread_ref.id < b.thread_ref.id ? -1 : 1;
+  const left = decimal(a.seq);
+  const right = decimal(b.seq);
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 const outboundKey = (sender: string, id: string) => key('outbound', sender, id);
 const inboxKey = (obligation_id: string) => key('inbox', obligation_id);
 const replyKey = (original: Pick<Message, 'sender' | 'id'>) => key('reply', original.sender, original.id);
 /** One consumption slot per `(context, ThreadRef, seq)`, shared by every delivery path (RFC 0004 §5). */
 const consumptionKey = (context: string, thread_ref: ThreadRef, seq: string) => key('consumed', context, thread_ref.owner, thread_ref.id, seq);
+/** The todo one consumed entry owes the host, until its hook succeeds. */
+const todoKey = (context: string, thread_ref: ThreadRef, seq: string) => key('todo', context, thread_ref.owner, thread_ref.id, seq);
+/** In-process identity of one thread entry: its `ThreadRef` and sequence. */
+const entryKey = (thread_ref: ThreadRef, seq: string) => key(thread_ref.owner, thread_ref.id, seq);
 
 /** Confirmed consumption for one slot, written by whichever path the host confirmed. */
 interface ConsumptionRecord {
   context: string; thread_ref: ThreadRef; seq: string;
   confirmed: boolean; via: 'tool_result' | 'fragment'; at: string;
 }
+
+/** A todo the host still owes for one consumed entry; `done` is written after its hook succeeds. */
+interface PendingTodo { entry: Entry; context: string; done: boolean }
 
 /** The durable part of an obligation: identity and owner-attested facts, body optional. */
 function attentionOf(entry: Entry, obligation_id: string, recipient: string): Attention {
@@ -133,6 +158,8 @@ export class OnlyneClient {
   readonly #domains: DomainService;
   /** Live waiters, keyed by the original message; an entry lives only while its `send` runs. */
   readonly #waiters = new Map<string, Waiter>();
+  /** Replies already returned as tool results, per context, held until consumption confirms them. */
+  readonly #held = new Map<string, Set<string>>();
 
   constructor(
     ctx: Context, transport: Transport, messages: MessageService, threads: ThreadService,
@@ -177,20 +204,27 @@ export class OnlyneClient {
     const digest = messageDigest(request);
     // The same message identity with different content is a conflict, never a rewrite:
     // the slot keeps the first request and the caller sends a new message id instead.
-    const prior = await ctx.storage.transaction(async tx => {
+    const record = await ctx.storage.transaction(async tx => {
       const stored = await tx.get<StoredOutbound>(slot);
       if (stored !== undefined) {
         if ((stored.digest ?? messageDigest(stored.request)) !== digest) {
           fail('id_conflict', 'This message identity is already bound to different content.');
         }
-        return stored;
+        // A re-drive of the same message keeps the first request identity, which the peer
+        // dedupes on; the consumption identity belongs to the caller waiting now, not to
+        // the delivery, so a caller that names another one replaces the stale slot.
+        if (options.context === undefined || stored.local_context === options.context) return stored;
+        const updated: StoredOutbound = { ...stored, local_context: options.context };
+        await tx.put(slot, updated);
+        return updated;
       }
-      const fresh: StoredOutbound = { request, expected_author: options.expected_author ?? to, state: 'pending', digest };
+      const fresh: StoredOutbound = {
+        request, expected_author: options.expected_author ?? to, state: 'pending', digest,
+        ...(options.context === undefined ? {} : { local_context: options.context }),
+      };
       await tx.put(slot, fresh);
-      return undefined;
+      return fresh;
     });
-    // A re-drive of the same message keeps the first request identity; the peer dedupes on it.
-    const record: StoredOutbound = prior ?? { request, expected_author: options.expected_author ?? to, state: 'pending', digest };
 
     if (plan.response !== 'await') return this.#transmit(record, options.signal);
 
@@ -302,26 +336,70 @@ export class OnlyneClient {
   }
 
   /**
-   * Delivers outstanding owner grant notices, re-injects entries whose durable record
-   * never reached the model, then reconciles. Caller-scheduled.
+   * Delivers outstanding owner grant notices, replays owed todos and entries whose durable
+   * record never reached the model, then reconciles. Replay follows each thread's own order:
+   * `owner`, `id`, then `seq` as a number. One record that fails never starves the rest, and
+   * the failures are thrown after the pass with their records still owed for the next one.
+   * Caller-scheduled.
    */
   async maintain(signal?: AbortSignal): Promise<void> {
     await this.#deliverGrants(signal);
     if (signal?.aborted) return;
     await this.#confirmGrants(signal);
     if (signal?.aborted) return;
+    const failures: unknown[] = [];
+    // Owed todos replay before the inbox pass, so a hook that fails now waits for the next
+    // pass instead of being retried inside this one.
+    await this.#replayTodos(signal, failures);
+    if (signal?.aborted) return;
+    await this.#replayInbox(signal, failures);
+    if (signal?.aborted) return;
+    try {
+      await this.reconcile(signal);
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, 'Some owed records could not be settled; the rest were.');
+  }
+
+  /** Replays todos that are owed but whose hook has not succeeded, in thread order. */
+  async #replayTodos(signal: AbortSignal | undefined, failures: unknown[]): Promise<void> {
+    const owed = await this.#ctx.storage.transaction(async tx =>
+      (await tx.scan<PendingTodo>(key('todo') + '/')).map(row => row.value).filter(row => !row.done));
+    owed.sort((a, b) => replayOrder(a.entry, b.entry));
+    for (const row of owed) {
+      if (signal?.aborted) return;
+      try {
+        await this.#deliverTodo(row.entry, row.context);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+  }
+
+  /**
+   * Replays inbox records the model has not seen. A record already delivered is skipped, but
+   * an entry durable here still answers a live await, and its owed todo replays above even
+   * when the record is already injected.
+   */
+  async #replayInbox(signal: AbortSignal | undefined, failures: unknown[]): Promise<void> {
     const queued = await this.#ctx.storage.transaction(async tx =>
       (await tx.scan<LocalAttention>(key('inbox') + '/')).map(row => row.value));
+    queued.sort((a, b) => replayOrder(a.attention.entry, b.attention.entry));
     for (const record of queued) {
       if (signal?.aborted) return;
-      if (record.attention.entry === undefined) continue;
+      const entry = record.attention.entry;
+      if (entry === undefined) continue;
       // An entry already durable here answers a live await even when the runtime never saw it.
-      this.#settle(record.attention.entry);
+      this.#settle(entry);
       if (record.injected || record.attention.disposition === 'expired') continue;
-      await this.#consume(record.attention.entry, record);
+      try {
+        await this.#consume(entry, record);
+      } catch (error) {
+        failures.push(error);
+      }
     }
-    if (signal?.aborted) return;
-    await this.reconcile(signal);
   }
 
   // ---- the single agent entry --------------------------------------------------
@@ -372,7 +450,10 @@ export class OnlyneClient {
     if (target.node_id !== action.to) {
       fail('unavailable', 'The resolver answered with another identity than the decision named.');
     }
-    return this.send(target.node_id, message, plan, options.signal === undefined ? {} : { signal: options.signal });
+    return this.send(target.node_id, message, plan, {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.context === undefined ? {} : { context: options.context }),
+    });
   }
 
   // ---- internals ---------------------------------------------------------------
@@ -487,45 +568,95 @@ export class OnlyneClient {
     const reply = await this.#awaitOutcome(record, waiter, signal);
     if (reply.reply === undefined) return reply;
     // A body already confirmed consumed in this context is rendered as arrival facts only
-    // (RFC 0008 §5). The plan's context wins; otherwise the context the fragment path
-    // consumed in is the same consumer, and with neither the awaiting node is it.
-    const context = record.request.plan.context
-      ?? await this.#fragmentContextFor(reply.reply)
-      ?? this.#ctx.options.node_id;
-    // A fragment already confirmed the body, so this tool result reports arrival facts only.
+    // (RFC 0008 §5). The sender's own consumption identity decides; the plan's context
+    // belongs to the receiver and is never this caller's. A generic caller that names none
+    // is the node itself.
+    const context = record.local_context ?? this.#ctx.options.node_id;
     const consumed = await this.#alreadyConsumed(reply.reply, context);
+    // The body is now in the caller's hands as a tool result: hold it until the host confirms
+    // consumption, so no automatic fragment presents the same body in that context again. A
+    // wait that is cancelled or times out returns no reply, so it never places a hold.
+    if (!consumed) {
+      const identity = entryKey(reply.reply.thread_ref, reply.reply.seq);
+      const held = this.#held.get(identity) ?? new Set<string>();
+      this.#held.set(identity, held.add(context));
+    }
     // Returning the body does not by itself write the record: RFC 0008 §5 forbids advancing
-    // consumption on a submitted tool result. The host calls `confirmToolResult` once it has
+    // consumption on a submitted tool result. The host calls `confirmConsumption` once it has
     // observed the model consume the result.
     return { ...reply, ...(consumed ? { reply_body: 'withheld' as const } : {}) };
   }
 
   /**
-   * The host's confirmation that the model consumed an awaited tool result in `context`
-   * (RFC 0008 §5). This is the only writer of a tool-result consumption record: submitting
-   * a result, releasing a waiter and a void host return all prove nothing.
+   * `confirmConsumption(entry, context?, via = 'fragment'): Promise<void>`
+   *
+   * The host's confirmation that this entry's body was consumed by the path it names
+   * (RFC 0008 §5). One commit writes the shared consumption slot, marks every matching inbox
+   * record delivered, and records the todo this consumption owes; the host's todo hook runs
+   * outside that commit, and the todo is filed where the model saw the body. `context` names
+   * that place; with none, the context the entry landed in decides, then this node. A failing
+   * hook leaves the todo owed, so `maintain` replays it, and replaying is safe because the
+   * host commits the todo it creates. This also releases the hold an awaited tool result
+   * placed on the entry for that context.
    */
-  async confirmToolResult(entry: Entry, context?: string): Promise<void> {
-    const where = context ?? this.#ctx.options.node_id;
-    await this.#ctx.storage.transaction(async tx => {
+  async confirmConsumption(entry: Entry, context?: string, via: ConsumptionRecord['via'] = 'fragment'): Promise<void> {
+    const at = new Date(this.#ctx.now()).toISOString();
+    const consumedIn = await this.#ctx.storage.transaction(async tx => {
+      // A row keeps the context the entry landed in; the confirmation context only fills in
+      // for a row that names none.
+      let original: string | undefined;
+      for (const row of await tx.scan<LocalAttention>(key('inbox') + '/')) {
+        const held = row.value.attention.entry;
+        if (held === undefined) continue;
+        if (held.thread_ref.owner !== entry.thread_ref.owner || held.thread_ref.id !== entry.thread_ref.id) continue;
+        if (held.seq !== entry.seq) continue;
+        original = original ?? row.value.context;
+        if (row.value.injected) continue;
+        const landed = row.value.context ?? context;
+        await tx.put(row.key, { ...row.value, injected: true, ...(landed === undefined ? {} : { context: landed }) });
+      }
+      const where = context ?? original ?? this.#ctx.options.node_id;
       const slot = consumptionKey(where, entry.thread_ref, entry.seq);
       const stored = await tx.get<ConsumptionRecord>(slot);
       if (stored?.confirmed !== true) {
         await tx.put<ConsumptionRecord>(slot, {
-          context: where, thread_ref: entry.thread_ref, seq: entry.seq,
-          confirmed: true, via: 'tool_result', at: new Date(this.#ctx.now()).toISOString(),
+          context: where, thread_ref: entry.thread_ref, seq: entry.seq, confirmed: true, via, at,
         });
       }
-      // The same context's obligation is delivered by this rendering, in the same commit.
-      for (const row of await tx.scan<LocalAttention>(key('inbox') + '/')) {
-        const local = row.value;
-        const held = local.attention.entry;
-        if (held === undefined || local.injected) continue;
-        if (held.thread_ref.owner !== entry.thread_ref.owner || held.thread_ref.id !== entry.thread_ref.id) continue;
-        if (held.seq !== entry.seq) continue;
-        await tx.put(row.key, { ...local, injected: true, context: local.context ?? where });
-      }
+      await this.#oweTodo(tx, entry, where);
+      return where;
     });
+    const identity = entryKey(entry.thread_ref, entry.seq);
+    const held = this.#held.get(identity);
+    if (held !== undefined) {
+      held.delete(consumedIn);
+      if (held.size === 0) this.#held.delete(identity);
+    }
+    await this.#deliverTodo(entry, consumedIn);
+  }
+
+  /** `confirmToolResult(entry, context?): Promise<void>`: the same settlement for an awaited tool result. */
+  async confirmToolResult(entry: Entry, context?: string): Promise<void> {
+    await this.confirmConsumption(entry, context, 'tool_result');
+  }
+
+  /**
+   * `isWaitingReply(entry, context?): boolean`
+   *
+   * Whether this entry answers an `await` that owns its body here, optionally only one whose
+   * sender-local context is `context`: a waiter still running, or a reply already returned as
+   * a tool result and not yet confirmed consumed. A host defers the automatic fragment on
+   * `true`, because the tool result either holds or already presented the same body. A
+   * cancelled wait returns no reply, so it holds nothing.
+   */
+  isWaitingReply(entry: Entry, context?: string): boolean {
+    for (const waiter of this.#waiters.values()) {
+      if (waiter.expected_author !== entry.authenticated_author || !isReply(waiter.original, entry)) continue;
+      if (context !== undefined && waiter.local_context !== context) continue;
+      return true;
+    }
+    const held = this.#held.get(entryKey(entry.thread_ref, entry.seq));
+    return held !== undefined && (context === undefined || held.has(context));
   }
 
   async #awaitOutcome(record: StoredOutbound, waiter: Waiter, signal: AbortSignal | undefined): Promise<SendOutcome> {
@@ -639,6 +770,7 @@ export class OnlyneClient {
     const waiter: Waiter = {
       original,
       expected_author: record.expected_author,
+      ...(record.local_context === undefined ? {} : { local_context: record.local_context }),
       outcome: pending.promise,
       settle(entry) {
         previous?.settle(entry);
@@ -706,40 +838,49 @@ export class OnlyneClient {
     const runtime = this.#ctx.options.plugins.runtime;
     if (runtime === undefined || record.injected) return;
     const requested = record.context ?? record.attention.plan?.context ?? this.#ctx.options.node_id;
+    // An await that owns this reply's body in that context either still holds the call or
+    // already returned it as a tool result. Presenting the same body as a fragment here
+    // would duplicate it; the await's confirmation releases the hold.
+    if (this.isWaitingReply(entry, requested)) return;
     // The entry may already be confirmed consumed in that context through an awaited tool
     // result; presenting it again as a fragment is the duplicate RFC 0008 §5 forbids. The
-    // shared record is then the only thing left to write.
+    // shared record and the todo it owes are then all that is left to write.
     if (await this.#alreadyConsumed(entry, requested)) {
-      await this.#settleConsumed(entry, record, requested, 'tool_result');
+      await this.confirmConsumption(entry, requested, 'tool_result');
       return;
     }
     const { context, consumed } = await runtime.inject(entry, requested, record.attention.plan);
     if (!consumed) return;
-    // One transaction: the shared consumption record and this obligation's delivered state
-    // become visible together, so no reader sees a delivered entry without its record.
-    await this.#settleConsumed(entry, record, context, 'fragment');
-    await runtime.todo?.(entry, context);
+    await this.confirmConsumption(entry, context, 'fragment');
   }
 
   /**
-   * Records one confirmed consumption for a `(context, ThreadRef, seq)` slot and marks the
-   * obligation delivered in the same transaction (RFC 0004 §5, 0008 §5). Only a host
-   * confirmation reaches here; a submitted call or a void return proves nothing.
+   * Records the todo this consumption owes, inside the commit that confirms the consumption.
+   * A host without a todo hook owes none, so no record accrues for it.
    */
-  #settleConsumed(entry: Entry, record: LocalAttention, context: string, via: ConsumptionRecord['via']): Promise<void> {
-    return this.#ctx.storage.transaction(async tx => {
-      const slot = consumptionKey(context, entry.thread_ref, entry.seq);
-      const consumed = await tx.get<ConsumptionRecord>(slot);
-      if (consumed?.confirmed !== true) {
-        await tx.put<ConsumptionRecord>(slot, {
-          context, thread_ref: entry.thread_ref, seq: entry.seq,
-          confirmed: true, via, at: new Date(this.#ctx.now()).toISOString(),
-        });
-      }
-      const stored = await tx.get<LocalAttention>(inboxKey(record.attention.obligation_id));
-      if (stored !== undefined && !stored.injected) {
-        await tx.put(inboxKey(record.attention.obligation_id), { ...stored, injected: true });
-      }
+  async #oweTodo(tx: Transaction, entry: Entry, context: string): Promise<void> {
+    if (this.#ctx.options.plugins.runtime?.todo === undefined) return;
+    const slot = todoKey(context, entry.thread_ref, entry.seq);
+    if (await tx.get<PendingTodo>(slot) === undefined) {
+      await tx.put<PendingTodo>(slot, { entry, context, done: false });
+    }
+  }
+
+  /**
+   * Runs the host's todo hook for one owed todo, then marks it done. A failing hook leaves
+   * the record pending for `maintain`; delivering twice is safe because the host commits
+   * the todo it creates.
+   */
+  async #deliverTodo(entry: Entry, context: string): Promise<void> {
+    const runtime = this.#ctx.options.plugins.runtime;
+    if (runtime?.todo === undefined) return;
+    const slot = todoKey(context, entry.thread_ref, entry.seq);
+    const stored = await this.#ctx.storage.transaction(tx => tx.get<PendingTodo>(slot));
+    if (stored === undefined || stored.done) return;
+    await runtime.todo(entry, context);
+    await this.#ctx.storage.transaction(async tx => {
+      const current = await tx.get<PendingTodo>(slot);
+      if (current !== undefined) await tx.put<PendingTodo>(slot, { ...current, done: true });
     });
   }
 
@@ -1048,16 +1189,6 @@ export class OnlyneClient {
       inbox: await this.#messages.inbox(this.#auth(), { page_size: 100 }),
       domains: await this.#domains.list(this.#auth(), { page_size: 100 }),
     };
-  }
-  /** The context a prior fragment consumed this entry in, if any. */
-  async #fragmentContextFor(entry: Entry): Promise<string | undefined> {
-    const rows = await this.#ctx.storage.transaction(async tx =>
-      (await tx.scan<ConsumptionRecord>(key('consumed') + '/'))
-        .filter(row => row.value.confirmed === true
-          && row.value.thread_ref.owner === entry.thread_ref.owner
-          && row.value.thread_ref.id === entry.thread_ref.id
-          && row.value.seq === entry.seq));
-    return rows.length > 0 ? rows[0]!.value.context : undefined;
   }
 }
 

@@ -313,7 +313,9 @@ async function phaseNet(): Promise<void> {
     id: 'net-02', sender: lazuliNode, delivery_kind: '请求复核', msg: '请复核第二组数据。',
     meta: { thread: ref, mentions: ['@all'] },
   };
-  const pending = nodeA.client.send(dpdpNode, ask, awaitPlan);
+  // The awaited reply is consumed by the sender's own session, not by the
+  // receiver-side execution context named in the wire plan.
+  const pending = nodeA.client.send(dpdpNode, ask, awaitPlan, { context: lazuliNode });
   const landed = await waitFor(async () =>
     (await nodeB.messages.list(authB, ref, { attention: 'thread' })).items.some(entry => entry.message.id === 'net-02'));
   check('net.send.admitted', landed ? '' : 'the peer never admitted the sent message');
@@ -333,7 +335,7 @@ async function phaseNet(): Promise<void> {
   // The host confirms the tool result it rendered; only that confirmation advances the shared
   // record, never the submission itself (RFC 0008 §5).
   if (outcome.reply !== undefined && outcome.reply_body === undefined) {
-    await nodeA.client.confirmToolResult(outcome.reply, awaitPlan.context);
+    await nodeA.client.confirmToolResult(outcome.reply, lazuliNode);
   }
   await nodeA.client.reconcile();
 
@@ -359,9 +361,13 @@ async function phaseNet(): Promise<void> {
     id: 'net-06', sender: lazuliNode, delivery_kind: '第二次请求', msg: '再确认一次。',
     meta: { thread: ref, mentions: ['@all'] },
   };
-  // A plan that names no context leaves the consumer to the awaiting node, so the fragment
-  // record and the tool result record resolve to the same slot.
-  const secondPending = nodeA.client.send(dpdpNode, askAgain, { ...awaitPlan, context: undefined });
+  // The sender names its own session as the consumer, so the fragment record and
+  // the tool result record resolve to the same slot.
+  // Send without waiting first, so the automatic fragment is the path that consumes
+  // the reply before a later await registers for the same original.
+  const firstSend = await nodeA.client.send(dpdpNode, askAgain, plan, { context: lazuliNode });
+  check('net.send.await.fragment_first_admitted', firstSend.admission === 'accepted'
+    ? '' : `the fragment-first request was not admitted: ${firstSend.admission}`);
   await waitFor(async () =>
     (await nodeB.messages.list(authB, ref, { attention: 'thread' })).items.some(entry => entry.message.id === 'net-06'));
   await nodeB.messages.admit(authB, {
@@ -370,7 +376,7 @@ async function phaseNet(): Promise<void> {
     target_endpoint: dpdpNode, plan,
   });
   // The fragment path consumes it first: the reply obligation is stored locally, then the
-  // runtime consumes it as a fragment, and only then does the awaited call resolves.
+  // runtime consumes it as a fragment.
   await nodeA.client.reconcile();
   const storedReply = await waitFor(async () =>
     (await nodeA.messages.inbox(authA)).items.some(row => row.attention.entry?.message.id === 'net-07'));
@@ -379,7 +385,9 @@ async function phaseNet(): Promise<void> {
     const row = (await nodeA.messages.inbox(authA)).items.find(item => item.attention.entry?.message.id === 'net-07');
     return row?.injected === true;
   });
-  const secondReply = await polling(secondPending, () => nodeA.client.reconcile());
+  // A later await for the same original finds the reply already consumed by that fragment,
+  // so it reports arrival facts without rendering the body a second time.
+  const secondReply = await nodeA.client.send(dpdpNode, askAgain, awaitPlan, { context: lazuliNode });
   const fragmentFirst = netA.shared.injected.some(entry => entry.message.id === 'net-07');
   check('net.send.await.withheld_after_fragment', secondReply.wait === 'answered'
     && secondReply.reply?.message.id === 'net-07' && secondReply.reply_body === 'withheld' && fragmentFirst && fragmentConsumed

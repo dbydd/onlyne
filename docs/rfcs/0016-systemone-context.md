@@ -65,7 +65,7 @@ Onlyne 的节点、域、thread、成员、消息与资源接口提供结构事�
 | Onlyne 结构 | `domains`、`threads`、`messages`、`resources` 及出站记录。当前库没有全局 topology 类型，职责与连接图是拟议插件派生视图 |
 | 等待 | 库的 live waiter 属于进程内状态。恢复后的 pending/unknown 出站记录不能证明等待者仍在 |
 
-这些是可接入的数据来源。v3 插件尚未实现，本 RFC 不声称数据已自动装配。宿主也没有向普通扩展提供通用的模型消费确认，运行验收必须另外接通该边界。
+这些是可接入的数据来源。v3 插件已接入用户与模型历史、context note、todo、发现目录和实际消费确认；真实 OMP 运行中的装配与边界仍待验收。本文的模型情景实验不证明插件实现符合这些契约。
 
 todo 简读返回 `goal: null, openItems: []` 时，无法区分空清单和缺少 goal 且所有条目均为非开放状态的清单。blocked 也不出现在 openItems 中。context note 在 reset boundary 后失效，todo 的原生与 todo-more 读取会跨该边界保留清单。两个来源必须分别解释。
 

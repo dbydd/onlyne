@@ -15,6 +15,26 @@ OMP 中的 agent 通过一个 `msg` 工具发信、回复、读取消息、管�
 
 工具名称为 `msg`，调用形状固定为 `msg({ delivery_kind, msg, meta })`。thread 的创建、关闭、列举、成员变更是模型的可见操作，模型只给出意图和本地别名；ThreadRef、成员状态、seq 和授权细节由库保存和校验。资源操作经同一入口表达。
 
+### 1.1 初次引导与配置
+
+首次加载无需预写配置。`/onlyne init` 和未配置时的 `/onlyne` 打开 bootstrap，收集并生成本节点配置：
+
+| 项目 | 引导行为 |
+|---|---|
+| region | 必填；有 Tern 时提供当前 session 名作为建议值，用户确认后提交协议成员关系；普通终端可完整填写 |
+| node.id | 必填，初始为空，由用户填写稳定唯一身份；region 独立保存 |
+| server.bind | 必填，默认 127.0.0.1 |
+| node.key_ref | 可选，首次回环 E2E 可空；后续认证方案独立提案 |
+| threads.page_size | 默认 50，范围 1～100 |
+
+region 输入接受绝对 URI；用户输入短名时，界面展示将保存的 `urn:onlyne:region:<经 URI 编码的短名>` 并请用户确认。Tern 改名或工作目录变化不自动修改已保存的协议归属。
+
+监听端口由操作系统在本次启动分配，endpoint 由实际监听结果生成并发布。配置不包含 endpoint、port、peers、default_attention、omp.spawn 或 supplement_window。读取默认使用关注列表，完整 thread 由调用显式选择。任务派生和补充消息调度由 judge 决定。
+
+配置由界面写入项目 `.onlyne/config.toml`。对端通过网络自动发现，地址与核对记录写入项目 SQLite；多播不可用时，引导可收集一个初始联系地址并立即核对，后续候选经 HTTP 取得。取消引导不写配置、不启动节点。Tern 与普通终端提供相同的 bootstrap 功能。
+
+引导保存、启动监听、提交 region 成员关系、发布发现是分别可失败的步骤。界面必须显示实际完成位置；重开引导按已保存事实继续，不把配置写入成功称作集群接入成功。
+
 ## 2. 参数与目标
 
 `delivery_kind` 是自然语言投递意图。`msg` 是消息正文或本地查询要求。`meta` 存放明确引用，所有字段使用 snake_case。
@@ -243,6 +263,8 @@ Source: research/103 from dpdp
 接入注入来信时使用自定义消息类型，不调用 `sendUserMessage`。`onlyne.inbound` 承载来信，`onlyne.routing` 承载投递去向说明，两者 `attribution` 为 `agent`，在会话中记为 `custom_message`，在 TUI 中以独立样式显示。OMP 把它们转换为 developer 角色的上下文，不冒充本地用户发言。排队条目用 `appendEntry` 写入，不进入模型上下文。
 
 `execution: new` 要求宿主能创建并驱动独立上下文。能力未接通时返回 unsupported_delivery。系统不得把消息发到任意现有会话代替新上下文。
+
+新执行上下文由接收方分配并启动。发送方不能把本地 c-N 别名当作远端的新上下文，也不能要求自己的模型替接收方创建子代理。既有 context 别名在目标 NodeId 的命名空间内解析。发送方 await 工具结果的消费身份与接收方执行身份分别记录。
 
 宿主无法让工具调用保持在库的 Promise 上时，接入 MUST 在发送前拒绝 `await`，并说明缺少的能力。它不得先发送再返回一个 handle，因为那会改变副作用和等待语义。handle 模式只能作为单独协商的能力出现。
 

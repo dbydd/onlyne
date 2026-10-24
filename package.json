@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "check": "bun run --filter '@onlyne/lib' check",
-    "test": "bun run --filter '@onlyne/lib' test"
+    "check": "bun run --filter '@onlyne/lib' check && bun run --filter omp-onlyne check",
+    "test": "bun run --filter '@onlyne/lib' test && bun run --filter omp-onlyne test"
   }
 }

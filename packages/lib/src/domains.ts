@@ -8,12 +8,33 @@ export function validateDomainId(value: unknown): string {
   return value;
 }
 
-function membership(value: unknown, domain: string, node: string): value is DomainMembership {
-  return value !== null && typeof value === 'object'
-    && 'domain_id' in value && value.domain_id === domain
-    && 'node_id' in value && value.node_id === node
-    && 'state' in value && (value.state === 'active' || value.state === 'left')
-    && 'revision' in value && typeof value.revision === 'string' && value.revision.length > 0;
+/**
+ * Shape check for a membership as published on the wire. `null` is a valid declaration of no
+ * membership; `undefined` means the value is not a membership at all.
+ */
+export function membershipRecord(value: unknown): DomainMembership | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) return undefined;
+  if (!('domain_id' in value) || !('node_id' in value) || !('state' in value) || !('revision' in value)) return undefined;
+  const { domain_id, node_id, state, revision } = value;
+  if (typeof domain_id !== 'string' || !/^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$/.test(domain_id)) return undefined;
+  if (typeof node_id !== 'string' || node_id.length === 0) return undefined;
+  if (state !== 'active' && state !== 'left') return undefined;
+  if (typeof revision !== 'string' || revision.length === 0) return undefined;
+  return { domain_id, node_id, state, revision };
+}
+
+/**
+ * A service description is valid evidence only when it speaks this protocol, names the node that
+ * answered, and publishes a membership record for that same node.
+ */
+function declared(value: unknown, node: string): { membership: DomainMembership | null } | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  if (!('protocol' in value) || !('node_id' in value) || !('membership' in value)) return undefined;
+  if (value.protocol !== 'onlyne/3' || value.node_id !== node) return undefined;
+  const membership = membershipRecord(value.membership);
+  if (membership === undefined || (membership !== null && membership.node_id !== node)) return undefined;
+  return { membership };
 }
 
 async function activeRows(tx: Transaction, node: string): Promise<DomainMembership[]> {
@@ -51,7 +72,7 @@ export class DomainService {
       if (await activeMembership(tx, this.ctx.node)) {
         fail('conflict', 'This node already belongs to a domain; leave it before creating another.');
       }
-      const domain_id = validateDomainId(`urn:onlyne:domain:${this.ctx.id()}`);
+      const domain_id = validateDomainId(`urn:onlyne:region:${this.ctx.id()}`);
       const slot = key('domain', domain_id);
       if (await tx.get(slot)) fail('id_conflict', 'The domain identifier is already recorded here.');
       const record: DomainMembership = { domain_id, node_id: this.ctx.node, state: 'active', revision: this.ctx.id() };
@@ -127,18 +148,20 @@ export class DomainService {
         continue;
       }
       try {
-        const record = await this.query(node, id, signal);
-        if (!membership(record, id, node)) unavailable.push(node);
-        else if (record.state === 'active') members.push(record);
-      } catch (error) {
+        // Only the candidate's own description is evidence: protocol and identity must agree, and
+        // a node that declares another region (or none) is excluded rather than called unreachable.
+        const declaration = declared(await this.query(node, signal), node);
+        if (declaration === undefined) unavailable.push(node);
+        else if (declaration.membership !== null && declaration.membership.domain_id === id && declaration.membership.state === 'active') members.push(declaration.membership);
+      } catch {
         signal?.throwIfAborted();
-        if (!(error instanceof OnlyneError && error.error.code === 'not_found')) unavailable.push(node);
+        unavailable.push(node);
       }
     }
     return { domain_id: id, members, unavailable };
   }
 
-  private async query(node: string, id: string, signal?: AbortSignal): Promise<unknown> {
+  private async query(node: string, signal?: AbortSignal): Promise<unknown> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const onAbort = () => controller.abort(signal?.reason);
@@ -148,10 +171,10 @@ export class DomainService {
       controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
       if (controller.signal.aborted) reject(controller.signal.reason);
     });
-    timer = setTimeout(() => controller.abort(new OnlyneError('unavailable', 'Domain membership lookup timed out.')), this.ctx.options.wait_ms ?? 30_000);
+    timer = setTimeout(() => controller.abort(new OnlyneError('unavailable', 'Service description lookup timed out.')), this.ctx.options.wait_ms ?? 30_000);
     try {
       return await Promise.race([
-        this.transport.request<unknown>(node, 'GET', `/domains/${encodeURIComponent(id)}`, undefined, controller.signal),
+        this.transport.request<unknown>(node, 'GET', '/description', undefined, controller.signal),
         aborted,
       ]);
     } finally {

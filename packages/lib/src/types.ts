@@ -8,6 +8,18 @@ export interface DomainMutation extends Mutation { expected_revision?: string }
 export interface DomainDiscovery {
   domain_id: DomainId; members: DomainMembership[]; unavailable: NodeId[];
 }
+export interface DiscoveryCandidate {
+  node_id: NodeId; instance_id: string; base_url: string; last_seen: string;
+}
+export interface DiscoveryRecord extends DiscoveryCandidate {
+  source: string; received_at: string; expires_at: string;
+  verified_at?: string; membership?: DomainMembership | null; error?: Failure;
+}
+export interface ServiceDescription {
+  protocol: 'onlyne/3'; node_id: NodeId; instance_id: string; base_url: string;
+  features: string[]; authentication: string[];
+  domain: DomainId | null; membership: DomainMembership | null;
+}
 export interface ThreadRef { owner: NodeId; id: string }
 export interface MessageRef { sender: NodeId; id: string }
 export interface ResourceRef { owner: NodeId; id: string }
@@ -124,7 +136,7 @@ export type Action =
   | { kind: 'resource'; resource: ResourceRef; operation: string; data?: Json; expected_revision?: string };
 export interface Runtime {
   supports(plan: DeliveryPlan): Promise<boolean>;
-  /** Returns only after the host has observed consumption in the named context. */
+  /** Submission returns consumed:false; an observed request boundary may confirm it later. */
   inject(entry: Entry, context?: string, plan?: DeliveryPlan): Promise<{ context: string; consumed: boolean }>;
   todo?(entry: Entry, context: string): Promise<void>;
   /**
@@ -148,14 +160,18 @@ export interface Plugins {
   resources?: ResourceDriver;
   transport?: Transport;
   mayAdmit?(actor: NodeId, thread: ThreadRef): Promise<boolean>;
+  /** Owner policy permitting a first-contact thread and membership for this actor. */
+  inboundThread?(actor: NodeId): Promise<boolean>;
   mayHandover?(resource: Resource, initiator: NodeId, target: NodeId): Promise<boolean>;
   directory?(): Promise<Json>;
+  executionContexts?(): Promise<Json>;
   domainCandidates?(domain_id: DomainId): Promise<NodeId[]>;
   /** Resolves a thread-local mention alias to the member node it names. */
   mention?(alias: string, thread: ThreadRef): Promise<NodeId>;
 }
 export interface NodeOptions {
   node_id: NodeId; base_url: string; plugins: Plugins;
+  instance_id?: string; authentication?: string[];
   request_bytes?: number; retry_max_ms?: number; wait_ms?: number;
   now?: () => number; id?: () => string;
 }

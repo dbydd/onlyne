@@ -7,9 +7,12 @@
  * global member table, an owner, or a privilege the creator would keep.
  * Scenarios that need a second node's record go through real HTTP on ephemeral
  * loopback ports; discovery is driven against reachable, absent, left,
- * malformed and offline candidates.
+ * malformed and offline candidates. The discovery catalog is exercised against
+ * published descriptions directly, so loopback, restart and conflict rules are
+ * observable without a second host.
  */
-import { FetchTransport, MemoryStorage, OnlyneError, OnlyneNode } from '../src/index.js';
+import { DiscoveryService, FetchTransport, MemoryStorage, OnlyneError, OnlyneNode } from '../src/index.js';
+import { createContext } from '../src/core.js';
 import type { Action, Auth, MsgInput, Mutation, NodeOptions, Plugins, Target } from '../src/types.js';
 
 const clock = { value: Date.now() };
@@ -212,8 +215,8 @@ async function phaseCreate(): Promise<void> {
   const strangerAuth: Auth = { actor: createStranger };
 
   const created = await owner.node.domains.create(ownerAuth, mut());
-  check('create generates an absolute urn:onlyne:domain URI',
-    /^urn:onlyne:domain:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(created.domain_id)
+  check('create generates an absolute urn:onlyne:region URI',
+    /^urn:onlyne:region:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(created.domain_id)
       ? '' : `got ${created.domain_id}`);
   check('create records the local node as active with a revision',
     created.node_id === createOwner && created.state === 'active' && created.revision.length > 0
@@ -438,7 +441,7 @@ const db = 'urn:onlyne:agent:discover-b';
 const dc = 'urn:onlyne:agent:discover-c';
 const outsider = 'urn:onlyne:agent:discover-outsider';
 const rogueIdentity = 'urn:onlyne:agent:discover-rogue-identity';
-const rogueDomain = 'urn:onlyne:agent:discover-rogue-domain';
+const rogueRecord = 'urn:onlyne:agent:discover-rogue-record';
 const rogueGarbage = 'urn:onlyne:agent:discover-rogue-garbage';
 const offline = 'urn:onlyne:agent:discover-offline';
 const noCandidates = 'urn:onlyne:agent:discover-no-candidates';
@@ -467,10 +470,10 @@ async function phaseDiscover(): Promise<void> {
   await outsiderRig.node.domains.create(authOutsider, mut());
 
   rogue(rogueIdentity, async () => new Response(JSON.stringify({ domain_id: plan.domain, node_id: `${rogueIdentity}-impostor`, state: 'active', revision: 'x' }), { status: 200, headers: { 'content-type': 'application/json' } }));
-  rogue(rogueDomain, async () => new Response(JSON.stringify({ domain_id: 'urn:onlyne:domain:elsewhere', node_id: rogueDomain, state: 'active', revision: 'x' }), { status: 200, headers: { 'content-type': 'application/json' } }));
+  rogue(rogueRecord, async () => new Response(JSON.stringify({ domain_id: 'urn:onlyne:region:elsewhere', node_id: rogueRecord, state: 'active', revision: 'x' }), { status: 200, headers: { 'content-type': 'application/json' } }));
   rogue(rogueGarbage, async () => new Response('not-json', { status: 200, headers: { 'content-type': 'text/plain' } }));
   urls[offline] = 'http://127.0.0.1:1/onlyne/v3';
-  plan.candidates = [db, dc, db, outsider, rogueIdentity, rogueDomain, rogueGarbage, offline, da];
+  plan.candidates = [db, dc, db, outsider, rogueIdentity, rogueRecord, rogueGarbage, offline, da];
 
   const discovered = await discoveryA.node.domains.discover(authA, plan.domain);
   check('discovery includes the local record even when candidates repeat it',
@@ -481,12 +484,12 @@ async function phaseDiscover(): Promise<void> {
     discovered.members.every(member => member.state === 'active' && member.domain_id === plan.domain) ? '' : describeProblem(discovered.members));
   check('a candidate without a record is excluded, not reported as a member',
     !discovered.members.some(member => member.node_id === outsider) ? '' : 'an outsider was reported as a member');
-  check('a candidate without a record is not an unavailable node',
-    !discovered.unavailable.includes(outsider) ? '' : 'a clean not_found was reported as unavailable');
-  check('identity-mismatched, domain-mismatched, malformed and offline probes are unavailable',
-    sameList([...discovered.unavailable].sort(), [rogueIdentity, rogueDomain, rogueGarbage, offline].sort()) ? '' : describeProblem(discovered.unavailable));
+  check('a node that declares another region is excluded, not called unavailable',
+    !discovered.unavailable.includes(outsider) ? '' : 'a node declaring another region was reported as unavailable');
+  check('probes that answer something other than a matching description are unavailable',
+    sameList([...discovered.unavailable].sort(), [rogueIdentity, rogueRecord, rogueGarbage, offline].sort()) ? '' : describeProblem(discovered.unavailable));
   check('unavailable candidates never become members',
-    !discovered.members.some(member => [rogueIdentity, rogueDomain, rogueGarbage, offline].includes(member.node_id)) ? '' : 'a degraded probe was treated as a member');
+    !discovered.members.some(member => [rogueIdentity, rogueRecord, rogueGarbage, offline].includes(member.node_id)) ? '' : 'a degraded probe was treated as a member');
 
   // A left remote record is excluded and is not a degraded probe.
   const cRecord = await discoveryC.node.domains.describe(authC, plan.domain);
@@ -597,29 +600,37 @@ async function phaseHttp(): Promise<void> {
     (await wire(httpB, 'POST', `domains/${encoded}/leave`, { actor: httpB, body: { idempotency_key: 'http-leave-again', retry_until: future() } })).status === 409
       ? '' : 'a revision-less leave was accepted');
 
-  const anonymous = await wire(httpA, 'GET', 'description');
-  const anonymousFields = objectOf(anonymous.body);
-  check('an unauthenticated description carries no domain fields',
-    !('domains' in anonymousFields) && !('domain' in anonymousFields) && !('ingress' in anonymousFields)
-      ? '' : `fields ${keysOf(anonymous.body).join(',')}`);
-  check('an unauthenticated description names no domain id',
-    !anonymous.text.includes(domain) ? '' : 'the description leaked a domain id');
+  const publicDescription = await wire(httpA, 'GET', 'description');
+  const publicFields = objectOf(publicDescription.body);
+  check('a public description names the protocol, node and process instance',
+    publicFields['protocol'] === 'onlyne/3' && publicFields['node_id'] === httpA
+      && typeof publicFields['instance_id'] === 'string' && publicFields['instance_id'].length > 0
+      && publicFields['base_url'] === urls[httpA]
+      ? '' : describeProblem(publicFields));
+  const publishedMembership = objectOf(publicFields['membership'] ?? {});
+  check('a public description reports the local active region and membership',
+    publicFields['domain'] === domain && publishedMembership['domain_id'] === domain
+      && publishedMembership['node_id'] === httpA && publishedMembership['state'] === 'active'
+      ? '' : describeProblem(publicFields['membership']));
+  check('a public description carries no credential subject',
+    Array.isArray(publicFields['authentication']) && publicFields['authentication'].length === 0
+      ? '' : describeProblem(publicFields['authentication']));
+  const features = publicFields['features'];
+  check('a public description advertises domains and discovery',
+    Array.isArray(features) && features.includes('domains') && features.includes('discovery')
+      ? '' : describeProblem(features));
+  check('a public description keeps no ingress claim',
+    !('ingress' in publicFields) && !('domains' in publicFields) ? '' : `fields ${keysOf(publicDescription.body).join(',')}`);
+  check('a public description does not advertise a context directory the host omitted',
+    Array.isArray(features) && !features.includes('contexts') ? '' : describeProblem(features));
+  const contexts = await wire(httpA, 'GET', 'contexts', { actor: httpA });
+  check('the context directory is explicitly unsupported without a host hook',
+    contexts.status === 422 && wireCode(contexts) === 'unsupported_delivery'
+      ? '' : `status ${contexts.status} ${contexts.text}`);
 
-  const authenticated = await wire(httpA, 'GET', 'description', { actor: httpA });
-  const authenticatedFields = objectOf(authenticated.body);
-  check('an authenticated description reports the local active domain as one id',
-    authenticatedFields['domain'] === domain ? '' : describeProblem(authenticatedFields['domain']));
-  check('an authenticated description carries no domains array',
-    !('domains' in authenticatedFields) ? '' : `fields ${keysOf(authenticated.body).join(',')}`);
-  const features = authenticatedFields['features'];
-  check('an authenticated description advertises the domains feature',
-    Array.isArray(features) && features.includes('domains') ? '' : describeProblem(features));
-  check('an authenticated description keeps no ingress claim',
-    !('ingress' in authenticatedFields) ? '' : `fields ${keysOf(authenticated.body).join(',')}`);
-
-  const noMembership = objectOf((await wire(httpC, 'GET', 'description', { actor: httpC })).body);
-  check('an authenticated description without a membership reports a null domain',
-    noMembership['domain'] === null && !('domains' in noMembership) && !('ingress' in noMembership)
+  const noMembership = objectOf((await wire(httpC, 'GET', 'description')).body);
+  check('a public description without a membership reports a null domain and membership',
+    noMembership['domain'] === null && noMembership['membership'] === null && !('ingress' in noMembership)
       ? '' : `fields ${keysOf(noMembership).join(',')}`);
 
   const unauthorized = await wire(httpA, 'POST', 'domains', { body: { idempotency_key: 'http-anon', retry_until: future() } });
@@ -646,6 +657,21 @@ async function phaseHttp(): Promise<void> {
       ? '' : describeProblem(remoteMembers));
   check('HTTP discovery reports no unavailable node when every candidate answers',
     Array.isArray(membersBody['unavailable']) && membersBody['unavailable'].length === 0 ? '' : describeProblem(membersBody['unavailable']));
+
+  const live = await discoveryHost.node.discovery.observe(urls[httpE]!, 'manual');
+  check('observe verifies a live node from its public description',
+    live.node_id === httpE && live.instance_id.length > 0 && live.verified_at !== undefined
+      && live.membership?.domain_id === httpPlan.domain ? '' : describeProblem(live));
+  const resolved = await discoveryHost.node.discovery.resolve(httpE);
+  check('resolve returns the address that answered the description',
+    resolved.node_id === httpE && resolved.base_url === urls[httpE] ? '' : describeProblem(resolved));
+  const exchange = await wire(httpD, 'GET', 'discovery');
+  check('the public discovery route needs no credential and omits loopback candidates',
+    exchange.status === 200 && itemsOf(exchange.body).length === 0
+      ? '' : `status ${exchange.status} ${exchange.text}`);
+  check('a loopback candidate is not offered to other hosts',
+    (await discoveryHost.node.discovery.candidates(httpPlan.domain)).length === 0
+      ? '' : 'a loopback candidate entered the region candidate list');
 }
 
 // =============================================================================
@@ -736,6 +762,177 @@ async function phaseThreadRights(): Promise<void> {
     (await guestRig.node.threads.list(guestAuth)).items.length === 0 ? '' : 'the guest gained a thread');
 }
 
+// =============================================================================
+// 10. the discovery catalog: direct descriptions, conflicts, freshness, export
+// =============================================================================
+
+interface Answer { status: number; body: unknown }
+interface Catalog {
+  service: DiscoveryService;
+  answer(base_url: string, give: () => Answer | Promise<Answer>): void;
+  drop(base_url: string): void;
+}
+
+/** A discovery catalog over a fake network: descriptions, silence and garbage without ports. */
+function catalog(wait_ms = 2_000): Catalog {
+  const answers = new Map<string, () => Answer | Promise<Answer>>();
+  const fetcher = async (input: string | URL | Request): Promise<Response> => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const give = answers.get(url);
+    if (give === undefined) throw new TypeError('fetch failed');
+    const answer = await give();
+    return new Response(JSON.stringify(answer.body), { status: answer.status, headers: { 'content-type': 'application/json' } });
+  };
+  const options: NodeOptions = {
+    node_id: 'urn:onlyne:agent:catalog',
+    base_url: 'https://catalog.example/onlyne/v3',
+    wait_ms,
+    plugins: {
+      storage: new MemoryStorage(),
+      authenticate: async () => null,
+      resolve: async (node: string): Promise<Target> => { throw new OnlyneError('not_found', `No endpoint is configured for ${node}.`); },
+      decide: async (): Promise<Action> => { throw new OnlyneError('decision_unavailable', 'No plugin decision.'); },
+    },
+    now: () => clock.value,
+    id: () => crypto.randomUUID(),
+  };
+  return {
+    service: new DiscoveryService(createContext(options), fetcher),
+    answer(base_url, give) { answers.set(`${base_url}/description`, give); },
+    drop(base_url) { answers.delete(`${base_url}/description`); },
+  };
+}
+
+function described(node: string, instance: string, base_url: string, region: string | null): Answer {
+  return {
+    status: 200,
+    body: {
+      protocol: 'onlyne/3', node_id: node, instance_id: instance, base_url,
+      features: ['threads', 'discovery'], authentication: [],
+      domain: region,
+      membership: region === null ? null : { domain_id: region, node_id: node, state: 'active', revision: 'r1' },
+    },
+  };
+}
+
+async function phaseCatalog(): Promise<void> {
+  const started = clock.value;
+  const regionA = 'urn:onlyne:region:catalog-a';
+  const regionB = 'urn:onlyne:region:catalog-b';
+  const alpha = 'urn:onlyne:agent:catalog-alpha';
+  const beta = 'urn:onlyne:agent:catalog-beta';
+  const gamma = 'urn:onlyne:agent:catalog-gamma';
+  const first = 'https://alpha.example/onlyne/v3';
+  const second = 'https://alpha-alias.example/onlyne/v3';
+  const rival = 'https://rival.example/onlyne/v3';
+  const loop = 'http://127.0.0.1:9/onlyne/v3';
+  try {
+    const c = catalog();
+    c.answer(first, () => described(alpha, 'instance-1', first, regionA));
+    const observed = await c.service.observe(first, 'bootstrap');
+    check('observe records the identity and membership a description declares',
+      observed.node_id === alpha && observed.instance_id === 'instance-1' && observed.base_url === first
+        && observed.source === 'bootstrap' && observed.verified_at !== undefined && observed.membership?.domain_id === regionA
+      ? '' : describeProblem(observed));
+    check('observe stamps a 120 second freshness window',
+      Date.parse(observed.expires_at) - Date.parse(observed.received_at) === 120_000 ? '' : describeProblem(observed));
+    check('observe refuses a description that names another node',
+      await refusal('unavailable', () => c.service.observe(first, 'bootstrap', 'urn:onlyne:agent:catalog-impostor')));
+    check('observe refuses plain HTTP to a remote candidate',
+      await refusal('unavailable', () => c.service.observe('http://remote.example/onlyne/v3', 'manual')));
+    check('observe refuses an answer that is not an onlyne/3 description',
+      await refusal('unavailable', async () => {
+        c.answer(rival, () => ({ status: 200, body: { hello: 'world' } }));
+        await c.service.observe(rival, 'manual');
+      }));
+    const silentUrl = 'https://silent.example/onlyne/v3';
+    const silentProblem = await refusal('unavailable', () => c.service.observe(silentUrl, 'manual'));
+    check('a candidate clue that never verifies leaves no record',
+      silentProblem === '' && (await c.service.listRecords()).every(record => record.base_url !== silentUrl)
+      ? '' : `${silentProblem} ${describeProblem(await c.service.listRecords())}`);
+
+    c.answer(second, () => described(alpha, 'instance-1', second, regionA));
+    await c.service.observe(second, 'peer');
+    const same = await c.service.resolve(alpha);
+    check('resolve accepts one live instance at several addresses',
+      same.node_id === alpha && (same.base_url === first || same.base_url === second) ? '' : describeProblem(same));
+
+    c.answer(rival, () => described(alpha, 'instance-2', rival, regionA));
+    await c.service.observe(rival, 'peer');
+    check('resolve refuses two live instances of one identity',
+      await refusal('conflict', () => c.service.resolve(alpha)));
+
+    c.drop(rival);
+    c.drop(second);
+    c.answer(first, () => described(alpha, 'instance-3', first, regionA));
+    const restarted = await c.service.resolve(alpha);
+    check('resolve follows a restarted instance once the old address stops answering',
+      restarted.base_url === first ? '' : describeProblem(restarted));
+    const records = await c.service.listRecords();
+    check('a direct answer replaces the stale instance id of its address',
+      records.every(record => record.base_url !== first || record.instance_id === 'instance-3')
+      ? '' : describeProblem(records.filter(record => record.base_url === first)));
+
+    c.answer(first, () => ({ status: 200, body: 'not a description' }));
+    const brokenProblem = await refusal('unavailable', () => c.service.observe(first, 'peer', alpha));
+    const kept = (await c.service.listRecords()).find(record => record.base_url === first);
+    check('a failed observation preserves the last verified identity and records the error',
+      brokenProblem === '' && kept !== undefined && kept.instance_id === 'instance-3'
+        && kept.verified_at !== undefined && kept.error?.code === 'unavailable'
+      ? '' : describeProblem(kept));
+
+    const local = catalog();
+    local.answer(loop, () => described(alpha, 'instance-local', loop, regionA));
+    await local.service.observe(loop, 'self');
+    check('the public candidate export omits loopback addresses',
+      (await local.service.list()).items.length === 0 ? '' : describeProblem((await local.service.list()).items));
+    check('the local catalog keeps the loopback record',
+      (await local.service.listRecords()).length === 1 ? '' : 'the loopback observation was dropped');
+
+    const region = catalog();
+    region.answer(first, () => described(alpha, 'instance-1', first, regionA));
+    region.answer(second, () => described(beta, 'instance-2', second, regionB));
+    region.answer(rival, () => described(gamma, 'instance-3', rival, null));
+    await region.service.observe(first, 'manual');
+    await region.service.observe(second, 'manual');
+    await region.service.observe(rival, 'manual');
+    const published = await region.service.list({ page_size: 2 });
+    const remainder = await region.service.list({ page_size: 2, ...(published.next_cursor === null ? {} : { cursor: published.next_cursor }) });
+    check('the public candidate export pages in identity order',
+      published.items.length === 2 && published.next_cursor !== null && remainder.items.length === 1
+        && published.items[0]?.node_id === alpha && published.items[1]?.node_id === beta && remainder.items[0]?.node_id === gamma
+      ? '' : `${describeProblem(published)} ${describeProblem(remainder)}`);
+    check('the public candidate export carries only candidate fields',
+      [...published.items, ...remainder.items].every(item => sameList(keysOf(item), ['base_url', 'instance_id', 'last_seen', 'node_id']))
+      ? '' : 'a catalog field leaked into the candidate export');
+    check('region candidates include only verified members of that region',
+      sameList(await region.service.candidates(regionA), [alpha])
+        && sameList(await region.service.candidates(regionB), [beta])
+        && (await region.service.candidates('urn:onlyne:region:catalog-empty')).length === 0
+      ? '' : 'candidates did not follow the declared region');
+    check('resolve refuses an identity with no record',
+      await refusal('not_found', () => region.service.resolve('urn:onlyne:agent:catalog-absent')));
+
+    clock.value = started + 60_000;
+    region.drop(second);
+    await region.service.refresh();
+    const refreshed = await region.service.listRecords();
+    const alive = refreshed.find(record => record.base_url === first);
+    const dead = refreshed.find(record => record.base_url === second);
+    check('refresh advances the verified time of an answering candidate',
+      alive !== undefined && Date.parse(alive.verified_at ?? '') === started + 60_000 ? '' : describeProblem(alive));
+    check('refresh records a failed candidate without starving the others',
+      dead !== undefined && dead.error?.code === 'unavailable' && dead.instance_id === 'instance-2' ? '' : describeProblem(dead));
+
+    const hanging = catalog(80);
+    hanging.answer('https://hang.example/onlyne/v3', () => new Promise<Answer>(() => {}));
+    check('a candidate that never answers is bounded by wait_ms',
+      await refusal('unavailable', () => hanging.service.observe('https://hang.example/onlyne/v3', 'manual')));
+  } finally {
+    clock.value = started;
+  }
+}
+
 // ---- run --------------------------------------------------------------------
 
 try {
@@ -748,6 +945,7 @@ try {
   await phase('http', phaseHttp);
   await phase('client entries', phaseClient);
   await phase('thread rights', phaseThreadRights);
+  await phase('discovery catalog', phaseCatalog);
 } finally {
   shutdown();
   console.log(failures.length === 0 ? '\n全部通过' : `\n${failures.length} 项失败`);

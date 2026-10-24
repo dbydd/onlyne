@@ -60,7 +60,7 @@ export function page<T>(items: T[], options: PageOptions, scope: unknown, positi
   return { items: selected, next_cursor: remaining.length > size ? encodeURIComponent(canonical({ scope, after: position(selected[selected.length - 1]!) })) : null };
 }
 export interface Context {
-  node: string; baseUrl: string; storage: Storage; options: NodeOptions;
+  node: string; baseUrl: string; instanceId: string; storage: Storage; options: NodeOptions;
   now(): number; id(): string;
   owner(owner: string): void;
   deadline(retry_until: string): void;
@@ -70,7 +70,7 @@ export interface Context {
 
 export function createContext(options: NodeOptions): Context {
   const ctx: Context = {
-    node: options.node_id, baseUrl: options.base_url, storage: options.plugins.storage, options,
+    node: options.node_id, baseUrl: options.base_url, instanceId: options.instance_id ?? crypto.randomUUID(), storage: options.plugins.storage, options,
     now: options.now ?? Date.now, id: options.id ?? (() => crypto.randomUUID()),
     owner(owner) { if (owner !== options.node_id) fail('forbidden', 'This node does not serve the requested owner.'); },
     deadline(until) {

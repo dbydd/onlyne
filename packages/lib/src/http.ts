@@ -8,6 +8,7 @@ import type { ThreadService } from './threads.js';
 import type { MessageService } from './messages.js';
 import type { ResourceService } from './resources.js';
 import type { DomainService } from './domains.js';
+import type { DiscoveryService } from './discovery.js';
 import { validateDomainId } from './domains.js';
 
 const PREFIX = '/onlyne/v3';
@@ -21,6 +22,7 @@ export interface HttpServices {
   messages: MessageService;
   resources: ResourceService;
   domains: DomainService;
+  discovery?: DiscoveryService;
 }
 
 function record(value: unknown, field: string): Record<string, unknown> {
@@ -294,22 +296,28 @@ function eventBody(value: unknown): { source_id: string; data: Json; expires_at?
   };
 }
 
-async function description(ctx: Context, auth: Auth | null, domains: DomainService): Promise<Json> {
-  const active = auth === null
-    ? undefined
-    : (await domains.list(auth, { page_size: 100 })).items.find(membership => membership.state === 'active');
+/**
+ * The public description: identity, address, current region declaration and configured
+ * authentication schemes. It carries no credential subject, message or resource.
+ */
+async function description(ctx: Context, domains: DomainService, discovered: boolean): Promise<Json> {
+  const active = (await domains.list({ actor: ctx.node }, { page_size: 100 })).items.find(membership => membership.state === 'active');
   return {
     protocol: 'onlyne/3',
     node_id: ctx.node,
+    instance_id: ctx.instanceId,
     base_url: ctx.baseUrl,
-    features: ['threads', 'messages', 'events', 'resources', 'domains'],
-    // The binding never names a scheme its authenticator did not choose; an authenticated
-    // caller may learn the identity its own credential maps to, and nothing else.
-    authentication: auth === null ? [] : [`actor:${auth.actor}`],
-    // Domain membership is a private fact of this node, so only an authenticated caller sees it.
-    // A node belongs to at most one domain; threads and ingress are what cross domains.
-    ...(auth === null ? {} : { domain: active?.domain_id ?? null }),
-    discovery: { resolvable: false },
+    features: [
+      'threads', 'messages', 'events', 'resources', 'domains',
+      ...(discovered ? ['discovery'] : []),
+      ...(ctx.options.plugins.executionContexts === undefined ? [] : ['contexts']),
+    ],
+    // The binding names only schemes its host configured; a credential's subject is not a scheme.
+    authentication: ctx.options.authentication ?? [],
+    domain: active?.domain_id ?? null,
+    membership: active === undefined
+      ? null
+      : { domain_id: active.domain_id, node_id: active.node_id, state: active.state, revision: active.revision },
     limits: { request_bytes: ctx.options.request_bytes ?? DEFAULT_BYTES },
     idempotency_max_seconds: Math.floor((ctx.options.retry_max_ms ?? 86_400_000) / 1000),
   };
@@ -341,7 +349,7 @@ function expect(request: Request, allowed: string): void {
 }
 
 /** Maps `/onlyne/v3` HTTP requests onto the services. The caller owns the server lifecycle. */
-export function createHttpHandler({ ctx, threads, messages, resources, domains }: HttpServices): (request: Request) => Promise<Response> {
+export function createHttpHandler({ ctx, threads, messages, resources, domains, discovery }: HttpServices): (request: Request) => Promise<Response> {
   const limit = ctx.options.request_bytes ?? DEFAULT_BYTES;
 
   async function authenticate(request: Request): Promise<Auth> {
@@ -478,12 +486,23 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains }
 
       if (path.length === 1 && path[0] === 'description') {
         expect(request, 'GET');
-        let auth: Auth | null = null;
-        try { auth = await ctx.options.plugins.authenticate(request); } catch { auth = null; }
-        return respond(await description(ctx, auth, domains));
+        return respond(await description(ctx, domains, discovery !== undefined));
+      }
+
+      if (path.length === 1 && path[0] === 'discovery') {
+        expect(request, 'GET');
+        if (discovery === undefined) fail('not_found', 'Unknown route.');
+        return respond(await discovery.list(pageOptions(params)));
       }
 
       const auth = await authenticate(request);
+
+      if (path.length === 1 && path[0] === 'contexts') {
+        expect(request, 'GET');
+        const contexts = ctx.options.plugins.executionContexts;
+        if (contexts === undefined) fail('unsupported_delivery', 'The host provides no execution context directory.');
+        return respond(await contexts());
+      }
 
       if (path.length === 1 && path[0] === 'messages') {
         expect(request, 'POST');

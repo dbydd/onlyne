@@ -1,4 +1,4 @@
-import type { Attention, Auth, DeliveryPlan, Entry, Event, Failure, LocalAttention, Member, MessageQuery, MessageRef, Mutation, PageOptions, Receipt, ReplyPermit, SendRequest, ThreadRef, Transaction } from './types.js';
+import type { Attention, Auth, DeliveryPlan, Entry, Event, Failure, Grant, Json, LocalAttention, Member, MessageQuery, MessageRef, Mutation, PageOptions, Receipt, ReplyPermit, SendRequest, Thread, ThreadRef, Transaction } from './types.js';
 import { canonical, decimal, fail, fingerprint, key, OnlyneError, page, requireValue, same, type Context } from './core.js';
 import { canRead, getThread } from './threads.js';
 
@@ -66,6 +66,10 @@ export class MessageService {
    * Every rejecting check runs before the first write, so a refusal commits only its
    * durable refusal record and never a half-appended entry. A mention, a closed thread,
    * a missing membership or a policy refusal all leave the thread cursor untouched.
+   *
+   * A first contact the owner's inbound policy permits stages its thread, sender
+   * membership and grant notice, then writes them beside the entry and the receipt in
+   * this same transaction: one admission records all of them or none.
    */
   private async append(tx: Transaction, auth: Auth, request: SendRequest, digest: string, requestDigest: string, identity: string, operationKey: string): Promise<Outcome> {
     const { message } = request;
@@ -77,18 +81,31 @@ export class MessageService {
       if (threadRef === undefined && permit && !permit.revoked && permit.remaining > 0 && Date.parse(permit.expires_at) > this.ctx.now()
         && (message.meta?.relation !== 'followup' || permit.followup) && this.ctx.node === permit.landing.owner) threadRef = permit.landing;
     }
+    let firstContact = false;
     if (threadRef === undefined) {
       // The default landing is the owner's own slot, resolved once inside this transaction.
       const landing = await tx.get<ThreadRef>(key('default', this.ctx.node));
       if (landing === undefined || landing.owner !== this.ctx.node || typeof landing.id !== 'string' || landing.id.length === 0) {
-        return this.refuse(tx, identity, digest, request, new OnlyneError('not_found', 'No default thread is configured.'));
+        // Finding a landing grants nothing (RFC 0002 §3): only the owner's inbound policy
+        // may open a thread and admit this sender into it.
+        const policy = this.ctx.options.plugins.inboundThread;
+        if (policy === undefined || !await policy(auth.actor)) {
+          return this.refuse(tx, identity, digest, request, new OnlyneError('not_found', 'No default thread is configured.'));
+        }
+        firstContact = true;
+        let id = crypto.randomUUID();
+        while (await tx.get<Thread>(key('thread', this.ctx.node, id))) id = crypto.randomUUID();
+        threadRef = { owner: this.ctx.node, id };
+      } else {
+        threadRef = { owner: landing.owner, id: landing.id };
       }
-      threadRef = { owner: landing.owner, id: landing.id };
     }
     this.ctx.owner(threadRef.owner);
-    const thread = await getThread(tx, this.ctx, threadRef);
-    const member = await tx.get<Member>(key('member', threadRef.owner, threadRef.id, message.sender));
-    const ordinary = message.sender === threadRef.owner || (member?.state === 'active' && member.access.includes('post'));
+    const thread: Thread = firstContact
+      ? { thread_ref: threadRef, title: `first contact from ${message.sender}`, state: 'open', next_seq: '1', event_seq: '0', created_at: new Date(this.ctx.now()).toISOString(), closed_at: null }
+      : await getThread(tx, this.ctx, threadRef);
+    const member = firstContact ? undefined : await tx.get<Member>(key('member', threadRef.owner, threadRef.id, message.sender));
+    const ordinary = firstContact || message.sender === threadRef.owner || (member?.state === 'active' && member.access.includes('post'));
     const allowedPermit = permit !== undefined && !permit.revoked && permit.remaining > 0 && Date.parse(permit.expires_at) > this.ctx.now()
       && same(permit.landing, threadRef) && (message.meta?.relation !== 'followup' || permit.followup);
     if (!ordinary && !allowedPermit) return this.refuse(tx, identity, digest, request, new OnlyneError('not_a_member', 'The sender is not an active post member.'));
@@ -100,6 +117,8 @@ export class MessageService {
 
     const members = (await tx.scan<Member>(key('member', threadRef.owner, threadRef.id) + '/')).map(row => row.value).filter(m => m.state === 'active');
     const recipients = new Set<string>();
+    // A direct first contact is the owner's business even without a mention.
+    if (firstContact) recipients.add(threadRef.owner);
     for (const mention of message.meta?.mentions ?? []) {
       if (typeof mention !== 'string' || mention.length === 0) fail('invalid_request', 'A mention must be a non-empty string.');
       if (mention === '@all') {
@@ -123,6 +142,18 @@ export class MessageService {
       recipients.add(source ? source.reply_authority : original.sender);
     }
 
+    if (firstContact) {
+      // Written with the entry and the receipt in this one transaction: the thread, its
+      // sender membership and the grant notice either all commit or none of them do.
+      const revision = this.ctx.id();
+      const membership: Member = { peer: message.sender, state: 'active', access: ['post', 'read'], read_scope: {}, revision };
+      const notice: Grant = { id: revision, recipient: message.sender, thread_ref: threadRef, revision, acked: false };
+      const eventId = (decimal(thread.event_seq) + 1n).toString();
+      thread.event_seq = eventId;
+      await tx.put(key('member', threadRef.owner, threadRef.id, message.sender), membership);
+      await tx.put(key('notice', notice.id), notice);
+      await tx.put(key('event', threadRef.owner, threadRef.id, eventId), { id: eventId, type: 'membership', thread_ref: threadRef, data: JSON.parse(JSON.stringify(membership)) as Json } satisfies Event);
+    }
     const seq = thread.next_seq;
     thread.next_seq = (decimal(seq) + 1n).toString();
     thread.event_seq = (decimal(thread.event_seq) + 1n).toString();

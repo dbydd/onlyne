@@ -10,7 +10,7 @@
   "files": ["src", "README.md", "LICENSE"],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "bun tests/verify.ts && bun tests/domain.ts"
+    "test": "bun tests/verify.ts && bun tests/domain.ts && bun tests/first-contact.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

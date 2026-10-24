@@ -4,6 +4,10 @@
 
 接口结论按已安装的 OMP 18.12.6 源码核对。行号指向 `@oh-my-pi/pi-coding-agent` 与 `@oh-my-pi/pi-tui` 包内的 `src/`。
 
+
+
+OMP提供了额外的接口，omp-onlyne不需要兼容pi！
+
 ## 1. 架构与边界
 
 插件以 OMP Extension 形式加载运行。它执行 SystemOne 的判定，把 Onlyne 网络连接、消息收发、上下文登记、内部路径浏览与来信注入整合在一个入口。
@@ -43,7 +47,7 @@
 
 插件明确以下边界分工：
 
-1. **OnlyneClient** 持有网络通信、消息去重、签名认证、线索管理、资源交接与域发现逻辑。
+1. **Onlyne 库与网络绑定**持有通信、消息去重、身份验证接线、线索管理、资源交接与 region 发现逻辑。当前 Bearer 适配器没有公私钥交换与签名认证实现。
 2. **SystemOne** 判定每条消息的处理：出站投递参数、入站处理动作、消息进入哪个执行上下文。各判定点分别装配用户与模型消息、活动分支历史、context note、thread 对话、拓扑、资源目录和 todo-more。来源与模拟方法定义在 [RFC 0016](rfcs/0016-systemone-context.md)。
 3. **OMP Extension** 执行 SystemOne 的判定，提供工具挂载、内部 URL 路由、会话生命周期捕获、上下文登记与注入调度。插件不做消息处理判定。
 4. **宿主 Todo 机制**（如 `omp-todo-more`）持有任务持续工作项。插件仅维护消息与待办的本地映射关联。
@@ -98,28 +102,27 @@ OMP 原生插件设置页不承载这些配置。该页由插件 `package.json` 
 
 插件的配置读写规则：
 
-1. 配置只在 `<project>/.onlyne/config.toml` 中定义，格式为 TOML，随项目一起版本化。
-2. 密钥经环境变量或操作系统凭据库注入。配置文件只保存引用名，不保存密钥原文。
+1. 用户通过 bootstrap 生成 `<project>/.onlyne/config.toml`，无需预先编写文件。本节点配置使用 TOML，发现目录与动态地址存入项目 SQLite。
+2. 密钥引用可选。首次回环 E2E 使用 RFC 0001 的 none 开发绑定；后续密钥交换独立提案，配置不保存密钥原文。
 3. 配置变更由插件面板提交。面板只写当前项目文件，写入成功后重载 `OnlyneClient`。
-4. 无界面环境使用插件随附的命令行入口 `onlyne-omp config get|set|list`，作用域固定为项目。
+4. 普通终端提供完整的逐行引导与设置界面。无交互环境需要由宿主提交同一引导数据；当前插件尚未实现独立配置 CLI。
 5. 插件不在 `omp.settings` 中声明任何条目。两套配置来源会让同一个值出现两个真相，原生页的编辑还会写入用户级文件。
 
 配置文件示意：
 
 ```toml
 [node]
+region = "urn:onlyne:region:research-chamber"
 id = "urn:onlyne:agent:lazuli"
-endpoint = "https://cluster.example:7946"
-key_ref = "env:ONLYNE_NODE_KEY"
+
+[server]
+bind = "127.0.0.1"
 
 [threads]
-default_attention = "inbox"
 page_size = 50
-
-[omp]
-spawn = "async"
-supplement_window = "10m"
 ```
+
+node.id 在引导中初始为空，用户填写稳定唯一身份。region 是独立的协议归属，启动时提交域成员记录。监听端口由操作系统分配，实际 endpoint 由运行时公布。对端候选通过引导种子地址和 HTTP 目录取得，逐节点核对后存入 SQLite；同链路 DNS-SD 是可选加速器。配置不保存 endpoint、port、peers 或语义调度参数。任务派生与补充调度使用 OMP judge 角色的实际判定与宿主观察。
 
 ## 3. 会话隔离与 Subagent 协作模型
 
@@ -153,11 +156,11 @@ OMP 的 `task` 工具每次调用都创建新会话。同一个 `name` 再调用
 
 上下文登记流程：
 
-1. `msg` 调用进入 SystemOne，判定返回 `execution: "new"`。插件为这次判定建立上下文记录并分配别名，例如 `c-7`。别名由执行侧分配，属于登记数据，不进入 `msg` 的三段结构体。
-2. 插件把别名写进工具结果的事实区，并说明派生的 `name` 取 `onlyne-<别名>`。这是执行说明，不是新的消息字段。
-3. 子代理注册后，插件按 `AgentRegistry.global()` 读取它的 `id`、`sessionFile` 与 `parentId`，按 `onlyne-<别名>` 前缀找到这次派生，把别名与 `agent_id` 的对应关系记入项目存储。重名时 `-2` 后缀不影响前缀匹配。
-4. `task` 返回的 `details.progress[].id`（异步）或 `details.results[].id`（阻塞）用于同一登记，事件在结果返回模型之前触发。
-5. 别名对应的子代理不存在时，上下文保持 `unbound`。插件不按创建顺序或名称相似度猜一个。
+1. 出站 SystemOne 判定 `execution: "new"` 时，发送方只提出接收方创建上下文的要求。发送方不在自己的 registry 分配接收方别名，也不要求本地模型替接收方派生任务。
+2. 接收方先检查是否具备创建并驱动独立会话的宿主能力。能力缺失时在接纳前返回 `unsupported_delivery`；接纳后由接收方分配本地别名，例如 `c-7`，并持久关联来源消息。
+3. 接收方按已确认的派发动作启动子会话，并以真实 task 调用及其结果绑定别名。registry 的 id、sessionFile、parentId 与 task 返回的 `details.progress[].id` 或 `details.results[].id` 共同提供登记证据。
+4. 执行记录必须包含所属 NodeId、OMP 主会话及子代理身份。发送方引用既有上下文时，别名属于目标节点的目录；相同的 c-7 在不同节点上属于不同命名空间。
+5. 子代理注册完成前记录保持 `unbound`，补充保留原引用等待登记。消费记录使用实际接收会话身份。发送方等待 reply 的消费上下文单独取自发送方工具调用，不能复用接收方执行别名。
 
 上下文目录是 SystemOne 的判定输入，列出别名、所属 thread、任务摘要与状态。目录来自 `AgentRegistry` 和本地记录，不由模型填写。同一份目录以 `onlyne://contexts` 暴露给模型，供排查与主动读取。
 
@@ -321,6 +324,8 @@ pi.registerTool({
 
 来信入站由后台监听服务接收。每条来信都交给 SystemOne 判定投递计划，插件按计划执行。插件不按宿主忙闲自行决定注入、排队或唤醒。
 
+判定通过 OMP 的 `judge` 模型角色执行（`resolveJudge`），插件不直连判定服务 URL。角色链、凭据、候选回退与用量记账由 OMP 管理；没有可用候选时返回 `decision_unavailable`，插件不自行补一个判定。
+
 ### 6.1 判定与执行
 
 | SystemOne 判定动作 | 插件执行 | 模型可见形式 |
@@ -399,7 +404,7 @@ pi.sendMessage(payload, { triggerTurn: true });
 
 插件落实 RFC 0008 §6 规定的接入层待办责任：
 
-1. **宿主 Todo 存储**：插件将持续工作项写入 `omp-todo-more`。
+1. **宿主 Todo 存储**：插件通过统一适配器写入。检测到 `omp-todo-more` 时使用它的 rich 快照；未安装时写入 OMP 原生 `user_todo_edit`。原生条目允许只保留标题，完整消息仍可从 Onlyne 重新读取。
 2. **原子提交**：待办快照与消息引用到条目的映射由同一次可恢复提交写入。
 3. **来源标注**：条目的 explanation 首行固定标注人类可读来源（`Source: <thread>/<seq> from <peer>`）。
 4. **机器索引**：本地存储按 `MessageRef` 记录对应 Todo 标识。
@@ -413,18 +418,17 @@ pi.sendMessage(payload, { triggerTurn: true });
 
 ### 8.1 入口与结构
 
-`/onlyne settings` 打开配置面板。面板标题为 `Onlyne · <project>`，页脚显示配置文件路径与作用域标记 `项目级`。同一项目在多个终端打开时，页脚路径相同。`/onlyne` 打开查看界面。
+`/onlyne` 打开查看界面；未配置时直接进入引导界面。`/onlyne init` 主动打开引导界面。`/onlyne settings` 打开配置面板。面板标题为 `Onlyne · <project>`，页脚显示配置文件路径与作用域标记 `项目级`。同一项目在多个终端打开时，页脚路径相同。
 
 面板按用途分组：
 
 | 分组 | 行 |
 |---|---|
-| 节点 | 节点 id、端点、密钥引用、连接状态 |
-| 消息 | 默认关注模式、每页条数、等待期限 |
-| 子代理 | 派生方式（async/blocking）、补充说明窗口、最大嵌套深度 |
-| 界面 | 状态行显示项、通知级别 |
+| 节点 | region、节点 id、监听 host、可选密钥引用 |
+| 消息 | 每页条数 |
+| 运行观察 | 实际 endpoint、网络发现状态、身份验证方式、上下文数量 |
 
-连接状态与上下文数量是只读行，来自运行中的 `OnlyneClient`。其余行可编辑。
+运行观察是只读行。region、身份、监听 host、密钥引用与每页条数可编辑。region 变更通过协议 leave/join 提交；节点 id 变更属于身份变更，界面必须说明既有消息引用仍属于旧身份。
 
 ### 8.2 行与控件
 
@@ -457,6 +461,20 @@ pi.sendMessage(payload, { triggerTurn: true });
 2. 写入失败时保留草稿，显示系统错误，不修改已有文件。原子重命名保证文件要么是旧内容，要么是新内容。
 3. `OnlyneClient` 重载失败时保留旧连接，状态行显示 `配置已保存，连接未重载`，并提供“重试”动作。
 4. 配置文件被外部修改时，面板在下次打开时重新读取。面板不监视文件，也不覆盖未提交的草稿。
+
+### 8.5 引导界面（/onlyne init）
+
+项目首次接入时运行 `/onlyne init`，或者在未配置时直接运行 `/onlyne` 打开引导界面。
+
+引导界面收集最小必需配置并提供默认值：
+
+1. **region**：必填。有 Tern 时提供当前 session 名作为建议值，用户确认后保存独立的 region URI。普通终端由用户填写，同样具备网络发现能力。
+2. **node.id**：必填，初始为空，由用户填写稳定唯一标识。
+3. **server.bind**：必填，默认 `127.0.0.1`。端口由操作系统在启动时分配。
+4. **node.key_ref**：可选，初始为空；首次回环 E2E 可使用 none 开发绑定。
+5. **threads.page_size**：默认 50，范围 1～100。
+
+提交时生成配置、启动监听、提交 region 成员关系并发布发现，界面逐项报告实际结果。对端自动发现后存入 SQLite。多播不可达时，引导可以请用户提供一个已有节点地址，立即联系并读取 HTTP 候选目录。取消时不写文件、不启动节点。Tern 原生使用 `nativeOverlay`，普通终端提供完整的逐行界面。
 
 ## 9. 查看界面
 
@@ -533,6 +551,21 @@ Tern 下的原生渲染由 Tern Surface Protocol（TSP）驱动。OMP 用 `TERM_
 
 ## 12. 验证状态
 
+当前代码已经接入 SQLite 事务存储、HTTP 节点、msg 调库、OMP judge 角色和自定义消息 API，bootstrap 与查看界面也有组件代码。此前实际运行证明了扩展可加载和显式 msg 列表查询；这些证据没有覆盖集群消息往返或界面操作。
+
+当前实现仍有以下缺口，完成修复及验收前不能称为完整插件：
+
+| 能力 | 代码现状 |
+|---|---|
+| 网络发现与 region | 引导种子、HTTP 候选目录和 SQLite 发现目录已接入；启动时提交 region 成员关系；DNS-SD 可选。真实多进程发现未验收 |
+| 新执行上下文 | 接收方通过原生 task 工具启动子代理并绑定 c-N；发送方不再分配接收方上下文。真实派生未验收 |
+| 消费确认 | 自定义消息提交返回 consumed:false；provider 请求头命中后确认。真实请求边界未验收 |
+| Await 去重 | 发送方本地 context、hold、confirmConsumption 已接入；库套件覆盖。插件工具路径未验收 |
+| Todo | todo-more 可选；存在时原子写 rich+native，缺失时写原生 `user_todo_edit` 与决策标记。用户将在实战验证 |
+| 子代理读取 | msg 写路径受限；onlyne:// 与 decider 读取按 agent 与 context source 过滤。未验收 |
+| 配置与调度 | endpoint、port、peers、default_attention、spawn、supplement_window 已从配置和执行路径删除 |
+| 界面 | 两页、bootstrap 与设置组件；真实 Tern 操作、刷新和分页未验收 |
+
 已按 18.12.6 源码核对：
 
 - `task` 不复用已有子代理，重复 `name` 得到 `-2` 后缀。
@@ -547,6 +580,12 @@ Tern 下的原生渲染由 Tern Surface Protocol（TSP）驱动。OMP 用 `TERM_
 - 自定义消息经 `convertMessageToLlm` 转为 developer 角色上下文，用户消息不参与该路径。
 - `pi.registerMessageRenderer(customType, renderer)` 可注册消息渲染器。
 - TSP v1 的 overlay anchor 只有 `center`、`top`、`bottom`；`left-center` 属于经典 ANSI overlay。
+
+已运行：
+
+- 根目录 `bun run check`：`@onlyne/lib` 与 `omp-onlyne` 类型检查通过。
+- 根目录 `bun run test`：库的 verify、domain、first-contact 套件全部通过；插件 28 个测试通过。
+- 该证据只覆盖库行为、插件单元路径和单机两节点发现/首次接触；没有启动真实 OMP 集群或 GUI 操作。
 
 尚未实跑：
 
