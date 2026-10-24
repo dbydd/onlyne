@@ -13,7 +13,7 @@ import {
 import { shortNodeId } from "../config.ts";
 import { getRuntime } from "../runtime.ts";
 import type { QueueItem, ViewerMessage, ViewerSnapshot, ViewerThread } from "../types.ts";
-import { ageText, clockText, fit, kindLabel, kindRank, oneLine, pad } from "./format.ts";
+import { ageText, clockText, fit, kindLabel, kindRank, oneLine, pad, shortAlias } from "./format.ts";
 
 type Page = "queue" | "chat" | "discovery" | "contacts";
 
@@ -292,33 +292,38 @@ export class OnlyneViewer implements Component {
 	private threadRow(thread: ViewerThread, selected: boolean): BodyRow {
 		const unread = thread.unread > 0 ? ` · ${thread.unread} 未读` : "";
 		const closed = thread.state === "closed" ? " · 已关闭" : "";
+		const label = shortAlias(thread.alias);
 		return {
 			left: [
 				[selected ? "> " : "  ", "muted"],
-				[thread.alias, "strong"],
+				[label, "strong"],
 				[` · ${thread.title}${unread}${closed}`, "muted"],
 			],
 			selected,
 			act: `onlyne.thread:${thread.alias}`,
 			key: thread.alias,
-			card: { head: thread.alias, description: [thread.title, unread.replace(" · ", ""), closed.replace(" · ", "")].filter(part => part !== "").join(" · ") },
+			card: { head: `${label} · ${thread.title}`, description: [unread.replace(" · ", ""), closed.replace(" · ", "")].filter(part => part !== "").join(" · ") },
 		};
 	}
 
 	private messageRow(message: ViewerMessage, selected: boolean): BodyRow {
 		const marker = message.direction === "out" ? "→" : "←";
+		const author = message.author.split(":").pop() ?? message.author;
 		const relation = message.relation === undefined ? "" : ` · ${message.relation}`;
+		// A message rebuilt from an outbound receipt has no send time stored beside it.
+		const at = clockText(message.at);
+		const head = `${at === "" ? author : `${at} · ${author}`}${relation}`;
 		return {
 			left: [[marker, message.direction === "out" ? "accent" : "muted"]],
 			right: [
-				[`${clockText(message.at)} · ${message.author.split(":").pop() ?? message.author}${relation}`, "muted"],
+				[head, "muted"],
 				[` · ${oneLine(message.text)}`, ""],
 			],
 			selected,
 			act: `onlyne.message:${message.seq}`,
 			key: message.seq,
 			card: {
-				head: `${marker} ${clockText(message.at)} · ${message.author.split(":").pop() ?? message.author}${relation}`,
+				head: `${marker} ${head}`,
 				description: oneLine(message.text),
 			},
 		};
@@ -381,8 +386,13 @@ export class OnlyneViewer implements Component {
 		if (layout.stacked) {
 			const rows: BodyRow[] = [{ left: [[`Threads · ${threads.length}`, "muted"]], key: "threads-head" }];
 			rows.push(...threadRows);
-			rows.push({ left: [[`Messages · ${thread.alias} · ${thread.title}`, "muted"]], key: "messages-head" });
-			rows.push(...(messages.length === 0 ? [{ left: [["没有消息。", "muted"]] } as BodyRow] : messageRows));
+			rows.push({ left: [[`Messages · ${shortAlias(thread.alias)} · ${thread.title}`, "muted"]], key: "messages-head" });
+			// One column here: the marker leads the message's own line instead of a column of its own.
+			rows.push(
+				...(messages.length === 0
+					? [{ left: [["没有消息。", "muted"]] } as BodyRow]
+					: messageRows.map(row => ({ ...row, left: [...row.left, ...(row.right ?? [])], right: undefined }))),
+			);
 			rows.push(...detailRows);
 			return rows;
 		}
@@ -395,11 +405,14 @@ export class OnlyneViewer implements Component {
 			const right = rightRows[index];
 			rows.push({
 				left: left?.left ?? [],
-				right: right?.left ?? [],
+				// A message row is marker + head + body; the column beside the threads takes
+				// all three, or the right side shows a direction arrow and nothing else.
+				right: [...(right?.left ?? []), ...(right?.right ?? [])],
 				leftWidth: layout.threadWidth,
 				leftAct: left?.act,
 				rightAct: right?.act,
 				selected: right?.selected === true,
+				card: right?.card,
 				key: `${left?.key ?? ""}/${right?.key ?? ""}`,
 			});
 		}
@@ -559,7 +572,7 @@ export class OnlyneViewer implements Component {
 			description: "",
 		};
 		const actions = row.act ?? row.leftAct;
-		if (row.card !== undefined || row.right === undefined) {
+		if (row.right === undefined) {
 			return node(
 				"card",
 				{
@@ -571,27 +584,46 @@ export class OnlyneViewer implements Component {
 				[
 					// One head row plus one clamped description row keeps the frame at bodyHeight;
 					// the ANSI row already carries the same text as a single line.
-					textNode([span(asCard.head, "strong")], { wrap: "none", truncate: "end", lines: 1 }),
-					...(asCard.description === "" ? [] : [textNode([span(asCard.description, "muted")], { wrap: "none", truncate: "end", lines: 1 })]),
+					textNode([span(asCard.head, "strong")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
+					...(asCard.description === "" ? [] : [textNode([span(asCard.description, "muted")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } })]),
 				],
 				row.key ?? `row-${index}`,
 			);
 		}
 		// Two-column chat rows: each column is its own bare card so either side can show
-		// a selection band.
+		// a selection band. The left column is capped at the width the ANSI layout gives
+		// it and the right one grows into the rest; without both bounds a long line widens
+		// its card past the sheet and the row pushes past the column beside it.
+		const leftBound = row.leftWidth === undefined ? {} : { max: { w: `${row.leftWidth}ch` as const } };
+		// A message keeps its head-over-body card on the right; the thread column beside it
+		// is a single line, and only the message carries the selection there.
+		const rightChildren =
+			row.card === undefined
+				? [textNode(this.spans(row.right ?? []), { wrap: "none", truncate: "end", grow: 1, shrink: 1, min: { w: 0 } })]
+				: [
+						textNode([span(row.card.head, "muted")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
+						...(row.card.description === ""
+							? []
+							: [textNode([span(row.card.description)], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } })]),
+					];
 		return node(
 			"row",
 			{ gap: "sm", align: "start" },
 			[
 				node("card", {
+					variant: "bare",
+					shrink: 1,
+					...leftBound,
+					...(row.leftAct === undefined ? {} : { actions: { click: row.leftAct } }),
+				}, [textNode(this.spans(row.left), { wrap: "none", truncate: "end", shrink: 1, min: { w: 0 } })], `${row.key ?? index}/left`),
+				node("card", {
 					...(row.selected === true ? {} : { variant: "bare" as const }),
 					selected: row.selected === true,
-					...(row.leftAct === undefined ? {} : { actions: { click: row.leftAct } }),
-				}, [textNode(this.spans(row.left), { wrap: "none", truncate: "end" })], `${row.key ?? index}/left`),
-				node("card", {
-					variant: "bare",
+					grow: 1,
+					shrink: 1,
+					basis: 0 as const,
 					...(row.rightAct === undefined ? {} : { actions: { click: row.rightAct } }),
-				}, [textNode(this.spans(row.right!), { wrap: "none", truncate: "end", grow: 1 })], `${row.key ?? index}/right`),
+				}, rightChildren, `${row.key ?? index}/right`),
 			],
 			row.key ?? `row-${index}`,
 		);

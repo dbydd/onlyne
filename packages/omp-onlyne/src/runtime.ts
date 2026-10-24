@@ -240,6 +240,11 @@ class OmpRuntime implements PluginRuntime {
 				last_seq: entries.at(-1)?.seq ?? "0", messages: entries.map(entry => ({ seq: entry.seq, direction: entry.message.sender === this.config.node.id ? "out" : "in", author: entry.authenticated_author, at: entry.at, text: entry.message.msg, relation: entry.message.meta?.relation })),
 			});
 		}
+		// A member's own message never comes back through its inbox, so the message that
+		// opened a thread it only takes part in survives only in the outbound record that
+		// carried it. Read those here and merge them below the inbox rows, or the member
+		// sees the reply and not the question that started it.
+		const outbound = await this.storage.transaction(tx => tx.scan<Outbound>("outbound/"));
 		const seen = new Map<string, ViewerThread>();
 		for (const item of inbox) {
 			const ref = item.attention.thread_ref;
@@ -254,8 +259,20 @@ class OmpRuntime implements PluginRuntime {
 				view.last_seq = entry.seq;
 			}
 		}
+		for (const row of outbound) {
+			const receipt = row.value.receipt;
+			if (receipt === undefined) continue;
+			const ref = receipt.thread_ref;
+			const key = `${ref.owner}/${ref.id}`;
+			if (hosted.has(key)) continue;
+			const view = seen.get(key) ?? { alias: ref.id, title: `来自 ${shortNodeId(ref.owner)} 的线程`, state: "open", unread: 0, last_seq: "0", messages: [] };
+			seen.set(key, view);
+			const message = row.value.request.message;
+			view.messages.push({ seq: receipt.seq, direction: "out", author: message.sender, at: "", text: message.msg, relation: message.meta?.relation });
+			if (Number(receipt.seq) > Number(view.last_seq)) view.last_seq = receipt.seq;
+		}
+		for (const view of seen.values()) view.messages.sort((left, right) => Number(left.seq) - Number(right.seq));
 		views.push(...seen.values());
-		const outbound = await this.storage.transaction(tx => tx.scan<Outbound>("outbound/"));
 		const queue: QueueItem[] = inbox.filter(item => !item.injected).map(item => ({ id: `inbound:${item.attention.obligation_id}`, kind: "inbound", label: `${item.attention.thread_ref.id}/${item.attention.seq}`, detail: `${item.attention.authenticated_author} · pending consumption`, at: item.attention.entry?.at }));
 		queue.push(...contexts.filter(record => record.state === "running" || record.state === "unbound").map(record => ({ id: `context:${record.alias}`, kind: "context" as const, label: record.alias, detail: `${record.summary} · ${record.state}`, at: record.created_at })));
 		queue.push(...outbound.filter(row => row.value.state === "unknown" || row.value.state === "pending").map(row => ({ id: row.key, kind: "outbound" as const, label: row.value.request.target_endpoint, detail: row.value.state })));

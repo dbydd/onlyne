@@ -48,6 +48,12 @@ export function clockText(at: string): string {
 	return new Date(time).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
+/** The head of a thread alias: its first UUID segment, which is what a narrow row can afford. */
+export function shortAlias(alias: string): string {
+	const head = alias.split("-", 1)[0] ?? alias;
+	return head === "" ? alias : head;
+}
+
 export function fit(text: string, width: number): string {
 	return truncateToWidth(text, Math.max(0, width));
 }
