@@ -332,6 +332,8 @@ pi.registerTool({
 
 判定通过 OMP 的 `judge` 模型角色执行（`resolveJudge`），插件不直连判定服务 URL。角色链、凭据、候选回退与用量记账由 OMP 管理；没有可用候选时返回 `decision_unavailable`，插件不自行补一个判定。
 
+判定输入有字符预算。Clef 后端把一次判定限制在 16 384 token，序列化时按键排序并保留前缀，`history` 排在 `request` 之前，所以长历史会先占满额度、把当前请求整段切掉，模型随后基于残缺输入给出答案。插件在提交前按 `history` → `task_dispatches` → `context_note` 的顺序整段丢弃背景，保留最新证据，`request` 与判定问题永不裁剪；仍然超预算时返回 `decision_unavailable` 并写明所需字符数，不做静默截断。
+
 ### 6.1 判定与执行
 
 | SystemOne 判定动作 | 插件执行 | 模型可见形式 |
@@ -585,6 +587,7 @@ Tern 下的原生渲染由 Tern Surface Protocol（TSP）驱动。OMP 用 `TERM_
 | `onlyne.inbound.inject` | debug | thread, seq, context, outcome, reason | 每次注入尝试；outcome 为 `delivered`/`queued`/`waiting`/`skipped`/`consumed` |
 | `onlyne.judge.answered` | info | entry, action, context, ms | 判官给出入站动作，每个条目一次 |
 | `onlyne.judge.failed` | warn | entry, ms, error | 判官不可用或答案不合法 |
+| `onlyne.judge.trimmed` | debug | dropped, chars | 判定输入超过预算，背景段落被丢弃 |
 | `onlyne.delivery.sent` | info | entry, action, target, turn/running | 正文交给宿主 |
 | `onlyne.delivery.held` | debug | entry, reason, context | 未投递：判官排队或此前已投递 |
 | `onlyne.consumption.confirmed` | info | thread, seq, context, via | 宿主确认模型读过该条目 |

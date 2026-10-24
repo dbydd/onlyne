@@ -106,6 +106,7 @@ export interface DeciderDeps {
 	/** Registry id of this node's main session; children are bound under it. */
 	mainAgentId: string;
 	contexts: ContextRegistry;
+	log?(message: string, fields: Record<string, unknown>): void;
 	listThreads(): Promise<Thread[]>;
 	listMessages(thread: ThreadRef, cursor?: string): Promise<Page<Entry>>;
 	/** Peers from the library's live discovery records, never a static configuration. */
@@ -117,6 +118,41 @@ export interface DeciderDeps {
 const TODO_ENTRY = "mouriya.omp.todo-more";
 /** Upper bound on pages scanned for one thread tail; exceeding it is reported, never hidden. */
 const MAX_TAIL_PAGES = 100;
+/**
+ * One decision prompt is capped at 16384 tokens by the Clef backend, which serializes the
+ * state with sorted keys and keeps only the leading characters. A long `history` therefore
+ * spends the budget first and the current `request` is dropped, so the answer describes an
+ * input the model never saw. Keep the state under a conservative character budget by
+ * discarding whole background sections, newest rows last; the request and the questions
+ * are never cut, and a state that still does not fit fails instead of being truncated.
+ */
+const STATE_BUDGET_CHARS = 40_000;
+const TRIM_ORDER = ["history", "task_dispatches", "context_note"] as const;
+
+function stateSize(state: Row): number {
+	return JSON.stringify(state).length;
+}
+
+/** Applies the budget above; the caller fails the decision when `chars` still exceeds it. */
+export function fitState(state: Row): { fitted: Row; dropped: string[]; chars: number } {
+	let fitted = state;
+	const dropped: string[] = [];
+	for (const key of TRIM_ORDER) {
+		if (stateSize(fitted) <= STATE_BUDGET_CHARS) break;
+		const value = fitted[key];
+		if (value === undefined) continue;
+		if (Array.isArray(value)) {
+			// Rows are oldest first, so dropping the front keeps the most recent evidence.
+			let kept: unknown[] = value;
+			while (kept.length > 0 && stateSize({ ...fitted, [key]: kept }) > STATE_BUDGET_CHARS) kept = kept.slice(Math.ceil(kept.length / 2));
+			fitted = { ...fitted, [key]: kept };
+		} else {
+			fitted = { ...fitted, [key]: null };
+		}
+		dropped.push(key);
+	}
+	return { fitted, dropped, chars: stateSize(fitted) };
+}
 
 /** Decisions go through OMP's `judge` role; the plugin never picks a target or a plan itself. */
 export class JudgeDecider {
@@ -208,6 +244,11 @@ export class JudgeDecider {
 
 	async #judge(scope: ExtensionContext, state: unknown, questions: Questions, signal?: AbortSignal): Promise<Answers> {
 		try {
+			const { fitted, dropped, chars } = fitState(state as Row);
+			if (chars > STATE_BUDGET_CHARS) {
+				throw new OnlyneError("decision_unavailable", `The decision state needs ${String(chars)} characters; the judge prompt is capped near ${String(STATE_BUDGET_CHARS)}.`);
+			}
+			if (dropped.length > 0) this.deps.log?.("onlyne.judge.trimmed", { dropped, chars });
 			const settings = (await Settings.current) ?? (await Settings.loadReadOnly({ cwd: scope.cwd }));
 			const judge = resolveJudge({
 				settings,
@@ -217,7 +258,7 @@ export class JudgeDecider {
 				purpose: "onlyne",
 				onUsage: journalJudgmentUsage(scope.sessionManager),
 			});
-			const result = await judge.judge({ state: jsonState(state), questions }, signal === undefined ? {} : { signal });
+			const result = await judge.judge({ state: jsonState(fitted), questions }, signal === undefined ? {} : { signal });
 			return result.answers as Answers;
 		} catch (error) {
 			throw new OnlyneError(

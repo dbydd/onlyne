@@ -89,6 +89,7 @@ class OmpRuntime implements PluginRuntime {
 		});
 		this.decider = new JudgeDecider({
 			config: this.config, contexts: this.contexts, mainAgentId: this.mainAgentId,
+			log: (message, fields) => this.pi.logger.debug(message, fields),
 			listPeers: async () => (await this.node.discovery.listRecords()).filter(record => record.verified_at !== undefined && Date.parse(record.expires_at) > Date.now()),
 			listReceiverContexts: async id => id === this.config.node.id
 				? [{ alias: "main", summary: "Main OMP session", state: this.main.isIdle() ? "idle" : "running" }, ...await this.contexts.list()]

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Entry, Page, Thread, ThreadRef } from "@onlyne/lib";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { JudgeDecider, type DecisionScope, type PeerRecord } from "../src/decider.ts";
+import { fitState, JudgeDecider, type DecisionScope, type PeerRecord } from "../src/decider.ts";
 import type { ContextRegistry } from "../src/store.ts";
 import type { ContextRecord, OnlyneConfig } from "../src/types.ts";
 
@@ -167,5 +167,31 @@ describe("subagent slices", () => {
 		await expect(decider().decide(scope({ op: "create", title: "Research" }, true))).rejects.toThrow(
 			"may only read",
 		);
+	});
+});
+
+describe("judge state budget", () => {
+	const request = { delivery_kind: "ask", msg: "review this", meta: { to: other } };
+
+	test("a long history is dropped before the current request", () => {
+		const history = Array.from({ length: 200 }, (_, index) => ({ role: "tool", text: "x".repeat(500), index }));
+		const { fitted, dropped, chars } = fitState({ history, request, node });
+		expect(chars).toBeLessThanOrEqual(40_000);
+		expect(dropped).toContain("history");
+		expect(fitted.request).toEqual(request);
+		expect((fitted.history as unknown[]).length).toBeLessThan(history.length);
+		// The rows kept are the newest ones; the front of the array is the oldest evidence.
+		expect((fitted.history as Array<{ index: number }>).at(-1)?.index).toBe(199);
+	});
+
+	test("a state that still does not fit is reported, not truncated", () => {
+		const { chars } = fitState({ request: { msg: "y".repeat(50_000) }, history: [] });
+		expect(chars).toBeGreaterThan(40_000);
+	});
+
+	test("a state inside the budget is passed through", () => {
+		const { fitted, dropped } = fitState({ history: [], request, node });
+		expect(dropped).toEqual([]);
+		expect(fitted).toEqual({ history: [], request, node });
 	});
 });
