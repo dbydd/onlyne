@@ -394,14 +394,45 @@ export class OnlyneViewer implements Component {
 					head: `线程 · ${threads.length}`,
 					collapsible: true,
 					collapsed: this.threadFolded,
-					...(this.threadFolded ? {} : { max: { w: `${layout.threadWidth}ch` as const }, shrink: 0 }),
+					...(this.threadFolded
+						? {}
+						: {
+								max: { w: `${layout.threadWidth}ch` as const, h: `${layout.threadHeight}lines` as const },
+								shrink: 0,
+							}),
 				},
 				threadCards,
 				"threads",
 			),
 		];
-		columns.push(node("col", { grow: 1, shrink: 1, basis: 0 as const }, messageCards, "messages"));
-		return node("row", { gap: "sm", align: "start", role: "onlyne.chat" }, columns, "chat");
+		columns.push(
+			node(
+				"col",
+				{
+					grow: 1,
+					shrink: 1,
+					basis: 0 as const,
+					max: { h: `${layout.messageHeight}lines` as const },
+				},
+				messageCards,
+				"messages",
+			),
+		);
+		// The rows fallback fills exactly bodyHeight rows; the columns hug their content,
+		// so the chat row carries the height the page owes the frame.
+		const chatHeight = Math.max(layout.threadHeight, layout.messageHeight);
+		return node(
+			"row",
+			{
+				gap: "sm",
+				align: "start",
+				role: "onlyne.chat",
+				min: { h: `${chatHeight}lines` as const },
+				max: { h: `${chatHeight}lines` as const },
+			},
+			columns,
+			"chat",
+		);
 	}
 
 	/** The selected message as one ANSI block: a dim head, then the body with its escapes dropped. */
@@ -731,8 +762,9 @@ export class OnlyneViewer implements Component {
 		// as a mini terminal and scrolls it itself (the jobs sheet shows job output the same
 		// way), so the whole message stays reachable without the viewer windowing it.
 		const layout = this.chatLayout(cx.cols);
-		const detail = this.page === "chat" && layout.detailHeight > 0 ? this.detailText() : undefined;
-		const chat = this.chatBody(cx, layout);
+		const chatPage = this.page === "chat";
+		const detail = chatPage && layout.detailHeight > 0 ? this.detailText() : undefined;
+		const chat = chatPage ? this.chatBody(cx, layout) : undefined;
 		const rows = chat === undefined ? this.bodyRows(cx.cols).filter(row => detail === undefined || row.key?.includes("detail-") !== true) : [];
 		const children: NativeNode[] = [
 			this.titleNode(),
