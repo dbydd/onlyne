@@ -1152,22 +1152,26 @@ export class OnlyneViewer implements Component {
 	}
 
 	private ansiRows(width: number): string[] {
+		const geo = this.geometry();
 		const lines: string[] = [];
 		const short = (text: string): string => fit(text, width);
 		if (this.page === "chat") {
 			const thread = this.selectedThread();
 			lines.push(short(`线程 ${this.threads().length} · ${thread === undefined ? "未选择" : thread.title}`));
-			for (const message of thread?.messages.slice(-12) ?? []) {
+			const messages = thread?.messages ?? [];
+			const visible = messages.slice(-geo.messages);
+			if (visible.length < messages.length) lines.push(short(`更早的 ${messages.length - visible.length} 条不在这一屏`));
+			for (const message of visible) {
 				lines.push(short(`${message.direction === "out" ? "→" : "←"} [${message.seq}] ${plainAuthor(message.author)} ${clockText(message.at)}`));
-				for (const line of message.text.split("\n")) lines.push(short(`  ${line}`));
+				for (const line of message.text.split("\n").slice(0, 6)) lines.push(short(`  ${line}`));
 			}
 			const blocked = this.sendBlocked();
 			lines.push(short(`传入：${oneLine(this.draft) || "（空）"}${blocked === undefined ? "" : ` · ${blocked}`}`));
-			return lines;
+			return this.fitRows(lines, geo.body);
 		}
 		if (this.page === "queue") {
 			for (const item of this.snapshot?.queue ?? []) lines.push(short(`${item.kind} ${item.label} · ${oneLine(item.detail)}`));
-			return lines;
+			return this.fitRows(lines, geo.body);
 		}
 		if (this.page === "discovery") {
 			for (const group of this.domainGroups()) {
@@ -1176,11 +1180,22 @@ export class OnlyneViewer implements Component {
 					lines.push(short(`  ${shortNodeId(peer.record.node_id)} · ${peer.trust === undefined ? "无认证" : STATE_LABEL[peer.trust.state]} · ${peer.record.base_url}`));
 				}
 			}
-			return lines;
+			return this.fitRows(lines, geo.body);
 		}
-		for (const contact of this.snapshot?.contacts ?? []) lines.push(short(`${shortNodeId(contact.node_id)} · ${regionLabel(contact.region)} · ${contact.base_url}`));
-		for (const invite of this.invites()) lines.push(short(`待确认 ${shortNodeId(invite.node_id)} · ${invite.fingerprint}`));
-		return lines;
+		const invites = this.invites();
+		lines.push(short(`待确认 · ${invites.length}`));
+		for (const invite of invites) lines.push(short(`  ${shortNodeId(invite.node_id)} · 对方 ${invite.fingerprint} · 本机 ${this.snapshot?.identity?.fingerprint ?? "无密钥"}`));
+		const trusted = (this.snapshot?.contacts ?? []).filter(contact => this.trustOf(contact.node_id)?.state === "trusted");
+		lines.push(short(`已认证 · ${trusted.length}`));
+		for (const contact of trusted) lines.push(short(`  ${shortNodeId(contact.node_id)} · ${regionLabel(contact.region)} · ${contact.base_url}`));
+		return this.fitRows(lines, geo.body);
+	}
+
+	/** Exactly the body's rows: the fallback pads and trims, so it cannot resize the sheet either. */
+	private fitRows(lines: string[], rows: number): string[] {
+		const out = lines.slice(0, rows);
+		while (out.length < rows) out.push("");
+		return out;
 	}
 
 	invalidate(): void {
