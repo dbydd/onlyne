@@ -14,7 +14,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { shortNodeId } from "../config.ts";
 import { getRuntime } from "../runtime.ts";
-import type { QueueItem, ViewerMessage, ViewerSnapshot, ViewerThread } from "../types.ts";
+import type { QueueItem, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "../types.ts";
 import { ageText, clockText, fit, kindLabel, kindRank, oneLine, pad, shortAlias } from "./format.ts";
 
 type Page = "queue" | "chat" | "discovery" | "contacts";
@@ -26,7 +26,7 @@ const PAGES: readonly { id: Page; label: string }[] = [
 	{ id: "contacts", label: "联系人" },
 ];
 
-const FOOTER = "1-4 切页 · j/k 移动 · t 线程 · space 连接 · enter 详情 · r 刷新 · Esc 关闭";
+const FOOTER = "1-4 切页 · j/k 移动 · [/] 切域 · t 线程 · space 勾选 · x 撤销信任 · enter 详情 · r 刷新 · Esc 关闭";
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -52,6 +52,28 @@ interface BodyRow {
 	card?: { head: string; description: string; tone?: string };
 }
 
+/** One aggregated domain of the discovery page: its label plus the node records in it. */
+interface DiscoveryGroup {
+	id?: string;
+	label: string;
+	nodes: ViewerDiscovery[];
+}
+
+/** A node whose key exchange waits for the y/n confirmation, fingerprint already verified. */
+interface PendingExchange {
+	node_id: string;
+	fingerprint: string;
+	domain?: string;
+}
+
+/** RFC 0017 trust rows the runtime adds to the snapshot; kept local until the parent types it. */
+interface ViewerTrust {
+	node_id: string;
+	fingerprint: string;
+	state: "pending" | "trusted" | "revoked";
+	base_url?: string;
+}
+
 /** Read-only view of the current OMP process: queue, threads, discovery and contacts over a fixed body. */
 export class OnlyneViewer implements Component {
 	private snapshot: ViewerSnapshot | undefined;
@@ -61,8 +83,12 @@ export class OnlyneViewer implements Component {
 	private queueIndex = 0;
 	private threadIndex = 0;
 	private messageIndex = 0;
-	private discoveryIndex = 0;
+	private domainIndex = 0;
+	private nodeIndex = 0;
 	private contactIndex = 0;
+	/** Node ids ticked for key exchange, this viewing session only. */
+	private checked = new Set<string>();
+	private pendingConfirm: PendingExchange | undefined;
 	private expanded = false;
 	/** Scroll request for the detail text box; bumped per scroll key, like raw-sse's stream page. */
 	private detailScroll: NativeScroll | undefined;
@@ -143,8 +169,10 @@ export class OnlyneViewer implements Component {
 		const threads = this.threads();
 		this.threadIndex = Math.min(this.threadIndex, Math.max(0, threads.length - 1));
 		this.messageIndex = Math.min(this.messageIndex, Math.max(0, (threads[this.threadIndex]?.messages.length ?? 0) - 1));
-		this.discoveryIndex = Math.min(this.discoveryIndex, Math.max(0, (this.snapshot?.discovery.length ?? 0) - 1));
-		this.contactIndex = Math.min(this.contactIndex, Math.max(0, (this.snapshot?.contacts.length ?? 0) - 1));
+		const domains = this.discoveryDomains();
+		this.domainIndex = Math.min(this.domainIndex, Math.max(0, domains.length - 1));
+		this.nodeIndex = Math.min(this.nodeIndex, Math.max(0, (domains[this.domainIndex]?.nodes.length ?? 0) - 1));
+		this.contactIndex = Math.min(this.contactIndex, Math.max(0, this.contactSources().length - 1));
 	}
 
 	private queueItems(): QueueItem[] {
@@ -193,9 +221,9 @@ export class OnlyneViewer implements Component {
 			case "chat":
 				return this.selectedThread()?.messages.length ?? 0;
 			case "discovery":
-				return this.snapshot?.discovery.length ?? 0;
+				return this.discoveryDomains()[this.domainIndex]?.nodes.length ?? 0;
 			case "contacts":
-				return this.snapshot?.contacts.length ?? 0;
+				return this.contactSources().length;
 		}
 	}
 
@@ -206,7 +234,7 @@ export class OnlyneViewer implements Component {
 			case "chat":
 				return this.messageIndex;
 			case "discovery":
-				return this.discoveryIndex;
+				return this.nodeIndex;
 			case "contacts":
 				return this.contactIndex;
 		}
@@ -221,7 +249,7 @@ export class OnlyneViewer implements Component {
 				this.messageIndex = index;
 				return;
 			case "discovery":
-				this.discoveryIndex = index;
+				this.nodeIndex = index;
 				return;
 			case "contacts":
 				this.contactIndex = index;
@@ -232,7 +260,7 @@ export class OnlyneViewer implements Component {
 	/** Rows of the list the page's selection moves in, used for the half-page step. */
 	private pageWindowHeight(page: Page): number {
 		const body = this.bodyHeight();
-		if (page === "discovery") return Math.max(1, body - 1);
+		if (page === "discovery") return Math.max(1, body - 2);
 		if (page === "chat") return Math.max(1, this.chatLayout(this.lastWidth).messageHeight);
 		return body;
 	}
@@ -435,6 +463,96 @@ export class OnlyneViewer implements Component {
 		);
 	}
 
+	/**
+	 * The discovery page as two columns, mirroring the chat body: the domains are a
+	 * `section` on the left, the node checklist grows beside it. A node card is a
+	 * head line over its address, so a window of floor(height / 2) fits.
+	 */
+	private discoveryBody(layout: { threadWidth: number }): NativeNode | undefined {
+		const groups = this.discoveryDomains();
+		if (groups.length === 0) return undefined;
+		const body = this.bodyHeight();
+		const domainWindow = this.window("domains", groups, this.domainIndex, Math.max(1, Math.floor((body - 1) / 2)));
+		const domainCards = domainWindow.items.map((group, offset) => {
+			const index = domainWindow.start + offset;
+			const row = this.domainRow(group, index === this.domainIndex, index);
+			const card = row.card!;
+			return node(
+				"card",
+				{
+					...(row.selected === true ? {} : { variant: "bare" as const }),
+					selected: row.selected === true,
+					actions: { click: row.act! },
+					title: card.head,
+				},
+				[
+					textNode([span(card.head, "strong")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
+					textNode([span(card.description, "muted")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
+				],
+				group.id ?? "no-domain",
+			);
+		});
+		const refresh = node(
+			"card",
+			{ variant: "bare" as const, actions: { click: "onlyne.discovery.refresh" }, title: "刷新发现" },
+			[textNode([span("刷新发现", "strong")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } })],
+			"refresh",
+		);
+		const group = groups[this.domainIndex] ?? groups[0]!;
+		const nodes = group.nodes;
+		const nodeWindow = this.window("discovery-nodes", nodes, this.nodeIndex, Math.max(1, Math.floor(body / 2)));
+		const nodeCards = nodes.length === 0
+			? [textNode([span("该域没有发现节点。", "muted")])]
+			: nodeWindow.items.map((record, offset) => {
+					const index = nodeWindow.start + offset;
+					const row = this.discoveryNodeRow(record, index === this.nodeIndex, index);
+					const card = row.card!;
+					return node(
+						"card",
+						{
+							...(row.selected === true ? {} : { variant: "bare" as const }),
+							selected: row.selected === true,
+							actions: { click: row.act! },
+							title: card.head,
+						},
+						[
+							textNode([span(card.head, "strong")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
+							textNode([span(card.description, "muted")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
+						],
+						record.node_id,
+					);
+				});
+		return node(
+			"row",
+			{
+				gap: "sm",
+				align: "start",
+				role: "onlyne.discovery",
+				min: { h: `${body}lines` as const },
+				max: { h: `${body}lines` as const },
+			},
+			[
+				node(
+					"section",
+					{
+						head: `域 · ${groups.length}`,
+						max: { w: `${layout.threadWidth}ch` as const, h: `${body}lines` as const },
+						shrink: 0,
+					},
+					[refresh, ...domainCards],
+					"domains",
+				),
+				node(
+					"col",
+					{ grow: 1, shrink: 1, basis: 0 as const, max: { h: `${body}lines` as const } },
+					nodeCards,
+					"discovery-nodes",
+				),
+			],
+			"discovery",
+		);
+	}
+
 	/** The selected message as one ANSI block: a dim head, then the body with its escapes dropped. */
 	private detailText(): string | undefined {
 		const message = this.selectedThread()?.messages[this.messageIndex];
@@ -531,8 +649,75 @@ export class OnlyneViewer implements Component {
 		return rows;
 	}
 
+	/** Discovery records grouped by the domain they declare; records without one group last. */
+	private discoveryDomains(): DiscoveryGroup[] {
+		const groups = new Map<string, ViewerDiscovery[]>();
+		for (const record of this.snapshot?.discovery ?? []) {
+			const id = record.region ?? "";
+			const nodes = groups.get(id);
+			if (nodes === undefined) groups.set(id, [record]);
+			else nodes.push(record);
+		}
+		return [...groups.entries()]
+			.map(([id, nodes]) => ({
+				...(id === "" ? {} : { id }),
+				label: id === "" ? "未入域" : this.domainLabel(id),
+				nodes: [...nodes].sort((left, right) => left.node_id.localeCompare(right.node_id) || left.base_url.localeCompare(right.base_url)),
+			}))
+			.sort((left, right) => {
+				if ((left.id === undefined) !== (right.id === undefined)) return left.id === undefined ? 1 : -1;
+				return left.label.localeCompare(right.label);
+			});
+	}
+
+	/** The columns show the bare domain label; the full id stays in the snapshot. */
+	private domainLabel(id: string): string {
+		return id.startsWith("urn:onlyne:region:") ? id.slice("urn:onlyne:region:".length) : id;
+	}
+
+	private trustFor(nodeId: string): ViewerTrust | undefined {
+		return this.snapshot?.trust?.find(entry => entry.node_id === nodeId);
+	}
+
+	private domainRow(group: DiscoveryGroup, selected: boolean, index: number): BodyRow {
+		return {
+			left: [[group.label, "strong"], [` · ${group.nodes.length} 节点`, "muted"]],
+			selected,
+			act: `onlyne.domain:${index}`,
+			key: group.id ?? "no-domain",
+			card: { head: group.label, description: `${group.nodes.length} 节点` },
+		};
+	}
+
+	private discoveryNodeRow(record: ViewerDiscovery, selected: boolean, index: number): BodyRow {
+		const checked = this.checked.has(record.node_id);
+		const trust = this.trustFor(record.node_id);
+		const glyph = trust === undefined ? "" : trust.state === "trusted" ? "✓" : trust.state === "pending" ? "◌" : "✕";
+		const cells: Cell[] = [
+			[checked ? "[x] " : "[ ] ", checked ? "success" : "muted"],
+			[shortNodeId(record.node_id), "strong"],
+			[` · ${record.base_url}`, "path"],
+			[` · ${record.source}`, "muted"],
+		];
+		if (glyph !== "") cells.push([` · ${glyph}`, trust?.state === "trusted" ? "success" : trust?.state === "pending" ? "accent" : "error"]);
+		if (record.error !== undefined) cells.push([` · ⚠ ${oneLine(record.error)}`, "error"]);
+		const description = [record.base_url, record.source, glyph, record.error === undefined ? "" : `⚠ ${oneLine(record.error)}`]
+			.filter(part => part !== "")
+			.join(" · ");
+		return {
+			left: cells,
+			selected,
+			act: `onlyne.node:${index}`,
+			key: `${record.node_id}/${record.base_url}`,
+			card: {
+				head: `${checked ? "[x]" : "[ ]"} ${shortNodeId(record.node_id)}`,
+				description,
+				tone: record.error === undefined ? undefined : "warning",
+			},
+		};
+	}
+
 	private discoveryRows(): BodyRow[] {
-		const records = this.snapshot?.discovery ?? [];
 		const rows: BodyRow[] = [
 			{
 				left: [
@@ -543,53 +728,77 @@ export class OnlyneViewer implements Component {
 				key: "refresh",
 			},
 		];
-		if (records.length === 0) {
+		const groups = this.discoveryDomains();
+		if (groups.length === 0) {
 			rows.push({ left: [["没有发现记录。", "muted"]] });
 			return rows;
 		}
-		const now = Date.now();
-		const { start, items } = this.window("discovery", records, this.discoveryIndex, Math.max(1, this.bodyHeight() - 1));
+		const group = groups[this.domainIndex] ?? groups[0]!;
+		rows.push({
+			left: [
+				[`域 ${this.domainIndex + 1}/${groups.length} · `, "muted"],
+				[group.label, "strong"],
+				[" · [ / ] 切换域", "muted"],
+			],
+			key: "domain-head",
+		});
+		if (group.nodes.length === 0) {
+			rows.push({ left: [["该域没有发现节点。", "muted"]] });
+			return rows;
+		}
+		const height = Math.max(1, this.bodyHeight() - 2);
+		const { start, items } = this.window("discovery-nodes", group.nodes, this.nodeIndex, height);
 		for (const [offset, record] of items.entries()) {
-			const index = start + offset;
-			const confirmed = record.verified_at !== undefined && Date.parse(record.expires_at) > now;
-			const cells: Cell[] = [
-				[confirmed ? "[x] " : "[ ] ", confirmed ? "success" : "muted"],
-				[shortNodeId(record.node_id), "strong"],
-			];
-			if (record.region !== undefined) cells.push([` · ${record.region}`, "muted"]);
-			cells.push([` · ${record.base_url}`, "path"], [` · ${record.source}`, "muted"]);
-			if (record.error !== undefined) cells.push([` · ⚠ ${oneLine(record.error)}`, "error"]);
-			const description = [record.region === undefined ? "" : record.region, record.base_url, record.source, record.error === undefined ? "" : oneLine(record.error)]
-				.filter(part => part !== "")
-				.join(" · ");
-			rows.push({
-				left: cells, selected: index === this.discoveryIndex, act: `onlyne.discovery:${index}`, key: record.base_url,
-				card: { head: `${confirmed ? "[x]" : "[ ]"} ${shortNodeId(record.node_id)}`, description, tone: record.error === undefined ? undefined : "warning" },
-			});
+			rows.push(this.discoveryNodeRow(record, start + offset === this.nodeIndex, start + offset));
 		}
 		return rows;
 	}
 
-	private contactRows(): BodyRow[] {
+	/** Contacts plus every pending trust invite whose contact record is already gone. */
+	private contactSources(): { node_id: string; base_url?: string; region?: string; last_seen?: string }[] {
 		const contacts = this.snapshot?.contacts ?? [];
-		if (contacts.length === 0) return [{ left: [["没有可达联系人。", "muted"]] }];
-		const { start, items } = this.window("contacts", contacts, this.contactIndex, this.bodyHeight());
-		return items.map((contact, offset) => {
+		const seen = new Set(contacts.map(contact => contact.node_id));
+		const invites = (this.snapshot?.trust ?? []).filter(entry => entry.state === "pending" && !seen.has(entry.node_id));
+		return [
+			...contacts.map(contact => ({
+				node_id: contact.node_id,
+				base_url: contact.base_url,
+				...(contact.region === undefined ? {} : { region: contact.region }),
+				last_seen: contact.last_seen,
+			})),
+			...invites.map(entry => ({ node_id: entry.node_id })),
+		];
+	}
+
+	private contactRows(): BodyRow[] {
+		const sources = this.contactSources();
+		if (sources.length === 0) return [{ left: [["没有可达联系人。", "muted"]] }];
+		const { start, items } = this.window("contacts", sources, this.contactIndex, this.bodyHeight());
+		return items.map((source, offset) => {
 			const index = start + offset;
-			const age = ageText(contact.last_seen);
-			const cells: Cell[] = [
-				[index === this.contactIndex ? "> " : "  ", "muted"],
-				[shortNodeId(contact.node_id), "strong"],
-			];
-			if (contact.region !== undefined) cells.push([` · ${contact.region}`, "muted"]);
-			cells.push([` · ${contact.base_url}`, "path"]);
+			const trust = this.trustFor(source.node_id);
+			const checked = this.checked.has(source.node_id);
+			const age = source.last_seen === undefined ? "" : ageText(source.last_seen);
+			const glyph = trust === undefined ? "" : trust.state === "trusted" ? "✓" : trust.state === "pending" ? "◌" : "✕";
+			const cells: Cell[] = [[index === this.contactIndex ? "> " : "  ", "muted"]];
+			if (trust?.state === "pending") cells.push([checked ? "[x] " : "[ ] ", checked ? "success" : "muted"]);
+			cells.push([shortNodeId(source.node_id), "strong"]);
+			if (source.region !== undefined) cells.push([` · ${this.domainLabel(source.region)}`, "muted"]);
+			if (source.base_url !== undefined) cells.push([` · ${source.base_url}`, "path"]);
 			if (age !== "") cells.push([` · ${age}`, "muted"]);
-			const description = [contact.region === undefined ? "" : contact.region, contact.base_url, age === "" ? "" : age]
-				.filter(part => part !== "")
-				.join(" · ");
+			if (glyph !== "") cells.push([` · ${glyph}`, trust?.state === "trusted" ? "success" : trust?.state === "pending" ? "accent" : "error"]);
+			const description = [
+				source.region === undefined ? "" : this.domainLabel(source.region),
+				source.base_url ?? "",
+				age,
+				trust?.state === "pending" ? "◌ 待确认" : glyph,
+			].filter(part => part !== "").join(" · ");
 			return {
-				left: cells, selected: index === this.contactIndex, act: `onlyne.contacts:${index}`, key: `${contact.node_id}/${contact.base_url}`,
-				card: { head: shortNodeId(contact.node_id), description },
+				left: cells,
+				selected: index === this.contactIndex,
+				act: `onlyne.contacts:${index}`,
+				key: `${source.node_id}/${source.base_url ?? ""}`,
+				card: { head: shortNodeId(source.node_id), description },
 			};
 		});
 	}
@@ -765,14 +974,18 @@ export class OnlyneViewer implements Component {
 		const chatPage = this.page === "chat";
 		const detail = chatPage && layout.detailHeight > 0 ? this.detailText() : undefined;
 		const chat = chatPage ? this.chatBody(cx, layout) : undefined;
-		const rows = chat === undefined ? this.bodyRows(cx.cols).filter(row => detail === undefined || row.key?.includes("detail-") !== true) : [];
+		// The discovery page takes the same two-column body; below the chat width it
+		// falls back to the single-column rows like every other page.
+		const discovery = this.page === "discovery" && !layout.stacked ? this.discoveryBody(layout) : undefined;
+		const body = chat ?? discovery;
+		const rows = body === undefined ? this.bodyRows(cx.cols).filter(row => detail === undefined || row.key?.includes("detail-") !== true) : [];
 		const children: NativeNode[] = [
 			this.titleNode(),
 			this.summaryNode(),
 			this.tabsNode(),
-			...(chat === undefined
+			...(body === undefined
 				? rows.map((row, index) => this.describeRow(row, index))
-				: [chat, node("col", { grow: 1 }, [], "chat-spacer")]),
+				: [body, node("col", { grow: 1 }, [], "page-spacer")]),
 			...(detail === undefined
 				? []
 				: [
@@ -815,27 +1028,33 @@ export class OnlyneViewer implements Component {
 		}
 		if (act.startsWith("onlyne.page.")) {
 			const id = act.slice("onlyne.page.".length) as Page;
-			if (PAGES.some((page) => page.id === id)) {
-				this.page = id;
-				this.changed();
-			}
+			if (PAGES.some((page) => page.id === id)) this.switchPage(id);
 			return;
 		}
 		if (act === "onlyne.discovery.refresh") {
 			void this.refreshDiscovery();
 			return;
 		}
-		if (act.startsWith("onlyne.discovery:")) {
-			const index = Number(act.slice("onlyne.discovery:".length));
+		if (act.startsWith("onlyne.domain:")) {
+			const index = Number(act.slice("onlyne.domain:".length));
 			if (!Number.isInteger(index) || index < 0) return;
-			this.discoveryIndex = Math.min(index, Math.max(0, (this.snapshot?.discovery.length ?? 0) - 1));
-			void this.connectSelected();
+			this.domainIndex = Math.min(index, Math.max(0, this.discoveryDomains().length - 1));
+			this.nodeIndex = 0;
+			this.offsets.delete("discovery-nodes");
+			this.changed();
+			return;
+		}
+		if (act.startsWith("onlyne.node:")) {
+			const index = Number(act.slice("onlyne.node:".length));
+			if (!Number.isInteger(index) || index < 0) return;
+			this.nodeIndex = Math.min(index, Math.max(0, this.pageCount("discovery") - 1));
+			this.toggleChecked();
 			return;
 		}
 		if (act.startsWith("onlyne.contacts:")) {
 			const index = Number(act.slice("onlyne.contacts:".length));
 			if (!Number.isInteger(index) || index < 0) return;
-			this.contactIndex = Math.min(index, Math.max(0, (this.snapshot?.contacts.length ?? 0) - 1));
+			this.contactIndex = Math.min(index, Math.max(0, this.contactSources().length - 1));
 			this.changed();
 			return;
 		}
@@ -896,8 +1115,7 @@ export class OnlyneViewer implements Component {
 		}
 		const pageIndex = PAGES.findIndex((_page, index) => data === String(index + 1));
 		if (pageIndex >= 0) {
-			this.page = PAGES[pageIndex]!.id;
-			this.changed();
+			this.switchPage(PAGES[pageIndex]!.id);
 			return;
 		}
 		if (this.page === "chat") this.handleChatKey(data);
@@ -906,7 +1124,13 @@ export class OnlyneViewer implements Component {
 
 	private cyclePage(delta: number): void {
 		const index = PAGES.findIndex((page) => page.id === this.page);
-		this.page = PAGES[(index + delta + PAGES.length) % PAGES.length]!.id;
+		this.switchPage(PAGES[(index + delta + PAGES.length) % PAGES.length]!.id);
+	}
+
+	/** Every page change funnels here so an open confirmation never leaks across pages. */
+	private switchPage(page: Page): void {
+		if (page !== "discovery" && page !== "contacts") this.cancelExchange();
+		this.page = page;
 		this.changed();
 	}
 
@@ -922,8 +1146,23 @@ export class OnlyneViewer implements Component {
 	}
 
 	private handleListKey(page: Page, data: string): void {
-		if (page === "discovery" && matchesKey(data, "space")) {
-			void this.connectSelected();
+		if ((page === "discovery" || page === "contacts") && this.handleConfirmKey(data)) return;
+		if ((page === "discovery" || page === "contacts") && data === "x") {
+			void this.revokeSelected();
+			return;
+		}
+		if (page === "discovery") {
+			if (matchesKey(data, "space")) {
+				this.toggleChecked();
+				return;
+			}
+			if (data === "[" || data === "]") {
+				this.cycleDomain(data === "[" ? -1 : 1);
+				return;
+			}
+		}
+		if (page === "contacts" && matchesKey(data, "space")) {
+			this.beginContactExchange();
 			return;
 		}
 		const count = this.pageCount(page);
@@ -932,6 +1171,39 @@ export class OnlyneViewer implements Component {
 		if (next === undefined) return;
 		this.setSelection(page, next);
 		this.changed();
+	}
+
+	/** y/n or enter resolves the open confirmation before any movement key is read. */
+	private handleConfirmKey(data: string): boolean {
+		if (this.pendingConfirm === undefined) return false;
+		if (data === "n") {
+			this.cancelExchange();
+			return true;
+		}
+		if (data === "y" || matchesKey(data, "enter")) {
+			void this.acceptExchange();
+			return true;
+		}
+		return false;
+	}
+
+	/** x on a trusted or pending row calls trustRevoke; the confirm bar's r keeps n purely local. */
+	private async revokeSelected(): Promise<void> {
+		const nodeId = this.page === "discovery"
+			? this.discoveryDomains()[this.domainIndex]?.nodes[this.nodeIndex]?.node_id
+			: this.contactSources()[this.contactIndex]?.node_id;
+		const runtime = getRuntime();
+		if (nodeId === undefined || runtime === undefined) return;
+		this.notice = { text: `正在撤销 ${shortNodeId(nodeId)} 的信任…`, error: false };
+		this.changed();
+		try {
+			await runtime.trustRevoke(nodeId);
+			this.notice = { text: `已撤销 ${shortNodeId(nodeId)} 的信任`, error: false };
+		} catch (error) {
+			this.notice = { text: `撤销失败：${errorText(error)}`, error: true };
+		}
+		await this.reload();
+		this.clearNoticeLater();
 	}
 
 	private handleChatKey(data: string): void {
@@ -985,25 +1257,139 @@ export class OnlyneViewer implements Component {
 		this.handleListKey("chat", data);
 	}
 
-	private async connectSelected(): Promise<void> {
-		const record = this.snapshot?.discovery[this.discoveryIndex];
-		if (record === undefined) return;
-		const runtime = getRuntime();
-		this.notice = { text: `连接中… ${record.base_url}`, error: false };
+	private cycleDomain(delta: number): void {
+		const count = this.discoveryDomains().length;
+		if (count === 0) return;
+		this.domainIndex = (this.domainIndex + delta + count) % count;
+		this.nodeIndex = 0;
+		this.offsets.delete("discovery-nodes");
 		this.changed();
+	}
+
+	private toggleChecked(): void {
+		const record = this.discoveryDomains()[this.domainIndex]?.nodes[this.nodeIndex];
+		if (record === undefined) return;
+		if (this.checked.has(record.node_id)) {
+			this.checked.delete(record.node_id);
+			if (this.pendingConfirm?.node_id === record.node_id) this.pendingConfirm = undefined;
+			this.changed();
+			return;
+		}
+		void this.beginExchange(record);
+	}
+
+	/**
+	 * Space on a discovery node: tick it as local consent, verify the peer's key
+	 * (RFC 0017 §4 — the discovery record carries no key of its own), then ask for
+	 * the y/n confirmation with both fingerprints on screen.
+	 */
+	private async beginExchange(record: ViewerDiscovery): Promise<void> {
+		this.checked.add(record.node_id);
+		this.pendingConfirm = undefined;
+		this.changed();
+		const runtime = getRuntime();
+		if (runtime === undefined) {
+			this.checked.delete(record.node_id);
+			this.notice = { text: "未配置 Onlyne。", error: true };
+			this.changed();
+			return;
+		}
+		let fingerprint = this.trustFor(record.node_id)?.fingerprint;
+		if (fingerprint === undefined) {
+			this.notice = { text: `正在校验 ${shortNodeId(record.node_id)} 的公钥…`, error: false };
+			this.changed();
+			try {
+				const inspected = await runtime.trustInspect(record.node_id);
+				if (this.disposed || this.signal.aborted || !this.checked.has(record.node_id)) return;
+				fingerprint = inspected.fingerprint;
+			} catch (error) {
+				if (this.disposed || this.signal.aborted) return;
+				this.checked.delete(record.node_id);
+				this.notice = { text: `校验失败：${errorText(error)}`, error: true };
+				this.changed();
+				this.clearNoticeLater();
+				return;
+			}
+		}
+		const pending: PendingExchange = {
+			node_id: record.node_id,
+			fingerprint,
+			...(record.region === undefined ? {} : { domain: record.region }),
+		};
+		this.pendingConfirm = pending;
+		this.notice = { text: this.confirmText(pending), error: false };
+		this.changed();
+	}
+
+	/** Space on a contact with a pending exchange confirms it; the invite already carries the key. */
+	private beginContactExchange(): void {
+		const source = this.contactSources()[this.contactIndex];
+		if (source === undefined) return;
+		const trust = this.trustFor(source.node_id);
+		if (trust?.state !== "pending") return;
+		if (this.checked.has(source.node_id)) {
+			this.checked.delete(source.node_id);
+			if (this.pendingConfirm?.node_id === source.node_id) this.pendingConfirm = undefined;
+			this.changed();
+			return;
+		}
+		this.checked.add(source.node_id);
+		const pending: PendingExchange = {
+			node_id: source.node_id,
+			fingerprint: trust.fingerprint,
+			...(source.region === undefined ? {} : { domain: source.region }),
+		};
+		this.pendingConfirm = pending;
+		this.notice = { text: this.confirmText(pending), error: false };
+		this.changed();
+	}
+
+	private confirmText(pending: PendingExchange): string {
+		const own = this.snapshot?.identity?.fingerprint ?? "未配置";
+		const where = pending.domain === undefined
+			? `与 ${shortNodeId(pending.node_id)} 交换密钥`
+			: `该节点处于 ${this.domainLabel(pending.domain)} 域中`;
+		return `${where} · 对方指纹 ${pending.fingerprint} · 本机指纹 ${own} · 确认交换密钥 y/n`;
+	}
+
+	/** Local consent goes to the runtime; the peer still has to approve, so the row stays pending. */
+	private async acceptExchange(): Promise<void> {
+		const pending = this.pendingConfirm;
+		if (pending === undefined) return;
+		this.pendingConfirm = undefined;
+		const runtime = getRuntime();
 		if (runtime === undefined) {
 			this.notice = { text: "未配置 Onlyne。", error: true };
 			this.changed();
 			return;
 		}
+		this.notice = { text: `正在提交 ${shortNodeId(pending.node_id)} 的密钥交换…`, error: false };
+		this.changed();
 		try {
-			await runtime.contact(record.base_url);
-			this.notice = { text: `已连接 ${shortNodeId(record.node_id)}`, error: false };
+			await runtime.trustAccept(pending.node_id, pending.fingerprint);
+			// A confirm bar opened while the round-trip ran keeps the headline.
+			if (this.pendingConfirm === undefined) {
+				this.notice = { text: `已同意交换，等待 ${shortNodeId(pending.node_id)} 确认`, error: false };
+				this.changed();
+			}
 		} catch (error) {
-			this.notice = { text: `连接失败：${errorText(error)}`, error: true };
+			this.checked.delete(pending.node_id);
+			if (this.pendingConfirm === undefined) {
+				this.notice = { text: `交换失败：${errorText(error)}`, error: true };
+				this.changed();
+			}
 		}
 		await this.reload();
 		this.clearNoticeLater();
+	}
+
+	private cancelExchange(): void {
+		const pending = this.pendingConfirm;
+		if (pending === undefined) return;
+		this.pendingConfirm = undefined;
+		this.checked.delete(pending.node_id);
+		this.notice = undefined;
+		this.changed();
 	}
 
 	private async refreshDiscovery(): Promise<void> {
@@ -1039,7 +1425,10 @@ export class OnlyneViewer implements Component {
 		this.lastWidth = width;
 		const key = `${this.version}:${width}`;
 		if (this.rendered !== undefined && this.rendered.key === key) return this.rendered.lines;
-		const lines: string[] = [fit(this.summaryText(), width), fit(this.tabLine(width), width)];
+		// The ANSI path has no title row: a notice takes the summary's line so the
+		// confirmation bar stays visible and the frame keeps its height.
+		const header = this.notice === undefined ? this.summaryText() : this.notice.text;
+		const lines: string[] = [fit(header, width), fit(this.tabLine(width), width)];
 		for (const row of this.bodyRows(width)) lines.push(this.renderRow(row, width));
 		lines.push(fit(FOOTER, width));
 		this.rendered = { key, lines };
