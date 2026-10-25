@@ -174,7 +174,7 @@ export class OnlyneViewer implements Component {
 		const body = Math.max(8, rows - 12);
 		return {
 			body,
-			messages: Math.max(2, Math.floor((body - 8) / 3)),
+			messages: Math.max(1, Math.floor((body - 10) / 5)),
 			threads: Math.max(1, Math.floor((body - 9) / 3)),
 			members: Math.max(1, Math.floor((body - 4) / 3)),
 			pageRows: Math.max(2, body - 4),
@@ -571,7 +571,7 @@ export class OnlyneViewer implements Component {
 				actions: { click: `onlyne.message:${message.seq}` },
 				selected: this.target !== undefined && this.target === message.author,
 			},
-			[textNode(message.text, { wrap: "word", lines: 6, truncate: "end" })],
+			[textNode(message.text, { wrap: "word", lines: 3, truncate: "end" })],
 			`message-${message.seq}`,
 		);
 	}
@@ -587,7 +587,7 @@ export class OnlyneViewer implements Component {
 				{ role: "onlyne.flow", gap: "sm", grow: 1, min: { w: 0 }, max: { h: linesOf(geo.body) } },
 				[
 					...this.approvalsCard(),
-					textNode([span("从左边打开一个线程，或在「发现」页连接一位节点发起对话。", "muted")], { wrap: "word" }),
+					textNode([span("从左边打开一个线程，或在「发现」页连接一位节点发起对话。", "muted")], { wrap: "word", lines: 3 }),
 					this.composerNode(),
 				],
 				"flow",
@@ -596,7 +596,8 @@ export class OnlyneViewer implements Component {
 		const messages = thread.messages;
 		const peer = this.threadPeer(thread);
 		const last = messages.at(-1);
-		// The newest messages stay in view: an older history is named, not shown, so the frame never grows.
+		// The newest messages stay in view and each body is clamped: an older history is
+		// named rather than drawn, so no amount of content can push the composer off.
 		const visible = messages.slice(-geo.messages);
 		return node(
 			"col",
@@ -604,23 +605,28 @@ export class OnlyneViewer implements Component {
 			[
 				node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
 					node("col", { gap: "none", grow: 1 }, [
-						textNode([span(`# ${thread.title}`, "strong"), ...(thread.state === "closed" ? [span(" · 已关闭", "dim")] : [])], { wrap: "word" }),
-						textNode([span(`${messages.length} 条消息 · ${this.peers().length} 位成员${last === undefined ? "" : ` · 最近 ${ageText(last.at) || "未知"}前`}`, "dim"),], { wrap: "word" }),
+						textNode([span(`# ${thread.title}`, "strong"), ...(thread.state === "closed" ? [span(" · 已关闭", "dim")] : [])], { truncate: "end" }),
+						textNode([span(`${messages.length} 条消息 · ${this.peers().length} 位成员${last === undefined ? "" : ` · 最近 ${ageText(last.at) || "未知"}前`}`, "dim")], { truncate: "end" }),
 					]),
 					...(peer === undefined ? [] : [this.button("详情", `onlyne.member:${peer}`, { title: "这位对端的详情" })]),
 				], "thread-head"),
 				...this.approvalsCard(),
-				...(messages.length === 0
-					? [textNode([span("这个线程还没有消息。", "muted")], { wrap: "word" })]
-					: [
-							...(visible.length === messages.length ? [] : [textNode([span(`更早的 ${messages.length - visible.length} 条不在这一屏`, "muted")], { truncate: "end" })]),
-							...visible.map((message, index) =>
-								this.messageCard(
-									message,
-									index === visible.length - 1 && !invites.some(invite => invite.node_id === message.author),
+				node(
+					"col",
+					{ gap: "sm", grow: 1, shrink: 1, min: { w: 0 }, max: { h: linesOf(geo.body - 6) } },
+					messages.length === 0
+						? [textNode([span("这个线程还没有消息。", "muted")], { wrap: "word" })]
+						: [
+								...(visible.length === messages.length ? [] : [textNode([span(`更早的 ${messages.length - visible.length} 条不在这一屏`, "muted")], { truncate: "end" })]),
+								...visible.map((message, index) =>
+									this.messageCard(
+										message,
+										index === visible.length - 1 && !invites.some(invite => invite.node_id === message.author),
+									),
 								),
-							),
-						]),
+							],
+					"messages",
+				),
 				this.composerNode(),
 			],
 			"flow",
