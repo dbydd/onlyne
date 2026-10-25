@@ -3,7 +3,6 @@ import {
 	type DescribeContext,
 	type NativeNode,
 	type NativeUiEvent,
-	type NativeScroll,
 	type Theme,
 	type TspSpan,
 	matchesKey,
@@ -64,8 +63,8 @@ export class OnlyneViewer implements Component {
 	private discoveryIndex = 0;
 	private contactIndex = 0;
 	private expanded = false;
-	/** Bumped per scroll key while the detail pane is open; the terminal scrolls its body. */
-	private detailScroll: NativeScroll | undefined;
+	/** First wrapped line of the selected message the detail band shows. */
+	private detailOffset = 0;
 	private notice: { text: string; error: boolean } | undefined;
 	private noticeTimer: Timer | undefined;
 	private ages = new Map<string, string>();
@@ -333,19 +332,29 @@ export class OnlyneViewer implements Component {
 	}
 
 	/**
-	 * The detail band: a rule, the message head, then the body clamped to the band's
-	 * remaining lines. The native path swaps the body for the scrollable ansi block.
+	 * The detail band: a rule carrying the scroll position, the message head, then the
+	 * wrapped body from `detailOffset`. The band is exactly `count` rows, so the frame
+	 * never grows with the message; the offset is what moves through a long one.
 	 */
-	private detailRows(count: number): BodyRow[] {
+	private detailRows(count: number, columnWidth: number): BodyRow[] {
 		if (count <= 0) return [];
 		const message = this.selectedThread()?.messages[this.messageIndex];
 		if (message === undefined) return Array.from({ length: count }, () => ({ left: [] as Cell[] }));
 		const bodyLines = Math.max(1, count - 2);
-		const lines = wrapTextWithAnsi(message.text, this.lastWidth).slice(0, bodyLines);
-		const rows: BodyRow[] = [{ left: [["─".repeat(Math.max(1, this.lastWidth - 2)), "muted"]], key: "detail-rule" }];
-		rows.push({ left: [["↳ ", "muted"], [this.messageHead(message), "dim"]], key: "detail-head" });
-		for (const line of lines) rows.push({ left: [[line]], key: `detail-body-${rows.length}` });
-		return rows.slice(0, count);
+		const width = Math.max(20, columnWidth - 2);
+		const wrapped = wrapTextWithAnsi(message.text, width);
+		this.detailOffset = Math.min(Math.max(0, this.detailOffset), Math.max(0, wrapped.length - bodyLines));
+		const last = Math.min(wrapped.length, this.detailOffset + bodyLines);
+		const position = wrapped.length > bodyLines ? ` ${this.detailOffset + 1}-${last}/${wrapped.length} ` : "";
+		const rule = Math.max(1, width - position.length);
+		const rows: BodyRow[] = [
+			{ left: [["─".repeat(rule), "muted"], [position, "dim"]], key: "detail-rule" },
+			{ left: [["↳ ", "muted"], [this.messageHead(message), "dim"]], key: "detail-head" },
+		];
+		for (let index = 0; index < bodyLines; index++) {
+			rows.push({ left: [[wrapped[this.detailOffset + index] ?? ""]], key: `detail-body-${index}` });
+		}
+		return rows;
 	}
 
 	private chatLayout(width: number): { stacked: boolean; threadHeight: number; messageHeight: number; detailHeight: number; threadWidth: number } {
@@ -381,7 +390,8 @@ export class OnlyneViewer implements Component {
 		const messageRows = messageWindow.items.map((message, offset) =>
 			this.messageRow(message, messageWindow.start + offset === this.messageIndex),
 		);
-		const detailRows = this.detailRows(layout.detailHeight);
+		// The band lives in the message column, so it wraps to that column's width.
+		const detailRows = this.detailRows(layout.detailHeight, layout.stacked ? width : width - layout.threadWidth - 2);
 
 		if (layout.stacked) {
 			const rows: BodyRow[] = [{ left: [[`Threads · ${threads.length}`, "muted"]], key: "threads-head" }];
@@ -393,12 +403,17 @@ export class OnlyneViewer implements Component {
 					? [{ left: [["没有消息。", "muted"]] } as BodyRow]
 					: messageRows.map(row => ({ ...row, left: [...row.left, ...(row.right ?? [])], right: undefined }))),
 			);
+			// The band belongs at the foot of the body, whatever the list length.
+			for (let pad = rows.length + detailRows.length; pad < this.bodyHeight(); pad++) rows.push({ left: [] });
 			rows.push(...detailRows);
 			return rows;
 		}
 
-		const rightRows: BodyRow[] = messages.length === 0 ? [{ left: [["没有消息。", "muted"]] }] : [...messageRows, ...detailRows];
 		const height = this.bodyHeight();
+		const rightRows: BodyRow[] = messages.length === 0 ? [{ left: [["没有消息。", "muted"]] }] : [...messageRows];
+		// Pad before the band so it sits at the bottom of the body, above the footer.
+		for (let pad = rightRows.length + detailRows.length; pad < height; pad++) rightRows.push({ left: [] });
+		rightRows.push(...detailRows);
 		const rows: BodyRow[] = [];
 		for (let index = 0; index < height; index++) {
 			const left = threadRows[index];
@@ -644,8 +659,7 @@ export class OnlyneViewer implements Component {
 	describe(cx: DescribeContext): NativeNode {
 		this.lastWidth = cx.cols;
 		const height = this.bodyHeight();
-		const detail = this.detailOverlay(cx);
-		const key = `${this.version}:${cx.cols}:${height}:${this.detailScroll?.n ?? 0}`;
+		const key = `${this.version}:${cx.cols}:${height}`;
 		if (this.described !== undefined && this.describedKey === key) return this.described;
 		const children: NativeNode[] = [
 			this.titleNode(),
@@ -654,45 +668,9 @@ export class OnlyneViewer implements Component {
 			...this.bodyRows(cx.cols).map((row, index) => this.describeRow(row, index)),
 			this.footerNode(),
 		];
-		this.described = node("card", { role: "onlyne.viewer" }, detail === undefined ? children : [...children, detail]);
+		this.described = node("card", { role: "onlyne.viewer" }, children);
 		this.describedKey = key;
 		return this.described;
-	}
-
-	/**
-	 * The selected message's full text as a sheet anchored to the bottom of the pane,
-	 * shown while the detail band is open. The body is one `ansi` block clamped to the
-	 * band's height: the terminal scrolls it, and the j/k and page keys reach it as
-	 * `scroll` requests (raw-sse's stream page works the same way).
-	 */
-	private detailOverlay(cx: DescribeContext): NativeNode | undefined {
-		if (!this.expanded) return undefined;
-		const message = this.selectedThread()?.messages[this.messageIndex];
-		if (message === undefined) return undefined;
-		const body = this.bodyHeight();
-		const lines = Math.max(4, Math.floor(body / 3));
-		const width = Math.max(20, cx.cols - 4);
-		const wrapped = wrapTextWithAnsi(message.text, width);
-		return node(
-			"overlay",
-			{ anchor: "bottom" as const, size: "md" as const, role: "onlyne.detail" },
-			[
-				{
-					...node(
-						"ansi",
-						{
-							text: [this.theme.fg("dim", this.messageHead(message)), ...wrapped].join("\n"),
-							max: { h: `${lines}lines` as const },
-							role: "onlyne.detail.body",
-						},
-						undefined,
-						"detail-body",
-					),
-					...(this.detailScroll === undefined ? {} : { scroll: this.detailScroll }),
-				},
-			],
-			"detail",
-		);
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
@@ -759,6 +737,7 @@ export class OnlyneViewer implements Component {
 					this.messageIndex = index;
 					this.expanded = true;
 				}
+				this.detailOffset = 0;
 				this.changed();
 			}
 		}
@@ -830,6 +809,7 @@ export class OnlyneViewer implements Component {
 			this.threadIndex = (this.threadIndex + delta + threads.length) % threads.length;
 			this.messageIndex = 0;
 			this.expanded = false;
+			this.detailOffset = 0;
 			this.offsets.delete("messages");
 			this.changed();
 			return;
@@ -838,27 +818,31 @@ export class OnlyneViewer implements Component {
 		if (matchesKey(data, "enter")) {
 			if (messages.length === 0) return;
 			this.expanded = !this.expanded;
-			if (!this.expanded) this.detailScroll = undefined;
+			this.detailOffset = 0;
 			this.changed();
 			return;
 		}
-		// With the detail sheet open the movement keys scroll it, like the raw-sse page.
+		// While the band is open the movement keys move through the message instead of the
+		// list: the band shows a window of the wrapped body and this is what shifts it.
 		if (this.expanded && messages.length > 0) {
-			const by = matchesKey(data, "up") || matchesKey(data, "k")
-				? "line-up" as const
+			const page = Math.max(1, Math.floor(this.bodyHeight() / 3) - 2);
+			const delta = matchesKey(data, "up") || matchesKey(data, "k")
+				? -1
 				: matchesKey(data, "down") || matchesKey(data, "j")
-					? "line-down" as const
+					? 1
 					: matchesKey(data, "pageUp")
-						? "page-up" as const
+						? -page
 						: matchesKey(data, "pageDown")
-							? "page-down" as const
-							: data === "g"
-								? "start" as const
-								: data === "G"
-									? "end" as const
-									: undefined;
-			if (by !== undefined) {
-				this.detailScroll = { by, n: (this.detailScroll?.n ?? 0) + 1 };
+							? page
+							: undefined;
+			if (delta !== undefined) {
+				this.detailOffset = Math.max(0, this.detailOffset + delta);
+				this.changed();
+				return;
+			}
+			if (data === "g" || data === "G") {
+				// The band clamps the far end against the wrapped length on its next render.
+				this.detailOffset = data === "g" ? 0 : Number.MAX_SAFE_INTEGER;
 				this.changed();
 				return;
 			}
