@@ -183,11 +183,7 @@ owner 或明确授权的代表可以添加、激活、拒绝、修改 access 或
 
 ## 5. Thread 操作与会话的关系
 
-Thread 属于消息层。OMP 会话、ACP 会话和 IM 会话是运行时上下文，不由 ThreadRef 推断，也不随线程变化。
-
-- 一个 OMP 会话可以读取多个 thread。
-- 一个 thread 的消息可以进入多个 OMP 会话。
-- 迁移会话时，thread 不转移。
+Thread 属于消息层。OMP 会话、ACP 会话和 IM 会话是运行时上下文，不由 ThreadRef 推断，也不随线程变化。一个运行时会话可以读取多个 thread，一个 thread 的消息可以进入多个运行时会话，迁移会话时 thread 不转移。宿主侧映射规则见 [《OMP 宿主契约》](../contracts/omp.md) §9。
 
 加入 thread 的成员默认持有 read 授权，可以直接读双向往来。被收窄范围的成员只看自己范围内的条目，其余按出站记录（RFC 0003 §3）处理。
 

@@ -9,6 +9,8 @@ The repository holds the draft protocol specifications, the runtime packages, an
 | Package | Contents |
 |---|---|
 | [`packages/lib`](packages/lib/README.md) | `@onlyne/lib`: threads, durable message admission, attention obligations, reply correlation, ownerless domains, resources with explicit handover, the HTTP binding, and the plugin interfaces |
+| [`packages/omp-onlyne`](packages/omp-onlyne/README.md) | OMP integration: one `msg` tool, judge-selected delivery, and inbound injection |
+| [`packages/qoder-onlyne`](packages/qoder-onlyne/README.md) | Qoder CN plugin: one installation domain, workspace nodes, sessions as execution contexts, threads as channels or direct conversations |
 
 `packages/` holds publishable runtime code only. Further packages sit beside `lib` as they land.
 
@@ -34,8 +36,8 @@ The repository holds the draft protocol specifications, the runtime packages, an
 | [0006 Resources](docs/rfcs/0006-resources-and-handover.md) | Resources, bindings, dynamic handover |
 | [0007 Bindings](docs/rfcs/0007-bindings.md) | A2A, MCP, HTTP, OMP mappings |
 | [0008 OMP surface](docs/rfcs/0008-omp-surface.md) | Agent tools, message views, injection, runtime todo |
-| [0009 A2A reference](docs/rfcs/0009-a2a-reference.md) | Upstream protocol, network operations, mapping boundaries |
-| [0010 ANP reference](docs/rfcs/0010-anp-reference.md) | Upstream identity, discovery, network protocols |
+| [0009 A2A reference](docs/references/a2a.md) | Upstream protocol, network operations, mapping boundaries |
+| [0010 ANP reference](docs/references/anp.md) | Upstream identity, discovery, network protocols |
 | [0011 Discovery](docs/rfcs/0011-discovery-and-domains.md) | Node discovery, ownerless domains, service description |
 | [0012 IM resource node](docs/rfcs/0012-im-resource-node.md) | IM conversations: events, bindings, handover, recovery |
 | [0013 Compute job node](docs/rfcs/0013-compute-job-resource.md) | Compute jobs: split authorizations, artifacts, recovery |

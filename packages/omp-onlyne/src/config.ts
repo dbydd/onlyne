@@ -111,7 +111,7 @@ export function parseConfig(text: string, path: string): OnlyneConfig {
 	return validateConfig({
 		path,
 		region: region ?? "",
-		node: { id: id ?? "", ...(keyRef === undefined ? {} : { key_ref: keyRef }), ...(keyScope === undefined ? {} : { key_scope: keyScope as "project" | "global" }) },
+		node: { id: id ?? "", ...(keyRef === undefined ? {} : { key_ref: keyRef }), ...(keyScope === undefined ? {} : { key_scope: keyScope as "project" | "global" | "none" }) },
 		server: { bind: bind ?? DEFAULT_BIND, ...(publicUrl === undefined ? {} : { public_url: publicUrl }) },
 		threads: { page_size: pageSize ?? DEFAULT_PAGE_SIZE },
 		...(seeds === undefined && trust === undefined ? {} : { discovery: { ...(seeds === undefined ? {} : { seeds }), ...(trust === undefined ? {} : { trust }) } }),
@@ -156,8 +156,8 @@ function validateConfig(config: OnlyneConfig): OnlyneConfig {
 	const bind = config.server.bind.trim();
 	const publicUrl = config.server.public_url?.trim();
 	const keyScope = config.node.key_scope;
-	if (keyScope !== undefined && keyScope !== "project" && keyScope !== "global") {
-		throw new ConfigError("invalid", `node.key_scope must be project or global, got ${JSON.stringify(keyScope)}.`);
+	if (keyScope !== undefined && keyScope !== "project" && keyScope !== "global" && keyScope !== "none") {
+		throw new ConfigError("invalid", `node.key_scope must be project, global or none, got ${JSON.stringify(keyScope)}.`);
 	}
 	if (publicUrl !== undefined && publicUrl.length === 0) throw new ConfigError("invalid", "server.public_url must not be empty.");
 	const seeds = config.discovery?.seeds?.map(seed => seed.trim()).filter(seed => seed.length > 0);

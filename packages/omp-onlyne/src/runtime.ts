@@ -1,17 +1,14 @@
-import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { FetchTransport, OnlyneError, type DiscoveryCandidate, type DiscoveryRecord, type Entry, type LocalAttention, type OnlyneNode, type Outbound, type Page, type Thread, type ThreadRef } from "@onlyne/lib";
+import { OnlyneError, trustPhase, type DiscoveryCandidate, type DiscoveryRecord, type KeyExchange, type MaintenanceClock, type NotifyEvent, type OnlyneNode, type Outbound, type Page } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { currentDecision, JudgeDecider } from "./decider.ts";
-import { ConfigError, loadConfig, saveConfig, shortNodeId } from "./config.ts";
+import { loadConfig, saveConfig, shortNodeId } from "./config.ts";
 import { ensureKeyDir } from "./keys.ts";
-import { neighborRows } from "./urls.ts";
 import { createRuntimeBridge } from "./messages.ts";
 import { advertisedHost, createOnlyneNode } from "./node.ts";
 import { NetworkDiscovery } from "./network.ts";
 import { ContextRegistry, SqliteStorage } from "./store.ts";
 import type { OnlyneConfig, OnlyneStatus, QueueItem, ViewerContact, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "./types.ts";
-import type { TrustEntry } from "@onlyne/lib";
 
 export interface PluginRuntime {
 	readonly config: OnlyneConfig;
@@ -26,10 +23,11 @@ export interface PluginRuntime {
 	snapshot(): Promise<ViewerSnapshot>;
 	status(): Promise<OnlyneStatus>;
 	onChange(listener: () => void): () => void;
-	/** Flip the maintenance loop back to its active cadence after an inbound or a send. */
-	wake(): void;
+	/** The library's one notification channel: trust transitions, inbound entries, pending-work flips. */
+	notify(event: NotifyEvent): void;
 	contact(endpoint: string): Promise<void>;
-	trustInspect(node: string): Promise<{ node_id: string; public_key: string; fingerprint: string }>;
+	/** Stage one of one exchange; the returned session carries the fingerprint the peer proved. */
+	trustBegin(node: string): Promise<KeyExchange>;
 	trustAccept(node: string, fingerprint: string): Promise<void>;
 	trustRevoke(node: string): Promise<void>;
 	trustRotate(): Promise<{ fingerprint: string }>;
@@ -56,10 +54,6 @@ export async function stopRuntime(): Promise<void> { await active?.close(); }
 
 /** How often the discovery catalog is re-observed; well inside the library's 120 s freshness window. */
 const DISCOVERY_REFRESH_MS = 30_000;
-/** The idle floor between maintenance passes once no durable work is pending. */
-const IDLE_MAINTAIN_MS = 30_000;
-/** The active interval while a pass found pending work or an inbound just landed. */
-const ACTIVE_MAINTAIN_MS = 2_000;
 
 class OmpRuntime implements PluginRuntime {
 	readonly contexts: ContextRegistry;
@@ -71,13 +65,11 @@ class OmpRuntime implements PluginRuntime {
 	private server?: ReturnType<typeof Bun.serve>;
 	private keyDir?: string;
 	private network?: NetworkDiscovery;
-	private timer?: ReturnType<ExtensionContext["setInterval"]>;
-	private timerMs = ACTIVE_MAINTAIN_MS;
-	private idle = false;
-	private maintenance?: Promise<void>;
+	/** The host's one periodic job: re-observing discovery. Delivery cadence belongs to the library. */
+	private timer?: Timer;
+	/** A round that outlives its interval must not overlap the next one. */
+	private rediscovering = false;
 	private discoveryError?: string;
-	/** Last time the discovery catalog was re-observed; a record expires after 120 s. */
-	private lastDiscoveryRefresh = 0;
 	private controller = new AbortController();
 	private listeners = new Set<() => void>();
 	private closed = false;
@@ -111,13 +103,19 @@ class OmpRuntime implements PluginRuntime {
 		});
 		const bridge = createRuntimeBridge({ pi: this.pi, main: this.main, decider: this.decider, contexts: this.contexts, nodeId: this.config.node.id });
 		const projectRoot = dirname(dirname(this.config.path));
-		// The identity is global unless this working tree overrides it: a project key wins.
-		const projectDir = await ensureKeyDir(projectRoot, this.config.node.id, "project").catch(() => undefined);
-		const keyDir = projectDir !== undefined && existsSync(join(projectDir, "priv.pem"))
-			? projectDir
-			: await ensureKeyDir(projectRoot, this.config.node.id, "global");
+		// `node.key_scope` names where the identity lives. Without it the historic global
+		// store stays in effect; `none` runs the keyless loopback development binding. A
+		// refused project directory (git work tree without an ignore rule) fails the start.
+		const keyScope = this.config.node.key_scope ?? "global";
+		const keyDir = keyScope === "none" ? undefined : await ensureKeyDir(projectRoot, this.config.node.id, keyScope);
 		this.keyDir = keyDir;
-		this.node = createOnlyneNode({ config: this.config, endpoint: this.endpoint, instanceId, storage: this.storage, contexts: this.contexts, runtime: bridge,
+		// The library owns the maintenance cadence; the host only lends it one-shot session
+		// timers. The loop re-arms after every pass, so a repeating timer would double it.
+		const clock: MaintenanceClock = {
+			setTimer: (ms, run) => this.main.setTimeout(run, ms),
+			clearTimer: handle => this.main.clearTimer(handle as Timer),
+		};
+		this.node = createOnlyneNode({ config: this.config, endpoint: this.endpoint, instanceId, storage: this.storage, contexts: this.contexts, runtime: bridge, clock,
 			...(keyDir === undefined ? {} : { keyDir }),
 			decide: input => {
 				const scope = currentDecision();
@@ -150,60 +148,21 @@ class OmpRuntime implements PluginRuntime {
 		try { await this.network.start(); } catch (error) { this.pi.logger.warn("onlyne.discovery.unavailable", { error: errorText(error) }); }
 		await this.contexts.ensureMain();
 		await this.node.client.recover(this.controller.signal);
-		this.timer = this.main.setInterval(() => this.maintain(), this.timerMs);
+		this.node.client.runMaintenance();
+		this.rediscover();
+		this.timer = this.main.setInterval(() => this.rediscover(), DISCOVERY_REFRESH_MS);
 		this.pi.logger.info("onlyne.listening", { endpoint: this.endpoint, node: this.config.node.id, region: this.config.region });
 	}
-	/** An inbound admission or a send flips the loop back to its active cadence. */
-	wake(): void {
-		if (this.timerMs !== ACTIVE_MAINTAIN_MS) {
-			this.timerMs = ACTIVE_MAINTAIN_MS;
-			if (this.timer !== undefined) {
-				this.main.clearTimer(this.timer);
-				this.timer = this.main.setInterval(() => this.maintain(), this.timerMs);
-			}
-		}
-		this.changed();
-	}
-	private maintain(): void {
-		if (this.closed || this.maintenance) return;
-		const at = Date.now();
-		const rediscover = at - this.lastDiscoveryRefresh >= DISCOVERY_REFRESH_MS;
-		if (rediscover) this.lastDiscoveryRefresh = at;
-		const pass = (async () => {
-			const steps: Array<() => Promise<unknown>> = [
-				() => this.node.client.maintain(this.controller.signal),
-				() => this.node.client.recover(this.controller.signal),
-			];
-			// Re-observing keeps every record's freshness window open and lets an unreachable
-			// candidate be dropped rather than lingering as a permanent stale row.
-			if (rediscover) steps.push(() => this.node.discovery.refresh(this.controller.signal));
-			if (rediscover) steps.push(() => this.#joinDomainPeers());
-			for (const step of steps) {
-				try { await step(); } catch (error) { if (!this.closed) this.pi.logger.warn("onlyne.maintain.failed", { error: errorText(error) }); }
-			}
-			void this.rearm();
-		})();
-		this.maintenance = pass.finally(() => { this.maintenance = undefined; });
-	}
 	/**
-	 * After a pass, the next tick's cadence follows the durable ledger: pending work keeps
-	 * the active interval; an idle node drops to the idle floor, so an empty cluster runs
-	 * no judge and no network rounds until something lands. `hasPendingWork` is one local
-	 * SQLite scan, never a model call.
+	 * RFC 0017 §5: the library reports every committed trust transition, every inbound entry
+	 * and every pending-work flip here. The viewer repaints from it; it never polls storage
+	 * for these.
 	 */
-	private async rearm(): Promise<void> {
-		if (this.closed) return;
-		let pending = true;
-		try { pending = await this.node.client.hasPendingWork(); }
-		catch { /* unknown state keeps the active cadence */ }
-		const next = pending || !this.idle ? ACTIVE_MAINTAIN_MS : IDLE_MAINTAIN_MS;
-		this.idle = !pending;
-		if (next !== this.timerMs) {
-			this.timerMs = next;
-			if (this.timer !== undefined) {
-				this.main.clearTimer(this.timer);
-				this.timer = this.main.setInterval(() => this.maintain(), this.timerMs);
-			}
+	notify(event: NotifyEvent): void {
+		if (event.event === "trust") {
+			this.pi.logger.info(`onlyne.trust.${event.cause}`, {
+				node: event.entry.node_id, phase: event.phase, fingerprint: event.entry.fingerprint,
+			});
 		}
 		this.changed();
 	}
@@ -225,54 +184,33 @@ class OmpRuntime implements PluginRuntime {
 		} while (cursor);
 		this.changed();
 	}
-	/** Reads and verifies a peer's published key; the UI shows this fingerprint before approval. */
-	async trustInspect(node: string) {
-		const identity = await this.node.trust.inspect(node);
-		return { node_id: identity.node_id, public_key: identity.public_key, fingerprint: identity.fingerprint };
+	/** Stage one of one exchange: the peer's proved fingerprint, and the session that commits it. */
+	async trustBegin(node: string): Promise<KeyExchange> {
+		return this.node.trust.begin(this.node.auth, node);
 	}
 	async trustAccept(node: string, fingerprint: string): Promise<void> {
 		await this.node.trust.accept(this.node.auth, node, fingerprint);
-		this.changed();
 	}
 	async trustRevoke(node: string): Promise<void> {
 		await this.node.trust.revoke(this.node.auth, node);
-		this.changed();
 	}
 	async trustRotate(): Promise<{ fingerprint: string }> {
 		const identity = await this.node.trust.rotate(this.node.auth);
-		this.changed();
 		return { fingerprint: identity.fingerprint };
 	}
 	async refreshDiscovery(): Promise<void> {
 		await this.node.discovery.refresh(this.controller.signal);
-		await this.#joinDomainPeers();
 		this.changed();
 	}
-
-	/**
-	 * Domain members form a full mesh: a reachable node that declares this node's region is
-	 * exchanged with automatically, so joining a region is joining its trust group. Nodes in
-	 * other regions, and nodes with no region, still need the explicit flow.
-	 */
-	async #joinDomainPeers(): Promise<void> {
-		if (!this.node.keys.enabled || this.config.region.length === 0) return;
-		const records = await this.node.discovery.listRecords();
-		const now = Date.now();
-		for (const record of records) {
-			if (record.node_id === this.config.node.id) continue;
-			if (record.verified_at === undefined || Date.parse(record.expires_at) <= now) continue;
-			if (record.membership?.state !== "active" || record.membership.domain_id !== this.config.region) continue;
-			const existing = await this.node.trust.entry(record.node_id).catch(() => undefined);
-			if (existing?.state === "trusted" || existing?.state === "pending") continue;
-			try {
-				const identity = await this.node.trust.inspect(record.node_id);
-				await this.node.trust.request(this.node.auth, record.node_id, identity.fingerprint);
-				this.pi.logger.info("onlyne.trust.domain", { node: record.node_id, region: this.config.region });
-			} catch (error) {
-				this.pi.logger.warn("onlyne.trust.domain_failed", { node: record.node_id, error: errorText(error) });
-			}
-		}
+	/** One discovery round on the host's timer; a failed round keeps the last good catalog. */
+	private rediscover(): void {
+		if (this.rediscovering) return;
+		this.rediscovering = true;
+		void this.refreshDiscovery()
+			.catch(error => { if (!this.closed) this.pi.logger.warn("onlyne.discovery.failed", { error: errorText(error) }); })
+			.finally(() => { this.rediscovering = false; });
 	}
+
 	async status(): Promise<OnlyneStatus> {
 		const records = await this.node.discovery.listRecords();
 		const inbox = await allPages(cursor => this.node.messages.inbox(this.node.auth, { page_size: 100, cursor }));
@@ -288,7 +226,7 @@ class OmpRuntime implements PluginRuntime {
 			.filter(record => record.node_id !== this.config.node.id && record.verified_at !== undefined && Date.parse(record.expires_at) > at)
 			.map(record => record.node_id));
 		if (this.node.keys.enabled) {
-			const trusted = new Set((await this.node.trust.list(this.node.auth)).filter(entry => entry.state === "trusted").map(entry => entry.node_id));
+			const trusted = new Set((await this.node.trust.list(this.node.auth)).filter(entry => trustPhase(entry) === "exchanged").map(entry => entry.node_id));
 			for (const node of [...peers]) if (!trusted.has(node)) peers.delete(node);
 		}
 		// Live attention only: an acknowledged or consumed item is history, not an alert.
@@ -383,8 +321,7 @@ class OmpRuntime implements PluginRuntime {
 		const trust = this.node.keys.enabled ? await this.node.trust.list(this.node.auth) : [];
 		const identity = this.node.keys.enabled ? await this.node.keys.describe() : undefined;
 		return { region: this.config.region, endpoint: this.endpoint, contexts, queue, threads: views, discovery, contacts,
-			trust: trust.map(row => ({ node_id: row.node_id, fingerprint: row.fingerprint, state: row.state, base_url: row.base_url,
-				local_approved: row.local_approved, remote_approved: row.remote_approved })),
+			trust: trust.map(row => ({ node_id: row.node_id, fingerprint: row.fingerprint, phase: trustPhase(row), base_url: row.base_url })),
 			...(identity === undefined ? {} : { identity: { public_key: identity.public_key, fingerprint: identity.fingerprint } }),
 			...(this.discoveryError === undefined ? {} : { discovery_error: this.discoveryError }) };
 	}
@@ -394,9 +331,10 @@ class OmpRuntime implements PluginRuntime {
 		this.closed = true;
 		this.controller.abort();
 		if (this.timer) this.main.clearTimer(this.timer);
+		// A start that failed before the node existed still comes here to release the server.
+		this.node?.client.stopMaintenance();
 		await this.network?.close();
 		this.server?.stop(true);
-		await this.maintenance;
 		this.storage.close();
 		this.listeners.clear();
 		if (active === this) active = undefined;

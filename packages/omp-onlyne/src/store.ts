@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Entry, Storage, ThreadRef, Transaction } from "@onlyne/lib";
 import type { ContextRecord } from "./types.ts";
@@ -12,12 +12,20 @@ export class SqliteStorage implements Storage {
 	#closed = false;
 
 	constructor(path: string) {
-		mkdirSync(dirname(path), { recursive: true });
+		// The store carries trust rows and, while a rotation is unacknowledged, the old private
+		// key that proves it. It is secret material: 0700 for the directory, 0600 for the files,
+		// including the WAL and shared-memory sidecars SQLite creates beside them.
+		const dir = dirname(path);
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		chmodSync(dir, 0o700);
 		this.#db = new Database(path, { create: true });
 		this.#db.exec("PRAGMA journal_mode = WAL");
 		this.#db.exec("PRAGMA synchronous = FULL");
 		this.#db.exec("PRAGMA busy_timeout = 5000");
 		this.#db.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+		for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+			if (existsSync(file)) chmodSync(file, 0o600);
+		}
 	}
 
 	/** Serialize every transaction; SQLite's own BEGIN IMMEDIATE would otherwise race across awaits. */

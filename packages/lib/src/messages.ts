@@ -60,7 +60,8 @@ export class MessageService {
       }
     });
     if ('error' in outcome) throw new OnlyneError(outcome.error.code, outcome.error.message, outcome.error.details);
-    this.ctx.options.plugins.runtime?.wake?.();
+    this.ctx.options.plugins.runtime?.notify?.({ event: 'inbound', thread: outcome.receipt.thread_ref, seq: outcome.receipt.seq, sender: message.sender });
+    this.ctx.options.plugins.runtime?.notify?.({ event: 'work-pending', pending: true });
     return requireValue(outcome.receipt);
   }
 

@@ -1,10 +1,15 @@
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
 import { canonical, fail, key, OnlyneError } from './core.js';
 import type { Context } from './core.js';
-import type { Auth, KeyIdentity, KeyMaterial, NodeId, TrustEntry, TrustStatement } from './types.js';
+import type { Auth, ErrorCode, KeyIdentity, KeyMaterial, KeyExchange, NodeId, NotifyEvent, TrustEntry, TrustStatement } from './types.js';
+import { trustPhase } from './types.js';
 
 export const SIGNATURE_HEADER = 'Onlyne-Sig';
 export const CLOCK_SKEW_MS = 300_000;
+/** How long a failed exchange send waits before the maintenance loop tries it again. */
+export const EXCHANGE_RETRY_MS = 60_000;
+/** How long a refused statement waits before the loop tries again (unverified refusal). */
+export const REFUSED_RETRY_MS = 600_000;
 
 function hash(input: string | Uint8Array): string { return createHash('sha256').update(input).digest('hex'); }
 function privateKey(material: KeyMaterial) {
@@ -72,8 +77,13 @@ export class KeyService {
   async replace(material: KeyMaterial): Promise<void> {
     const hook = this.ctx.options.plugins.keys;
     if (hook?.replace === undefined) fail('unsupported_delivery', 'The host does not support key replacement.');
-    await hook.replace(material);
-    this.#material = undefined;
+    try {
+      await hook.replace(material);
+    } finally {
+      // The host may have swapped the stored key and then failed. Re-read it: a rotation
+      // window is only abandoned when the host still reports the old key.
+      this.#material = undefined;
+    }
   }
 }
 
@@ -81,6 +91,63 @@ function statementPayload(statement: TrustStatement): string {
   const { signature: _signature, previous_signature: _previous, ...body } = statement;
   return `onlyne-trust-v1\n${canonical(body)}`;
 }
+
+/**
+ * One owed delivery of a signed trust statement (RFC 0017 §3.5). The obligation is
+ * independent of the row's stage: an approval that reached the peer as `exchanged`
+ * still owes nothing, while an approval whose reply was lost owes a re-send.
+ */
+interface TrustOutbound {
+  node_id: NodeId;
+  /** `approval` carries the current approval; `rotation` carries the old-key proof. */
+  kind: 'approval' | 'rotation';
+  /** The nonce this attempt carries; the peer's reply must echo it to settle the obligation. */
+  nonce: string;
+  /** This node's public-key fingerprint when the obligation was created; a rotation supersedes it. */
+  fingerprint: string;
+  /** Last send attempt, epoch milliseconds. The retry window gates the next one. */
+  at: number;
+  /** Rotation only: the previous private key that proves the rotation to a peer that missed it. */
+  previous?: number[];
+  /**
+   * When an unverified refusal arrived: the epoch millisecond at which the next attempt is
+   * allowed. An unauthenticated error is a backoff, never a stop — a forged `forbidden` must
+   * not be able to end the retry, and the peer may have nothing to send that would revive it.
+   */
+  blocked?: number;
+}
+
+/**
+ * The rotation window (RFC 0017 §2). The key swap spans two stores — the obligation rows and
+ * the host's key hook — so one record marks that a swap is in progress. `rotate` writes it
+ * with the obligations in one transaction, and the maintenance loop reads it to tell
+ * "not swapped yet" from "swapped, statement not delivered".
+ */
+interface RotationWindow {
+  new_fingerprint: string;
+  at: number;
+}
+
+/**
+ * A refusal that ends the delivery obligation: the peer revoked this node, or its key
+ * changed without proof, so the same statement can never succeed. Every other failure
+ * keeps the obligation — a lost response and a failed verification are both retried by
+ * the next window (RFC 0017 §3.5).
+ */
+function terminalRefusal(error: unknown): boolean {
+  return error instanceof OnlyneError && (error.error.code === 'forbidden' || error.error.code === 'id_conflict');
+}
+
+/** Serializes key rotations inside one process; cross-process callers fail on the stored window. */
+const RotationMutex = new class {
+  #tail: Promise<unknown> = Promise.resolve();
+  locked<T>(work: () => Promise<T>): Promise<T> {
+    const run = () => work();
+    const result = this.#tail.then(run, run);
+    this.#tail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+}();
 
 export function requestPayload(request: Request, target: NodeId, digest: string, timestamp: string, nonce: string): string {
   const url = new URL(request.url);
@@ -97,12 +164,36 @@ export function bodyDigest(body: Uint8Array | string): string { return hash(body
 
 export class TrustService {
   constructor(private readonly ctx: Context, private readonly keys: KeyService) {}
+  /** The client's loop, so a committed trust change re-arms the cadence; set by the node. */
+  #waker: { wakeLoop(): void } | undefined;
+  /** @internal Called by OnlyneNode so trust commits reach the maintenance loop. */
+  bindLoop(waker: { wakeLoop(): void }): void { this.#waker = waker; }
   private owner(auth: Auth): void { this.ctx.owner(auth.actor); }
   async list(auth: Auth): Promise<TrustEntry[]> {
     this.owner(auth);
     return (await this.ctx.storage.transaction(tx => tx.scan<TrustEntry>('trust/'))).map(row => row.value).sort((a, b) => a.node_id.localeCompare(b.node_id));
   }
   async entry(node: NodeId): Promise<TrustEntry | undefined> { return this.ctx.storage.transaction(tx => tx.get<TrustEntry>(key('trust', node))); }
+  /**
+   * RFC 0017 §3: stage one of one exchange. Reads the peer's live `/keys`, so the
+   * fingerprint the host shows is one the peer proved. Committing is a separate
+   * explicit step on the returned session; nothing is recorded or sent here.
+   */
+  async begin(auth: Auth, node: NodeId): Promise<KeyExchange> {
+    this.owner(auth);
+    const peer = await this.inspect(node);
+    const observed = peer.fingerprint;
+    return {
+      node_id: peer.node_id, fingerprint: peer.fingerprint, public_key: peer.public_key,
+      base_url: (await this.ctx.options.plugins.resolve(node)).base_url,
+      // The confirmation is sealed to the fingerprint this session displayed: a host that
+      // confirms a value it never showed, or a key that moved since, never reaches the wire.
+      confirm: async (fingerprint: string): Promise<TrustEntry> => {
+        if (fingerprint !== observed) fail('unauthenticated', 'The confirmed fingerprint is not the one begin displayed.', { fingerprint: observed });
+        return this.request(auth, node, fingerprint);
+      },
+    };
+  }
   private async identity(): Promise<KeyIdentity> {
     const identity = await this.keys.describe();
     if (identity === undefined) fail('unsupported_delivery', 'Key exchange requires a local identity key.');
@@ -128,40 +219,145 @@ export class TrustService {
     if (identity.node_id !== node || identity.fingerprint !== await keyFingerprint(Buffer.from(identity.public_key, 'base64'))) fail('unauthenticated', 'The peer identity or fingerprint is inconsistent.');
     return identity;
   }
-  private async statement(peer: KeyIdentity, approved: boolean, old?: KeyMaterial): Promise<TrustStatement> {
+  private async statement(peer: KeyIdentity, approved: boolean, nonce: string, replyTo?: string, old?: Uint8Array): Promise<TrustStatement> {
     const own = await this.identity();
     const value: TrustStatement = { node_id: this.ctx.node, target: peer.node_id, public_key: own.public_key,
       target_fingerprint: peer.fingerprint, base_url: this.ctx.baseUrl, approved,
-      nonce: this.ctx.id(), timestamp: this.ctx.now(), signature: '' };
+      nonce, timestamp: this.ctx.now(), signature: '' };
+    if (replyTo !== undefined) value.reply_nonce = replyTo;
     value.signature = await this.keys.sign(statementPayload(value));
-    if (old !== undefined) value.previous_signature = sign(null, Buffer.from(statementPayload(value)), privateKey(old)).toString('base64');
+    if (old !== undefined) {
+      const key = createPrivateKey({ key: Buffer.from(old), format: 'der', type: 'pkcs8' });
+      value.previous_signature = sign(null, Buffer.from(statementPayload(value)), key).toString('base64');
+    }
     return value;
   }
-  private async send(peer: KeyIdentity, approved: boolean, old?: KeyMaterial): Promise<TrustEntry> {
+  /**
+   * Sends one statement and settles the matching obligation only on a reply that proves
+   * it answered this attempt (RFC 0017 §3.5). A missing, unsigned or mismatched reply
+   * leaves the obligation owed, so the maintenance loop re-sends with a fresh nonce.
+   */
+  private async send(peer: KeyIdentity, approved: boolean, attempt: { nonce: string; old?: Uint8Array }): Promise<TrustEntry> {
     const target = await this.ctx.options.plugins.resolve(peer.node_id);
     if (target.node_id !== peer.node_id) fail('unauthenticated', 'Resolver identity mismatch.');
     const base = this.address(target.base_url);
+    const statement = await this.statement(peer, approved, attempt.nonce, undefined, attempt.old);
     const response = await fetch(new URL('./introductions', base.href.replace(/\/?$/, '/')), {
       method: 'POST', headers: { 'content-type': 'application/json' }, redirect: 'error',
-      body: JSON.stringify(await this.statement(peer, approved, old)), signal: AbortSignal.timeout(this.ctx.options.wait_ms ?? 30_000),
+      body: JSON.stringify(statement), signal: AbortSignal.timeout(this.ctx.options.wait_ms ?? 30_000),
     });
-    const result = await response.json() as TrustStatement & { error?: { code: string; message: string } };
-    if (!response.ok) fail('unauthenticated', result.error?.message ?? 'The peer rejected the exchange.');
+    const result = await response.json() as TrustStatement & { error?: { code: ErrorCode; message: string; retryable?: boolean } };
+    if (!response.ok) {
+      // Keep the peer's own code: a revoked peer answers `forbidden` and a failed
+      // verification answers `unauthenticated`, and only the first ends the obligation.
+      const rejection = new OnlyneError(result.error?.code ?? 'unauthenticated', result.error?.message ?? 'The peer rejected the exchange.');
+      if (typeof result.error?.retryable === 'boolean') rejection.error.retryable = result.error.retryable;
+      throw rejection;
+    }
     if (result.node_id !== peer.node_id || result.public_key !== peer.public_key) fail('unauthenticated', 'The exchange answered with a different identity.');
-    return this.receive(result);
+    if (result.reply_nonce !== statement.nonce) fail('unauthenticated', 'The exchange reply does not answer this introduction.');
+    const entry = await this.receive(result);
+    await this.settle(peer.node_id, statement.nonce);
+    return entry;
+  }
+  /** Clears the obligation an answered attempt created; a newer attempt keeps its own. */
+  private settle(node: NodeId, nonce: string): Promise<void> {
+    return this.ctx.storage.transaction(async tx => {
+      const slot = key('trust-outbound', node);
+      const owed = await tx.get<TrustOutbound>(slot);
+      if (owed === undefined || owed.nonce !== nonce) return;
+      await tx.delete(slot);
+      if (owed.kind === 'rotation') await this.closeWindow(tx);
+    });
+  }
+  /** The rotation window closes when its last statement is gone. */
+  private async closeWindow(tx: import('./types.js').Transaction): Promise<void> {
+    const remaining = await tx.scan<TrustOutbound>(key('trust-outbound') + '/');
+    if (remaining.every(row => row.value.kind !== 'rotation')) await tx.delete(key('security', 'rotation'));
+  }
+  /**
+   * Rewrites or deletes one obligation only if the row is still the attempt this pass read.
+   * `rotate` can replace an approval obligation with a rotation one mid-pass; a whole-row
+   * write-back from the stale snapshot would drop the old-key proof it just stored.
+   */
+  private async compareObligation(node: NodeId, expected: TrustOutbound, next: TrustOutbound | null): Promise<boolean> {
+    return this.ctx.storage.transaction(async tx => {
+      const slot = key('trust-outbound', node);
+      const current = await tx.get<TrustOutbound>(slot);
+      if (current === undefined || current.nonce !== expected.nonce || current.kind !== expected.kind) return false;
+      if (next === null) await tx.delete(slot);
+      else await tx.put(slot, next);
+      return true;
+    });
+  }
+  private rotationWindow(): Promise<RotationWindow | undefined> {
+    return this.ctx.storage.transaction(tx => tx.get<RotationWindow>(key('security', 'rotation')));
+  }
+  /** Backs off an obligation after a refusal this node cannot authenticate. */
+  private park(node: NodeId, nonce: string): Promise<void> {
+    return this.ctx.storage.transaction(async tx => {
+      const slot = key('trust-outbound', node);
+      const owed = await tx.get<TrustOutbound>(slot);
+      if (owed !== undefined && owed.nonce === nonce) await tx.put(slot, { ...owed, blocked: this.ctx.now() + REFUSED_RETRY_MS });
+    });
+  }
+  /** The swap never completed: drop the window and every statement prepared under it. */
+  private abandonRotation(): Promise<void> {
+    return this.ctx.storage.transaction(async tx => {
+      await tx.delete(key('security', 'rotation'));
+      for (const row of await tx.scan<TrustOutbound>(key('trust-outbound') + '/')) {
+        if (row.value.kind === 'rotation') await tx.delete(row.key);
+      }
+    });
   }
   async request(auth: Auth, node: NodeId, fingerprint: string): Promise<TrustEntry> {
     this.owner(auth);
     const peer = await this.inspect(node);
     if (peer.fingerprint !== fingerprint) fail('unauthenticated', 'The peer key changed after confirmation.', { fingerprint: peer.fingerprint });
-    await this.ctx.storage.transaction(async tx => {
+    const own = await this.identity();
+    const nonce = this.ctx.id();
+    const committed = await this.ctx.storage.transaction(async tx => {
       const slot = key('trust', node);
-      const previous = await tx.get<TrustEntry>(slot);
-      if (previous !== undefined && previous.public_key !== peer.public_key && previous.state !== 'revoked') fail('id_conflict', 'A different peer key is already pinned.');
-      await tx.put(slot, { ...peer, state: 'pending', base_url: '', local_approved: true, remote_approved: previous?.remote_approved ?? false,
-        first_seen: previous?.first_seen ?? new Date(this.ctx.now()).toISOString(), last_checked: new Date(this.ctx.now()).toISOString() } satisfies TrustEntry);
+      const before = await tx.get<TrustEntry>(slot);
+      if (before !== undefined && before.public_key !== peer.public_key && before.state !== 'revoked') fail('id_conflict', 'A different peer key is already pinned.');
+      // Mutual approval is already known locally — our approval now, theirs from the stored
+      // statement — so the row is trusted at once. The send only confirms the transcript;
+      // a failed re-send must not demote a working signature relation either. Revocation
+      // cleared remote approval, so only a row that still carries it counts as mutual.
+      const mutual = before?.public_key === peer.public_key && (before.state === 'trusted' || (before.state === 'pending' && before.remote_approved));
+      const state: TrustEntry['state'] = mutual ? 'trusted' : 'pending';
+      const entry: TrustEntry = { ...peer, state, base_url: before?.base_url ?? '', local_approved: true, remote_approved: before?.remote_approved ?? false,
+        first_seen: before?.first_seen ?? new Date(this.ctx.now()).toISOString(), last_checked: new Date(this.ctx.now()).toISOString() };
+      await tx.put(slot, entry);
+      // A repeat confirmation of an established row is a refresh: timestamps move, nothing is
+      // owed and nothing is sent, so a host that renders twice cannot spam the peer. While the
+      // relation is still one-sided, the same call means "try again" and does owe a statement
+      // (RFC 0017 §3.3).
+      const fresh = before === undefined || before.state !== 'trusted' || !before.local_approved || before.public_key !== peer.public_key;
+      // An unacknowledged rotation owns this peer's delivery: its statement carries the old-key
+      // proof, and overwriting it with a plain approval would drop that proof for good. The
+      // confirmation still refreshes the row; the rotation statement also carries the approval.
+      const existing = await tx.get<TrustOutbound>(key('trust-outbound', node));
+      const rotating = existing?.kind === 'rotation';
+      if (fresh && !rotating) {
+        // Committed with the row, so a crash between commit and send still owes the delivery;
+        // only the peer's answering reply settles it.
+        await tx.put(key('trust-outbound', node), { node_id: node, kind: 'approval', nonce, fingerprint: own.fingerprint, at: this.ctx.now() } satisfies TrustOutbound);
+      }
+      return { before, entry, fresh, rotating };
     });
-    return this.send(peer, true);
+    // Accepting an invitation and initiating an exchange are different host events.
+    const cause = committed.before?.remote_approved === true && committed.before.local_approved === false ? 'local-accept' : 'local-request';
+    this.notify(cause, committed.entry, committed.before);
+    if (!committed.fresh || committed.rotating) return committed.entry;
+    return this.send(peer, true, { nonce }).catch(async (error: unknown) => {
+      if (terminalRefusal(error)) await this.park(node, nonce);
+      throw error;
+    });
+  }
+  private notify(cause: NotifyEvent extends infer T ? T extends { cause: infer C } ? C : never : never, entry: TrustEntry, previous?: TrustEntry): void {
+    try { this.#waker?.wakeLoop(); } catch { /* a loop fault never blocks the commit */ }
+    this.ctx.options.plugins.runtime?.notify?.({ event: 'trust', cause, phase: trustPhase(entry), entry, ...(previous === undefined ? {} : { previous }) });
   }
   async accept(auth: Auth, node: NodeId, fingerprint: string): Promise<TrustEntry> { return this.request(auth, node, fingerprint); }
 
@@ -177,54 +373,208 @@ export class TrustService {
     const fingerprint = await keyFingerprint(Buffer.from(value.public_key, 'base64'));
     const seed = this.ctx.options.plugins.trust_seeds?.find(row => row.node_id === value.node_id);
     if (seed !== undefined && seed.fingerprint !== fingerprint) fail('unauthenticated', 'The peer differs from its pinned fingerprint.', { fingerprint });
-    return this.ctx.storage.transaction(async tx => {
+    const settled = await this.ctx.storage.transaction(async tx => {
       await this.consumeNonce(tx, value.node_id, `exchange:${value.nonce}`, value.timestamp);
       const slot = key('trust', value.node_id);
       const previous = await tx.get<TrustEntry>(slot);
       if (previous?.state === 'revoked') fail('forbidden', 'This peer was revoked. Local approval is required.');
+      // RFC 0017 §3.3: with no recorded relationship there is nothing this statement could
+      // answer, so a first-contact refusal is not a fact about either side.
+      if (previous === undefined && !value.approved) fail('invalid_request', 'A first statement must carry the peer approval it claims.');
       const changed = previous !== undefined && previous.public_key !== value.public_key;
-      if (changed && (value.previous_signature === undefined || !signatureValid(previous.public_key, value.previous_signature, statementPayload(value)))) fail('id_conflict', 'The peer key changed without proof from the previous key.');
-      const local = seed !== undefined || (changed ? false : previous?.local_approved === true);
+      if (changed && (value.previous_signature === undefined || !signatureValid(previous.public_key, value.previous_signature, statementPayload(value)))) {
+        // No local repair exists: this node cannot learn which key the peer still pins, and the
+        // old key is gone once its rotation window closed. Only revoke + re-confirm recovers
+        // (RFC 0017 §2).
+        fail('id_conflict', 'The peer key changed without proof from the previous key; revoke this peer and confirm again.', { fingerprint });
+      }
+      // A proven rotation keeps this node's approval: the old-key proof says the identity is
+      // continuous, so the user does not re-approve (RFC 0017 §3.3). An unproven key change
+      // never reaches this line — it fails as `id_conflict` above.
+      const local = seed !== undefined || previous?.local_approved === true;
       const entry: TrustEntry = { node_id: value.node_id, public_key: value.public_key, fingerprint,
         state: local && value.approved ? 'trusted' : 'pending', local_approved: local, remote_approved: value.approved,
         base_url: value.base_url, first_seen: previous?.first_seen ?? new Date(this.ctx.now()).toISOString(), last_checked: new Date(this.ctx.now()).toISOString(),
         ...(changed ? { history: [...(previous.history ?? []), previous.fingerprint] } : previous?.history === undefined ? {} : { history: previous.history }) };
       await tx.put(slot, entry);
-      return entry;
+      // The peer spoke: whatever parked this node's own obligation may no longer hold.
+      const owedSlot = key('trust-outbound', value.node_id);
+      const owed = await tx.get<TrustOutbound>(owedSlot);
+      if (owed?.blocked !== undefined) {
+        const { blocked: _blocked, ...rest } = owed;
+        await tx.put(owedSlot, rest);
+      }
+      return { entry, previous };
     });
+    this.notify('peer-statement', settled.entry, settled.previous);
+    return settled.entry;
   }
   async introduce(value: TrustStatement): Promise<TrustStatement> {
     const entry = await this.receive(value);
-    return this.statement(entry, entry.local_approved);
+    // The reply echoes the request nonce: that is what lets the sender settle its obligation.
+    // While this node's own rotation is unacknowledged, every statement carries the old-key
+    // proof, so a peer still pinning the previous key can accept this reply (RFC 0017 §2).
+    const owed = await this.ctx.storage.transaction(tx => tx.get<TrustOutbound>(key('trust-outbound', value.node_id)));
+    const old = owed?.previous === undefined ? undefined : new Uint8Array(owed.previous);
+    return this.statement(entry, entry.local_approved, this.ctx.id(), value.nonce, old);
   }
   async revoke(auth: Auth, node: NodeId): Promise<void> {
     this.owner(auth);
-    await this.ctx.storage.transaction(async tx => {
+    const previous = await this.ctx.storage.transaction(async tx => {
       const slot = key('trust', node);
       const previous = await tx.get<TrustEntry>(slot);
       if (previous !== undefined) await tx.put(slot, { ...previous, state: 'revoked', public_key: '', local_approved: false, remote_approved: false });
+      // A revoked peer owes nothing: drop the statement, and close a rotation window it was
+      // the last member of, or every later rotation would be refused.
+      const owedSlot = key('trust-outbound', node);
+      const owed = await tx.get<TrustOutbound>(owedSlot);
+      if (owed !== undefined) {
+        await tx.delete(owedSlot);
+        if (owed.kind === 'rotation') await this.closeWindow(tx);
+      }
+      return previous;
     });
+    if (previous !== undefined) this.notify('local-revoke', { ...previous, state: 'revoked', public_key: '', local_approved: false, remote_approved: false }, previous);
+  }
+
+  /**
+   * RFC 0017 §3.5: re-drives every owed statement whose reply has not arrived. The stage
+   * of the row is irrelevant — an `exchanged` row still owes the delivery when its reply
+   * was lost. Each attempt uses a fresh nonce, so the peer's nonce cache cannot mistake
+   * a re-send for a replay. The maintenance loop calls this; the host never does.
+   */
+  async redrive(signal?: AbortSignal): Promise<void> {
+    if (!this.keys.enabled) return;
+    const owed = await this.ctx.storage.transaction(tx => tx.scan<TrustOutbound>(key('trust-outbound') + '/'));
+    for (const row of owed) {
+      if (signal?.aborted) return;
+      const obligation = row.value;
+      const entry = await this.entry(obligation.node_id);
+      // A revoked peer or a deleted row ends the obligation; a local revoke is the only
+      // thing that may drop it besides the peer's own answer.
+      if (entry === undefined || entry.state === 'revoked') {
+        if (await this.compareObligation(obligation.node_id, obligation, null) && obligation.kind === 'rotation') {
+          await this.ctx.storage.transaction(tx => this.closeWindow(tx));
+        }
+        continue;
+      }
+      const own = await this.identity();
+      if (obligation.kind === 'rotation') {
+        const window = await this.rotationWindow();
+        if (window === undefined) {
+          // A rotation statement without its window is an orphan: nothing will ever prove it.
+          await this.compareObligation(obligation.node_id, obligation, null);
+          continue;
+        }
+        if (own.fingerprint !== window.new_fingerprint) {
+          // The host still reports the old key. If this process is the one swapping, the host
+          // hook is simply slow: wait for it, however long it takes. Otherwise the process
+          // restarted mid-swap and the swap never completed, so the preparation is dead weight
+          // and the peers still hold a key this node still uses.
+          if (this.#rotating) continue;
+          await this.abandonRotation();
+          continue;
+        }
+      } else if (obligation.fingerprint !== own.fingerprint) {
+        // An approval statement signed by a key this node no longer uses; the rotation
+        // statement that replaced it carries the same approval.
+        await this.compareObligation(obligation.node_id, obligation, null);
+        continue;
+      }
+      // An unverified refusal delays the next attempt; it never ends the obligation.
+      let current = obligation;
+      if (current.blocked !== undefined) {
+        if (this.ctx.now() < current.blocked) continue;
+        const { blocked: _blocked, ...rest } = current;
+        if (!await this.compareObligation(current.node_id, current, rest)) continue;
+        current = rest;
+      }
+      if (this.ctx.now() - current.at < EXCHANGE_RETRY_MS) continue;
+      const nonce = this.ctx.id();
+      const old = current.previous === undefined ? undefined : new Uint8Array(current.previous);
+      // Address the key the peer publishes now. A statement's `target_fingerprint` is the key
+      // it is written for; reusing the stored one would make two nodes that rotated at the
+      // same time reject each other forever (RFC 0017 §3.5).
+      let live: KeyIdentity;
+      try {
+        live = await this.inspect(entry.node_id);
+      } catch {
+        continue; // unreachable this pass; the obligation stays
+      }
+      if (!await this.compareObligation(current.node_id, current, { ...current, nonce, at: this.ctx.now() })) continue;
+      try {
+        await this.send(live, entry.local_approved, { nonce, ...(old === undefined ? {} : { old }) });
+      } catch (error) {
+        // An unverified error never destroys the obligation: it is parked, so a refusal the
+        // peer did not actually send cannot lose the approval. A transport failure or a failed
+        // verification simply keeps it for the next window.
+        if (terminalRefusal(error)) await this.park(entry.node_id, nonce);
+      }
+    }
   }
   async rotate(auth: Auth): Promise<KeyIdentity> {
     this.owner(auth);
+    // The whole operation runs under one process-wide lock. The guard in the transaction
+    // alone cannot prevent a second rotation that starts while the first is still awaiting
+    // `keys.replace`: it would pass a window-free guard and swap again with a proof from a
+    // key generation the peers have already moved past.
+    return RotationMutex.locked(() => this.#rotate(auth));
+  }
+  /** True while this process is inside `rotate`; tells a slow hook from a crash leftover. */
+  #rotating = false;
+  async #rotate(auth: Auth): Promise<KeyIdentity> {
+    const window = await this.rotationWindow();
+    if (window !== undefined) fail('conflict', 'A rotation is still unacknowledged; a second swap would skip the proof a peer needs.');
     const previous = await this.keys.material();
-    const peers = (await this.list(auth)).filter(row => row.state === 'trusted');
-    // The journal keeps the previous signing key until every peer has received its rotation proof.
-    const slot = 'security/rotation';
-    let journal = await this.ctx.storage.transaction(tx => tx.get<{ previous: number[]; peers: TrustEntry[] }>(slot));
-    if (journal === undefined) {
-      journal = { previous: Array.from(previous.private_key), peers };
-      await this.ctx.storage.transaction(tx => tx.put(slot, journal));
-      await this.keys.replace(generateKeyMaterial());
+    // Every non-revoked relation where the peer may already hold this node's old key owes the
+    // rotation statement: our own approval (requested) or the peer's recorded statement
+    // (invited) both mean the old key is pinned somewhere.
+    const peers = (await this.list(auth)).filter(row => row.state !== 'revoked' && (row.local_approved || row.remote_approved));
+    const next = generateKeyMaterial();
+    const fingerprint = await keyFingerprint(next.public_key);
+    // The window and every obligation are written in one transaction, so the maintenance loop
+    // can tell a swap in progress from a completed one. Each obligation carries the old private
+    // key, so an unreachable peer is re-driven later and a restart keeps the proof.
+    await this.ctx.storage.transaction(async tx => {
+      if (await tx.get(key('security', 'rotation')) !== undefined) {
+        fail('conflict', 'A rotation is still unacknowledged; a second swap would skip the proof a peer needs.');
+      }
+      // No peer to tell: swap the key without opening a window that nothing could close.
+      if (peers.length === 0) return;
+      for (const peer of peers) {
+        await tx.put(key('trust-outbound', peer.node_id), {
+          node_id: peer.node_id, kind: 'rotation', nonce: this.ctx.id(), fingerprint, at: this.ctx.now(), previous: Array.from(previous.private_key),
+        } satisfies TrustOutbound);
+      }
+      await tx.put(key('security', 'rotation'), { new_fingerprint: fingerprint, at: this.ctx.now() } satisfies RotationWindow);
+    });
+    this.#rotating = true;
+    try {
+      await this.keys.replace(next);
+    } finally {
+      this.#rotating = false;
     }
-    const old: KeyMaterial = { private_key: new Uint8Array(journal.previous), public_key: previous.public_key };
-    for (const peer of journal.peers.slice()) {
-      await this.send(peer, true, old);
-      journal.peers = journal.peers.filter(row => row.node_id !== peer.node_id);
-      await this.ctx.storage.transaction(tx => tx.put(slot, journal));
+    const old = previous.private_key;
+    for (const peer of peers) {
+      const obligation = await this.ctx.storage.transaction(tx => tx.get<TrustOutbound>(key('trust-outbound', peer.node_id)));
+      if (obligation === undefined) continue;
+      let live: KeyIdentity;
+      try {
+        live = await this.inspect(peer.node_id);
+      } catch {
+        continue; // the obligation carries the old key and is re-driven later
+      }
+      try {
+        // The statement asserts what is true: a peer this node has not approved yet receives
+        // `approved=false` with the rotation proof (RFC 0017 §3.3).
+        await this.send(live, peer.local_approved, { nonce: obligation.nonce, old });
+      } catch (error) {
+        if (terminalRefusal(error)) await this.park(peer.node_id, obligation.nonce);
+      }
     }
-    await this.ctx.storage.transaction(tx => tx.delete(slot));
-    return this.identity();
+    const identity = await this.identity();
+    for (const peer of peers) this.notify('rotation', (await this.entry(peer.node_id)) ?? peer, peer);
+    return identity;
   }
   private async consumeNonce(tx: import('./types.js').Transaction, actor: string, nonce: string, timestamp: number): Promise<void> {
     const slot = key('nonce', actor, nonce);

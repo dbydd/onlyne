@@ -1,4 +1,4 @@
-import type { NodeId, ThreadRef, TrustSeed } from "@onlyne/lib";
+import type { NodeId, ThreadRef, TrustPhase, TrustSeed } from "@onlyne/lib";
 
 /**
  * Project-scoped configuration in `<project>/.onlyne/config.toml`.
@@ -13,7 +13,8 @@ export interface OnlyneConfig {
 	node: {
 		id: NodeId;
 		key_ref?: string;
-		key_scope?: "project" | "global";
+		/** Where the node identity lives: the project's `.onlyne/keys`, the user's key store, or no key at all. */
+		key_scope?: "project" | "global" | "none";
 	};
 	server: {
 		bind: string;
@@ -109,15 +110,12 @@ export interface ViewerSnapshot {
 	discovery: ViewerDiscovery[];
 	contacts: ViewerContact[];
 	discovery_error?: string;
+	/** Every trust row, projected through `trustPhase`: the only stage this package renders. */
 	trust?: Array<{
 		node_id: NodeId;
 		fingerprint: string;
-		state: "pending" | "trusted" | "revoked";
+		phase: TrustPhase;
 		base_url: string;
-		/** This side approved; the other half of a pending exchange. */
-		local_approved: boolean;
-		/** The peer approved, which is what makes an invitation inbound. */
-		remote_approved: boolean;
 	}>;
 	identity?: { public_key: string; fingerprint: string };
 }

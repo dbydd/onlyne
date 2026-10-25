@@ -12,6 +12,20 @@ export interface SigningTransportOptions {
 // bearer credentials on the wire.
 const LOOPBACK: Record<string, true> = { '127.0.0.1': true, localhost: true, '[::1]': true };
 
+/**
+ * The base URL a service request may use: HTTPS anywhere, plain HTTP on loopback only.
+ * Public reads (a candidate's service description) use the same rule, so one host cannot
+ * downgrade the other.
+ */
+export function serviceBase(value: string): URL {
+  let base: URL;
+  try { base = new URL(value); } catch { throw new OnlyneError('unavailable', 'The endpoint is not an absolute URL.'); }
+  if (base.protocol !== 'https:' && !(base.protocol === 'http:' && LOOPBACK[base.hostname] === true)) {
+    throw new OnlyneError('unavailable', 'Plain HTTP is limited to loopback; cross-host peers must use HTTPS.');
+  }
+  return base;
+}
+
 function isFailure(value: unknown): value is Failure {
   return typeof value === 'object' && value !== null && 'code' in value && 'message' in value && typeof value.code === 'string' && typeof value.message === 'string';
 }
@@ -38,10 +52,7 @@ export class FetchTransport implements Transport {
     if (endpoint.node_id !== target) {
       throw new OnlyneError('unavailable', 'The resolver returned a target for another identity.');
     }
-    const base = new URL(endpoint.base_url);
-    if (base.protocol !== 'https:' && !(base.protocol === 'http:' && LOOPBACK[base.hostname] === true)) {
-      throw new OnlyneError('unavailable', 'Plain HTTP is limited to loopback; cross-host peers must use HTTPS.');
-    }
+    const base = serviceBase(endpoint.base_url);
     // The route is relative to base_url, which already carries the service
     // prefix; a leading slash would silently drop that prefix.
     const url = new URL('./' + path.replace(/^\/+/, ''), base.pathname.endsWith('/') ? base : base.href + '/');
@@ -106,14 +117,17 @@ export class FetchTransport implements Transport {
 
     if (response.ok) {
       if (parsed === undefined) throw new OnlyneError('unavailable', 'The target returned a malformed response.');
-      if (this.signing !== undefined) {
-        const peer = await this.signing.trust.entry(target);
-        if (peer?.state === 'trusted') await this.signing.trust.verifyResponse(target, request, response, text);
-      }
+      // A signed request is only ever sent to a trusted peer, so its answer must prove that
+      // identity; `verifyResponse` fails when the row is missing, untrusted or the signature
+      // does not cover this request's nonce.
+      if (this.signing !== undefined) await this.signing.trust.verifyResponse(target, request, response, text);
       return parsed as T;
     }
 
     const record = failureRecord(parsed);
+    // A signed request is answered by a signed response even when it fails; an unsigned or
+    // forged error must not be read as the peer's refusal.
+    if (this.signing !== undefined) await this.signing.trust.verifyResponse(target, request, response, text);
     if (isFailure(record)) {
       const rejection = new OnlyneError(record.code as ErrorCode, record.message);
       if (typeof record.retryable === 'boolean') rejection.error.retryable = record.retryable;

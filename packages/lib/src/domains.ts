@@ -1,5 +1,6 @@
 import { fail, key, OnlyneError, page, requireValue, type Context } from './core.js';
-import type { Auth, DomainDiscovery, DomainMembership, DomainMutation, Mutation, PageOptions, Transaction, Transport } from './types.js';
+import { serviceBase } from './transport.js';
+import type { Auth, DomainDiscovery, DomainMembership, DomainMutation, Mutation, PageOptions, Transaction } from './types.js';
 
 export function validateDomainId(value: unknown): string {
   if (typeof value !== 'string' || !/^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$/.test(value)) {
@@ -55,7 +56,10 @@ async function activeMembership(tx: Transaction, node: string): Promise<DomainMe
 }
 
 export class DomainService {
-  constructor(private readonly ctx: Context, private readonly transport: Transport) {}
+  constructor(
+    private readonly ctx: Context,
+    private readonly fetcher: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = fetch,
+  ) {}
 
   private authenticate(auth: Auth): void {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
@@ -162,6 +166,12 @@ export class DomainService {
   }
 
   private async query(node: string, signal?: AbortSignal): Promise<unknown> {
+    // A candidate's service description is public: it is read before any key exchange, so
+    // it never goes through the signing transport (RFC 0011 §5, RFC 0017 §4).
+    const target = await this.ctx.options.plugins.resolve(node);
+    if (target.node_id !== node) fail('unavailable', 'The resolver returned a target for another identity.');
+    const base = serviceBase(target.base_url);
+    const url = new URL('./description', base.href.endsWith('/') ? base.href : `${base.href}/`);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const onAbort = () => controller.abort(signal?.reason);
@@ -173,10 +183,25 @@ export class DomainService {
     });
     timer = setTimeout(() => controller.abort(new OnlyneError('unavailable', 'Service description lookup timed out.')), this.ctx.options.wait_ms ?? 30_000);
     try {
-      return await Promise.race([
-        this.transport.request<unknown>(node, 'GET', '/description', undefined, controller.signal),
+      const response = await Promise.race([
+        this.fetcher(url, { method: 'GET', headers: { accept: 'application/json' }, signal: controller.signal }),
         aborted,
       ]);
+      const text = await response.text().catch(() => '');
+      let parsed: unknown;
+      try { parsed = text === '' ? undefined : JSON.parse(text); } catch { parsed = undefined; }
+      if (!response.ok) {
+        const record = parsed !== null && typeof parsed === 'object' && 'error' in parsed ? (parsed as { error: unknown }).error : parsed;
+        if (record !== null && typeof record === 'object' && 'code' in record && 'message' in record) {
+          const failure = record as { code: string; message: string; retryable?: boolean };
+          const rejection = new OnlyneError(failure.code as never, failure.message);
+          if (typeof failure.retryable === 'boolean') rejection.error.retryable = failure.retryable;
+          throw rejection;
+        }
+        fail('unavailable', `The candidate answered HTTP ${response.status} without a service description.`);
+      }
+      if (parsed === undefined) fail('unavailable', 'The candidate returned no service description.');
+      return parsed;
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);

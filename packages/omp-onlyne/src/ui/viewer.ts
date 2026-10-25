@@ -1,4 +1,4 @@
-import type { MsgInput, SendOutcome } from "@onlyne/lib";
+import type { KeyExchange, MsgInput, SendOutcome, TrustPhase } from "@onlyne/lib";
 import {
 	type Component,
 	type DescribeContext,
@@ -51,23 +51,24 @@ function plainAuthor(author: string): string {
 	return tail === undefined || tail === "" ? shortNodeId(author) : tail;
 }
 
-type TrustState = "pending" | "trusted" | "revoked";
-
-const STATE_LABEL: Record<TrustState, string> = {
-	trusted: "已认证",
-	pending: "申请中",
+/** The stage names, in the words the approval flow uses: we wait on `invited`, the peer on `requested`. */
+const PHASE_LABEL: Record<TrustPhase, string> = {
+	exchanged: "已认证",
+	requested: "等对方确认",
+	invited: "待你确认",
 	revoked: "已撤销",
 };
 
-const STATE_TONE: Record<TrustState, string> = {
-	trusted: "success",
-	pending: "info",
+const PHASE_TONE: Record<TrustPhase, string> = {
+	exchanged: "success",
+	requested: "info",
+	invited: "warning",
 	revoked: "error",
 };
 
 interface Peer {
 	record: ViewerDiscovery;
-	trust?: { state: TrustState; fingerprint: string; local_approved: boolean; remote_approved: boolean };
+	trust?: { phase: TrustPhase; fingerprint: string };
 }
 
 /** One declared domain with the peers that claim it; `id` is undefined for peers that declare none. */
@@ -126,6 +127,10 @@ export class OnlyneViewer implements Component {
 	private draft = "";
 	private composer: Editor | undefined;
 	private sending = false;
+	/** The exchange whose fingerprint card is open; confirming is the session's own call. */
+	private exchange?: KeyExchange;
+	/** Only the newest request may open a card: a slower earlier lookup must not repaint it. */
+	private exchangeToken = 0;
 	private notice: { text: string; error: boolean } | undefined;
 	private noticeTimer: Timer | undefined;
 	private unsubscribe: (() => void) | undefined;
@@ -263,7 +268,7 @@ export class OnlyneViewer implements Component {
 	/** Key requests the peer already approved: the ones waiting for this user. */
 	private invites(): Invite[] {
 		return (this.snapshot?.trust ?? [])
-			.filter(entry => entry.state === "pending" && entry.remote_approved && !entry.local_approved)
+			.filter(entry => entry.phase === "invited")
 			.map(entry => ({ node_id: entry.node_id, fingerprint: entry.fingerprint, base_url: entry.base_url }));
 	}
 
@@ -289,7 +294,7 @@ export class OnlyneViewer implements Component {
 				record,
 				...(trust === undefined
 					? {}
-					: { trust: { state: trust.state, fingerprint: trust.fingerprint, local_approved: trust.local_approved, remote_approved: trust.remote_approved } }),
+					: { trust: { phase: trust.phase, fingerprint: trust.fingerprint } }),
 			});
 		}
 		const own = this.snapshot?.region;
@@ -347,25 +352,24 @@ export class OnlyneViewer implements Component {
 
 	/** Peer chrome shared by every list: the trust dot, the short id, its domain and state. */
 	private peerHead(peer: Peer): TspSpan[] {
-		const state = peer.trust?.state;
+		const phase = peer.trust?.phase;
 		return [
-			span("● ", state === undefined ? "muted" : STATE_TONE[state]),
+			span("● ", phase === undefined ? "muted" : PHASE_TONE[phase]),
 			span(shortNodeId(peer.record.node_id), "strong"),
 			span(` · ${regionLabel(peer.record.region)}`, "dim"),
-			span(` · ${state === undefined ? "无认证" : STATE_LABEL[state]}`, state === undefined ? "dim" : STATE_TONE[state]),
+			span(` · ${phase === undefined ? "无认证" : PHASE_LABEL[phase]}`, phase === undefined ? "dim" : PHASE_TONE[phase]),
 		];
 	}
 
 	private memberCard(peer: Peer, withActions: boolean): NativeNode {
 		const id = peer.record.node_id;
-		const state = peer.trust?.state;
+		const phase = peer.trust?.phase;
 		const stale = Date.parse(peer.record.expires_at) <= Date.now();
-		const waiting = peer.trust?.state === "pending" && peer.trust.remote_approved && !peer.trust.local_approved;
 		const acts: NativeChild[] = [];
 		if (withActions) {
-			if (waiting) acts.push(this.button("待你确认", "onlyne.page.contacts", { tone: "accent", title: "到联系人页核对指纹并批准" }));
-			else if (state !== "trusted") acts.push(this.button("请求交换密钥", `onlyne.request:${id}`, { title: "勾选并请求交换密钥" }));
-			if (state === "trusted" || state === "pending") acts.push(this.button("撤销信任", `onlyne.revoke:${id}`, { tone: "error" }));
+			if (phase === "invited") acts.push(this.button("待你确认", "onlyne.page.contacts", { tone: "accent", title: "到联系人页核对指纹并批准" }));
+			else if (phase === undefined || phase === "revoked") acts.push(this.button("请求交换密钥", `onlyne.request:${id}`, { title: "读取对方指纹，核对后发送申请" }));
+			if (phase === "exchanged" || phase === "requested") acts.push(this.button("撤销信任", `onlyne.revoke:${id}`, { tone: "error" }));
 		}
 		return node(
 			"card",
@@ -700,27 +704,26 @@ export class OnlyneViewer implements Component {
 		];
 		const peer = peers.find(entry => entry.record.node_id === this.memberKey);
 		if (peer !== undefined) {
-			const state = peer.trust?.state;
-			const waiting = peer.trust?.state === "pending" && peer.trust.remote_approved && !peer.trust.local_approved;
+			const phase = peer.trust?.phase;
 			children.push(
 				node(
 					"card",
-					{ role: "onlyne.member-detail", head: [span(shortNodeId(peer.record.node_id), "strong"), ...(state === undefined ? [] : [span(` · ${STATE_LABEL[state]}`, STATE_TONE[state])])] },
+					{ role: "onlyne.member-detail", head: [span(shortNodeId(peer.record.node_id), "strong"), ...(phase === undefined ? [] : [span(` · ${PHASE_LABEL[phase]}`, PHASE_TONE[phase])])] },
 					[
 						node("kv", {
 							layout: "grid",
 							items: [
 								{ k: "指纹", v: peer.trust?.fingerprint ?? "未交换" },
 								{ k: "域", v: regionLabel(peer.record.region) },
-								{ k: "状态", v: state === undefined ? "无认证" : STATE_LABEL[state] },
+								{ k: "状态", v: phase === undefined ? "无认证" : PHASE_LABEL[phase] },
 								{ k: "端点", v: peer.record.base_url },
 								{ k: "最后可见", v: ageText(peer.record.last_seen) || "未知" },
 							],
 						}),
 						node("row", { gap: "sm", align: "center", wrap: true }, [
 							this.button("用作发送目标", `onlyne.target:${peer.record.node_id}`, { title: "把消息发给这位节点" }),
-							...(waiting ? [this.button("同意交换", `onlyne.accept:${peer.record.node_id}`, { tone: "accent" })] : []),
-							...(state === "trusted" || state === "pending" ? [this.button("撤销信任", `onlyne.revoke:${peer.record.node_id}`, { tone: "error" })] : []),
+							...(phase === "invited" ? [this.button("同意交换", `onlyne.accept:${peer.record.node_id}`, { tone: "accent" })] : []),
+							...(phase === "exchanged" || phase === "requested" ? [this.button("撤销信任", `onlyne.revoke:${peer.record.node_id}`, { tone: "error" })] : []),
 						], "acts"),
 					],
 					"member-detail",
@@ -782,7 +785,7 @@ export class OnlyneViewer implements Component {
 		const geo = this.geometry();
 		const children: NativeChild[] = [
 			node("row", { gap: "sm", align: "center", justify: "between" }, [
-				textNode([span("按域分组的可达候选。交换密钥从这里发起；同域的节点在发现之后会自动发起一次。", "dim")], { wrap: "word", grow: 1 }),
+				textNode([span("按域分组的可达候选。域只决定归组与发现范围，不授予信任：每个节点对都要在这里显式交换密钥。", "dim")], { wrap: "word", grow: 1 }),
 				this.button("刷新发现", "onlyne.discovery.refresh", { title: "重新观察一轮发现" }),
 			]),
 		];
@@ -819,7 +822,7 @@ export class OnlyneViewer implements Component {
 		const geo = this.geometry();
 		const invites = this.invites();
 		const mine = this.snapshot?.identity?.fingerprint ?? "本节点没有密钥";
-		const trusted = (this.snapshot?.contacts ?? []).filter(contact => this.trustOf(contact.node_id)?.state === "trusted");
+		const trusted = (this.snapshot?.contacts ?? []).filter(contact => this.trustOf(contact.node_id)?.phase === "exchanged");
 		const approvalList = this.shown(invites, Math.max(1, geo.pageRows >> 2));
 		const contactList = this.shown(trusted, Math.max(1, geo.pageRows >> 1));
 		const children: NativeChild[] = [
@@ -916,6 +919,19 @@ export class OnlyneViewer implements Component {
 						),
 					];
 		const children: NativeChild[] = [this.statusRow(), this.tabsNode()];
+		if (this.exchange !== undefined) {
+			children.push(node("card", { role: "onlyne.exchange", head: [span(`与 ${shortNodeId(this.exchange.node_id)} 交换密钥`, "strong")] }, [
+				node("kv", { layout: "grid", items: [
+					{ k: "对方节点", v: this.exchange.node_id },
+					{ k: "对方指纹", v: this.exchange.fingerprint },
+					{ k: "本机指纹", v: this.snapshot?.identity?.fingerprint ?? "本节点没有密钥" },
+				] }),
+				node("row", { gap: "sm" }, [
+					this.button("确认并发送申请", "onlyne.exchange.confirm", { tone: "accent" }),
+					this.button("取消", "onlyne.exchange.cancel"),
+				]),
+			], "exchange"));
+		}
 		if (this.notice !== undefined) {
 			children.push(node("text", { spans: [span(this.notice.text, this.notice.error ? "error" : "info")], wrap: "word" }, undefined, "notice"));
 		}
@@ -966,6 +982,16 @@ export class OnlyneViewer implements Component {
 		}
 		if (act === "onlyne.discovery.refresh") {
 			void this.refreshDiscovery();
+			return;
+		}
+		if (act === "onlyne.exchange.confirm") {
+			void this.confirmExchange();
+			return;
+		}
+		if (act === "onlyne.exchange.cancel") {
+			this.exchangeToken++;
+			this.exchange = undefined;
+			this.changed();
 			return;
 		}
 		if (act.startsWith("onlyne.page.")) {
@@ -1089,13 +1115,31 @@ export class OnlyneViewer implements Component {
 		await this.reload();
 	}
 
-	/** Ask a peer for a key exchange; the domain's automatic pass does this on its own for same-domain nodes. */
 	private async request(nodeId: string): Promise<void> {
 		const runtime = getRuntime();
 		if (runtime === undefined) return;
+		const token = ++this.exchangeToken;
+		this.exchange = undefined;
+		this.changed();
 		try {
-			await runtime.trustInspect(nodeId);
-			this.setNotice(`已向 ${shortNodeId(nodeId)} 请求交换密钥；对方批准后这里会出现确认。`);
+			const session = await runtime.trustBegin(nodeId);
+			if (this.disposed || this.signal.aborted || token !== this.exchangeToken) return;
+			this.exchange = session;
+			this.changed();
+		} catch (error) {
+			if (token !== this.exchangeToken) return;
+			this.setNotice(`请求失败：${errorText(error)}`, true);
+		}
+	}
+
+	private async confirmExchange(): Promise<void> {
+		const session = this.exchange;
+		if (session === undefined) return;
+		this.exchange = undefined;
+		this.changed();
+		try {
+			await session.confirm(session.fingerprint);
+			this.setNotice(`已提交与 ${shortNodeId(session.node_id)} 的密钥交换，双方批准状态见联系人页。`);
 		} catch (error) {
 			this.setNotice(`请求失败：${errorText(error)}`, true);
 		}
@@ -1196,7 +1240,7 @@ export class OnlyneViewer implements Component {
 			for (const group of this.domainGroups()) {
 				lines.push(short(group.label));
 				for (const peer of group.peers) {
-					lines.push(short(`  ${shortNodeId(peer.record.node_id)} · ${peer.trust === undefined ? "无认证" : STATE_LABEL[peer.trust.state]} · ${peer.record.base_url}`));
+					lines.push(short(`  ${shortNodeId(peer.record.node_id)} · ${peer.trust === undefined ? "无认证" : PHASE_LABEL[peer.trust.phase]} · ${peer.record.base_url}`));
 				}
 			}
 			return this.fitRows(lines, geo.body);
@@ -1204,7 +1248,7 @@ export class OnlyneViewer implements Component {
 		const invites = this.invites();
 		lines.push(short(`待确认 · ${invites.length}`));
 		for (const invite of invites) lines.push(short(`  ${shortNodeId(invite.node_id)} · 对方 ${invite.fingerprint} · 本机 ${this.snapshot?.identity?.fingerprint ?? "无密钥"}`));
-		const trusted = (this.snapshot?.contacts ?? []).filter(contact => this.trustOf(contact.node_id)?.state === "trusted");
+		const trusted = (this.snapshot?.contacts ?? []).filter(contact => this.trustOf(contact.node_id)?.phase === "exchanged");
 		lines.push(short(`已认证 · ${trusted.length}`));
 		for (const contact of trusted) lines.push(short(`  ${shortNodeId(contact.node_id)} · ${regionLabel(contact.region)} · ${contact.base_url}`));
 		return this.fitRows(lines, geo.body);

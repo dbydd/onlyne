@@ -1,5 +1,5 @@
 import { networkInterfaces } from "node:os";
-import { OnlyneError, OnlyneNode, type Action, type Auth, type Json, type KeyHook, type KeyMaterial, type MsgInput, type Runtime, type Storage, type Target } from "@onlyne/lib";
+import { OnlyneError, OnlyneNode, type Action, type Auth, type Json, type KeyHook, type KeyMaterial, type MaintenanceClock, type MsgInput, type Runtime, type Storage, type Target } from "@onlyne/lib";
 import type { ContextRegistry } from "./store.ts";
 import type { OnlyneConfig } from "./types.ts";
 import { loadOrCreateKey, writeKeyMaterial } from "./keys.ts";
@@ -12,6 +12,8 @@ export interface NodeDeps {
 	contexts: ContextRegistry;
 	decide(input: MsgInput): Promise<Action>;
 	runtime: Runtime;
+	/** The timer primitives of the library's own maintenance loop (RFC 0017 §6). */
+	clock: MaintenanceClock;
 	/** The directory the host resolved for this node's identity key; absent keeps the loopback development binding. */
 	keyDir?: string;
 }
@@ -53,12 +55,13 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 	const keyDir = deps.keyDir;
 	const keys: KeyHook | undefined = keyDir === undefined ? undefined : Object.assign(
 		() => loadOrCreateKey(keyDir, config.node.id),
-		{ replace: (material: KeyMaterial) => writeKeyMaterial(keyDir, material) },
+		{ replace: (material: KeyMaterial) => writeKeyMaterial(keyDir, material, { replace: true }) },
 	);
 	node = new OnlyneNode({
 		node_id: config.node.id, base_url: deps.endpoint, instance_id: deps.instanceId,
+		now: () => Date.now(), id: () => crypto.randomUUID(),
 		authentication: keys === undefined ? ["none"] : ["signature"], plugins: {
-			storage: deps.storage, authenticate, resolve, decide: deps.decide, runtime: deps.runtime,
+			storage: deps.storage, authenticate, resolve, decide: deps.decide, runtime: deps.runtime, maintenanceClock: deps.clock,
 			...(keys === undefined ? {} : { keys }),
 			...(config.trust === undefined ? {} : { trust_seeds: config.trust }),
 			domainCandidates: id => node.discovery.candidates(id),

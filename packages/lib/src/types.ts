@@ -155,8 +155,13 @@ export interface Runtime {
   /** Submission returns consumed:false; an observed request boundary may confirm it later. */
   inject(entry: Entry, context?: string, plan?: DeliveryPlan): Promise<{ context: string; consumed: boolean; outcome?: InjectOutcome }>;
   todo?(entry: Entry, context: string): Promise<void>;
-  /** The host may drop to an idle cadence; an admission or a settled reply flips it back. */
-  wake?(): void;
+  /**
+   * RFC 0017 §5: the one notification channel. The node calls it for every committed
+   * trust transition, every inbound entry, and after each maintenance pass that changed
+   * the pending-work answer. A host that renders from these events never polls storage
+   * on its own; a host that misses one still converges on the next maintenance pass.
+   */
+  notify(event: NotifyEvent): void;
   /**
    * Optional structured trace. The node calls it on every lifecycle transition; the host maps
    * it onto its own log, so a delivery can be followed from admission to consumption offline.
@@ -202,6 +207,39 @@ export interface TrustStatement {
   timestamp: number;
   signature: string;
   previous_signature?: string;
+  /**
+   * Set on a reply: the nonce of the request this statement answers. A sender settles its
+   * delivery obligation only on a reply that echoes the nonce it sent (RFC 0017 §3.5).
+   */
+  reply_nonce?: string;
+}
+
+/**
+ * The observable stage of one trust relation, derived only from the approval halves
+ * (RFC 0017 §3). A host renders and decides from this value; it never re-derives
+ * the stage from the raw halves.
+ */
+export type TrustPhase = 'invited' | 'requested' | 'exchanged' | 'revoked';
+
+/** RFC 0017 §5: what changed when the node calls `runtime.notify`. */
+export type NotifyEvent =
+  | { event: 'work-pending'; pending: boolean }
+  | { event: 'trust'; cause: 'local-request' | 'local-accept' | 'local-revoke' | 'peer-statement' | 'rotation'; phase: TrustPhase; entry: TrustEntry; previous?: TrustEntry }
+  | { event: 'inbound'; thread: ThreadRef; seq: string; sender: NodeId };
+
+/** RFC 0017 §3: one exchange, as one object. `begin` hands this to the host. */
+export interface KeyExchange {
+  /** The peer the host named; the statement proves this identity, never a guess from discovery. */
+  readonly node_id: NodeId;
+  /** The fingerprint the peer's live key lookup proved at `begin` time. */
+  readonly fingerprint: string;
+  readonly public_key: string;
+  readonly base_url: string;
+  /**
+   * Commits local approval and sends the signed introduction. `fingerprint` must repeat
+   * the value shown to the user: a changed key between display and commit fails here.
+   */
+  confirm(fingerprint: string): Promise<TrustEntry>;
 }
 
 /** One trust-table row: a peer's verified public key and the exchange state. */
@@ -218,6 +256,13 @@ export interface TrustEntry {
   readonly history?: string[];
 }
 
+/** The stage derived from the approval halves; the single source hosts read (RFC 0017 §3). */
+export function trustPhase(entry: Pick<TrustEntry, 'local_approved' | 'remote_approved' | 'state'>): TrustPhase {
+  if (entry.state === 'revoked') return 'revoked';
+  if (entry.local_approved && entry.remote_approved) return 'exchanged';
+  return entry.local_approved ? 'requested' : 'invited';
+}
+
 export interface Plugins {
   storage: Storage;
   authenticate(request: Request): Promise<Auth | null>;
@@ -226,6 +271,8 @@ export interface Plugins {
   resolve(node: NodeId): Promise<Target>;
   decide(input: MsgInput): Promise<Action>;
   runtime?: Runtime;
+  /** Supplied when the host wants the library to own the maintenance loop (RFC 0017 §6). */
+  maintenanceClock?: MaintenanceClock;
   resources?: ResourceDriver;
   transport?: Transport;
   mayAdmit?(actor: NodeId, thread: ThreadRef): Promise<boolean>;
@@ -244,5 +291,25 @@ export interface NodeOptions {
   node_id: NodeId; base_url: string; plugins: Plugins;
   instance_id?: string; authentication?: string[];
   request_bytes?: number; retry_max_ms?: number; wait_ms?: number;
-  now?: () => number; id?: () => string;
+  /**
+   * The trusted tick source, required at construction (RFC 0017 §6). Every protocol
+   * clock read — transcript windows, nonce expiry, retry gates — goes through `now`,
+   * and every nonce through `id`. A host that cannot supply an unguessable `id` must
+   * refuse to run a keyed node instead of falling back to a default.
+   */
+  now: () => number;
+  id: () => string;
+}
+
+/**
+ * RFC 0017 §6: the timer primitives the library's maintenance loop needs. Supplying
+ * them opts into `client.runMaintenance`, the loop the library owns: cadence, wake
+ * handling and the pending-work re-arm all live there, so a host cannot poll at a
+ * rate the protocol does not sanction. `setTimer` is one-shot: it calls `run` once and
+ * the loop re-arms, so a host that repeats the callback breaks the cadence contract.
+ * Every clock read goes through `NodeOptions.now`; the clock carries no second time source.
+ */
+export interface MaintenanceClock {
+  setTimer(ms: number, run: () => void): unknown;
+  clearTimer(handle: unknown): void;
 }

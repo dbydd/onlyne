@@ -17,7 +17,9 @@ function config(id: string): OnlyneConfig {
 		threads: { page_size: 50 },
 	};
 }
-const runtime = { supports: async () => true, inject: async () => ({ context: "main", consumed: false }) };
+const runtime = { supports: async () => true, inject: async () => ({ context: "main", consumed: false }), notify: () => {} };
+// A test never runs the library's loop; the clock is only there because the node requires one.
+const clock = { now: () => Date.now(), setTimer: () => 0, clearTimer: () => {} };
 
 function serve(id: string, decide: () => Promise<Action>): { node: OnlyneNode; endpoint: string } {
 	let handler: (request: Request) => Promise<Response> = async () => new Response("starting", { status: 503 });
@@ -27,7 +29,7 @@ function serve(id: string, decide: () => Promise<Action>): { node: OnlyneNode; e
 	const storage = new MemoryStorage();
 	const node = createOnlyneNode({
 		config: config(id), endpoint, instanceId: crypto.randomUUID(), storage,
-		contexts: new ContextRegistry(storage, id, "Main"), runtime, decide,
+		contexts: new ContextRegistry(storage, id, "Main"), runtime, clock, decide,
 	});
 	handler = request => node.fetch(request);
 	return { node, endpoint };

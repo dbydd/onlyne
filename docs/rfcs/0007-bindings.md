@@ -31,7 +31,7 @@
 
 ## 2. A2A 映射
 
-A2A 1.0 分三层：数据模型、抽象操作和协议绑定。数据模型包含 AgentCard、Message、Task、Part、Artifact 和 Extension。Send Message 可以返回 Task 或直接 Message，异步更新由流式响应和 push 通知提供。引用提交、操作名和已知上游矛盾见 [A2A 规范参考](0009-a2a-reference.md)。
+A2A 1.0 分三层：数据模型、抽象操作和协议绑定。数据模型包含 AgentCard、Message、Task、Part、Artifact 和 Extension。Send Message 可以返回 Task 或直接 Message，异步更新由流式响应和 push 通知提供。引用提交、操作名和已知上游矛盾见 [A2A 上游规范参考](../references/a2a.md)。
 
 | Onlyne | A2A | 必须保留的区别 |
 |---|---|---|
@@ -53,7 +53,7 @@ A2A 身份、发现、AgentCard 和传输绑定由该规范定义。Onlyne 不�
 
 ### ANP 映射
 
-ANP 1.2 使用 DID 身份、JSON-RPC 2.0 外部绑定和按 Profile 分开的消息语义。身份层次、`direct.send` 的接纳边界、幂等键与错误码见 [ANP 规范参考](0010-anp-reference.md)。
+ANP 1.2 使用 DID 身份、JSON-RPC 2.0 外部绑定和按 Profile 分开的消息语义。身份层次、`direct.send` 的接纳边界、幂等键与错误码见 [ANP 上游规范参考](../references/anp.md)。
 
 | Onlyne | ANP | 必须保留的区别 |
 |---|---|---|
@@ -95,32 +95,26 @@ HTTP 绑定没有路由表、跳数预算和中转决策。一次投递的顺序
 
 地址由引导条目或发现记录直接给出，协议不推断路径。ingress 只做委托校验和原样转发，不重新选路。路由决策属于部署配置和 SystemOne，协议层保持可预测。
 
-### 实现选型
-
-| 绑定 | 建议 | 理由 |
-|---|---|---|
-| Onlyne HTTP/JSON | 自己写 | 对象模型是 thread、成员、mentions 和窄回复许可，上游 SDK 的数据模型装不下 |
-| A2A | 用 `@a2a-js/sdk` | 官方 TypeScript SDK，v1.0 稳定；客户端三种传输、AgentCard 拉取、JWS 验签、数据库 store 都现成 |
-| ANP | 自己写外层，借 sidecar 做 DID 和签名 | `@anp/typescript-sdk` 是 0.1.0 本地预览，未发布，不能作为依赖 |
-
-用 A2A SDK 的部分限于传输和卡片：`ClientFactory.createFromUrl` 取卡，`JsonRpcTransportFactory` 或 `RestTransportFactory` 发消息，`verifyAgentCardSignature` 验签，`DatabaseTaskStore` 存对端任务报告。Onlyne 的语义映射自己实现，SDK 的 Task 状态机不进入 Onlyne 的记录。
-
-自写 ANP 外层的成本可控：P1 的限制很死，`params` 必须是对象、禁止 batch、请求 `id` 必须是非空字符串、成功响应只含 `result`。DID 文档解析和 RFC 9421 签名可以先由 Python 或 Rust 的 `anp` 包做本地 sidecar，等 TypeScript SDK 发布再替换。
+各绑定的 SDK 选型、可用符号与 sidecar 方案属于实现选择，见 [库设计](../design/lib/) §8。
 
 ## 5. OMP 运行时绑定
 
-OMP 是首个运行时接入目标。接入把库操作映射到宿主能力。
+OMP 是首个运行时接入目标。接入把库操作映射到宿主能力，并把宿主的忙闲、plan 状态与注入时机翻译成投递执行。
 
-| 库能力 | OMP 需要提供 |
-|---|---|
-| 模型消息入口 | 一个工具或扩展入口调用 `msg` |
-| 消息列表可见 | 消息条目按索引渲染给模型 |
-| 等待 | 阻塞工具期间答复能解除等待 |
-| 入站注入 | 忙时排队、闲时唤醒、plan 模式有明确状态 |
-| 独立执行 | 新上下文具有自己的身份与消息关联 |
-| todo | 来信可写入运行时待办并由运行时提醒；快照与消息关联同一次可恢复提交，恢复不重复建项 |
+接入 MUST 提供下列能力，逐条的可观察结果见 [《OMP 宿主契约》](../contracts/omp.md) §3：
 
-OMP 的模型界面、工具形状、列表渲染、注入时机和 todo 规则见 [OMP 交互界面](0008-omp-surface.md)。该文档记录的宿主 API 结论属于接入证据，尚无 Onlyne v3 的运行证据。
+- 单一模型消息入口调用 `msg`，模型没有第二套发信或 thread 管理工具。
+- 消息条目按索引渲染给模型，模型能按 `(thread, seq)` 读全文。
+- 工具调用能停在库的 Promise 上，合法 reply 解除等待，用户中止只取消本地等待。
+- 入站来信由 SystemOne 判定动作后执行，忙时排到宿主边界，plan 模式有明确队列状态。
+- 新执行上下文具有自己的身份、权限与消息关联。
+- 同一根消息的补充内容进入它已有的执行上下文，上下文可用时不创建第二个。
+- 从本地记录恢复未决消息、上下文映射与消费记录。
+- 来信可写入运行时待办，快照与消息关联同一次可恢复提交，恢复不重复建项；提醒由待办提供者发出。
+
+宿主接口无法表达等待语义时，接入 MUST 在发送前拒绝 `await`，并在 `details` 指出缺失的能力，不先发送再返回 handle。handle 模式 MUST 单独协商，MUST NOT 作为 `await` 的降级实现。
+
+OMP 的模型界面、工具形状、列表渲染、注入时机与 todo 规则由 [OMP 宿主契约](../contracts/omp.md) 规定；模型界面的组成见 [RFC 0008](0008-omp-surface.md)，宿主 API 证据见 [OMP 扩展接口调查](../references/omp-extension-api.md)。
 
 接入限制 MUST NOT 改写库语义。无法兑现的能力显式拒绝。
 

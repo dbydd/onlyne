@@ -1,4 +1,5 @@
 export type * from './types.js';
+export { trustPhase } from './types.js';
 export { OnlyneError } from './core.js';
 export { OnlyneNode } from './node.js';
 export { ThreadService } from './threads.js';
@@ -11,6 +12,6 @@ export { OnlyneClient } from './client.js';
 export type { SendOutcome, SendOptions, MsgOptions } from './client.js';
 export { FetchTransport } from './transport.js';
 export type { SigningTransportOptions } from './transport.js';
-export { KeyService, TrustService, keyFingerprint, generateKeyMaterial, SIGNATURE_HEADER, CLOCK_SKEW_MS } from './keys.js';
+export { KeyService, TrustService, keyFingerprint, generateKeyMaterial, SIGNATURE_HEADER, CLOCK_SKEW_MS, EXCHANGE_RETRY_MS, REFUSED_RETRY_MS } from './keys.js';
 export { createHttpHandler } from './http.js';
 export { MemoryStorage } from './memory.js';

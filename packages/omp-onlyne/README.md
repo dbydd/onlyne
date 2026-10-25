@@ -18,6 +18,7 @@ first run.
 [node]
 region = "urn:onlyne:region:research-chamber"
 id = "urn:onlyne:agent:lazuli"
+key_scope = "project"
 
 [server]
 bind = "127.0.0.1"
@@ -38,6 +39,13 @@ address supplied during bootstrap and an HTTP candidate exchange stored in
 `.onlyne/omp.db`. DNS-SD is an optional same-link accelerator: install
 `bonjour-service` to enable it. The configuration does not contain endpoint,
 port, peers, task-spawn policy or supplement windows.
+
+`node.key_scope` names where the identity key lives. `project` keeps it in
+`<project>/.onlyne/keys`, which a git work tree must ignore; the node refuses to
+create it otherwise and names both escapes. `global` keeps it in
+`~/.config/onlyne/keys`, shared by every project on the machine. `none` runs the
+keyless loopback development binding, which refuses a non-loopback `bind`. A
+configuration without the key keeps reading the global store.
 
 `key_ref` is parsed but not enforced. The current development binding refuses a
 non-empty value and a non-loopback `bind`, because it authenticates with
@@ -69,6 +77,13 @@ path.
 host project's `AGENTS.md`: it states that `msg` is the only entry, that a send's
 `admission` is the delivery fact rather than the wait, and that replies arrive as
 inbound messages so a send needs no polling.
+
+On the discovery page, request a key exchange with a peer. The viewer reads the
+peer's public key and shows both fingerprints before sending. Confirmation sends
+the signed introduction and records local approval. The peer's contacts page shows
+the pending request. Both nodes become trusted after the peer approves. Committed
+trust changes notify the viewer immediately, including introductions received over
+HTTP, so an open viewer does not wait for maintenance to show a request or approval.
 
 ## Run
 

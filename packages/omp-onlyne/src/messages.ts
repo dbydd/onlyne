@@ -1,4 +1,4 @@
-import { OnlyneError, type DeliveryPlan, type Entry, type Runtime, type TraceEvent } from "@onlyne/lib";
+import { OnlyneError, type DeliveryPlan, type Entry, type NotifyEvent, type Runtime, type TraceEvent } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -115,11 +115,13 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 			};
 			await applyMessageTodo(entry, context, planner);
 		},
-		wake: () => {
-			// An admission or a send is new evidence for a queued entry: the next pass
-			// judges it again instead of the tick judging it forever.
-			for (const [key, attempt] of inboundAttempts) if (attempt.decision.action === "queue") inboundAttempts.delete(key);
-			getRuntime()?.wake();
+		notify: (event: NotifyEvent) => {
+			// New durable work is what lets a queued entry be judged again; a trust or inbound
+			// notification carries no such evidence.
+			if (event.event === "work-pending") {
+				for (const [key, attempt] of inboundAttempts) if (attempt.decision.action === "queue") inboundAttempts.delete(key);
+			}
+			getRuntime()?.notify(event);
 		},
 	};
 }

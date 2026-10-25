@@ -170,7 +170,7 @@ data: {"resource_ref":{"owner":"urn:onlyne:data:lab","id":"seaice-archive"},"eve
 | 发现 | `tools/list` | `query` 加数据目录 |
 | 恢复 | 无游标，靠重读 | 有 `event_id` 游标和保留窗口 |
 
-数据源可以同时以 MCP server 形态暴露。此时 MCP 是传输和工具形状，数据级授权仍由 Onlyne 的资源层持有，不依赖 MCP 的能力声明。
+数据源可以同时以 MCP server 形态暴露。此时 MCP 是传输和工具形状，数据级授权仍由 Onlyne 的资源层持有，不依赖 MCP 的能力声明。有状态资源经 MCP 暴露的完整接入方式未决（见 RFC 0015 的未决项），待实际引入资源节点时按需要细化。
 
 ## 8. 验收
 

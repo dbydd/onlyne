@@ -119,17 +119,26 @@ export async function loadOrCreateKey(dir: string, nodeId: string): Promise<KeyM
 	return { private_key: base.private_key, public_key: new Uint8Array(Buffer.from(String(jwk.x), "base64url")) };
 }
 
-/** Writes the key pair atomically; an existing private key is never overwritten. */
-export async function writeKeyMaterial(dir: string, material: KeyMaterial): Promise<void> {
+/**
+ * Writes the key pair atomically. `replace` is the `plugins.keys.replace` path — the only
+ * caller allowed to overwrite an existing private key, because `trust.rotate` has already
+ * committed the rotation window and must complete the swap.
+ */
+export async function writeKeyMaterial(dir: string, material: KeyMaterial, options: { replace?: boolean } = {}): Promise<void> {
 	const privatePath = join(dir, PRIVATE_NAME);
-	if (existsSync(privatePath)) throw new Error(`A node key already exists at ${privatePath}; use trust rotation instead of overwriting it.`);
-	const staging = join(dir, `.${basename(PRIVATE_NAME)}.${process.pid}.tmp`);
-	await writeFile(staging, encodePrivate(material), { mode: 0o600 });
-	await rename(staging, privatePath);
-	await chmod(privatePath, 0o600);
+	if (existsSync(privatePath) && options.replace !== true) throw new Error(`A node key already exists at ${privatePath}; use trust rotation instead of overwriting it.`);
 	const publicPath = join(dir, PUBLIC_NAME);
-	await writeFile(publicPath, Buffer.from(material.public_key).toString("base64"), { mode: 0o644 });
-	await chmod(publicPath, 0o644);
+	const stagingPrivate = join(dir, `.${basename(PRIVATE_NAME)}.${process.pid}.tmp`);
+	const stagingPublic = join(dir, `.${basename(PUBLIC_NAME)}.${process.pid}.tmp`);
+	// Every fallible step runs before the private key is renamed: a replace that throws must
+	// leave the old key usable, or the rotation proof for peers pinning it is gone for good.
+	await writeFile(stagingPrivate, encodePrivate(material), { mode: 0o600 });
+	await chmod(stagingPrivate, 0o600);
+	await writeFile(stagingPublic, Buffer.from(material.public_key).toString("base64"), { mode: 0o644 });
+	await chmod(stagingPublic, 0o644);
+	// The public file is a cache derived from the private key, so it may be replaced first.
+	await rename(stagingPublic, publicPath);
+	await rename(stagingPrivate, privatePath);
 }
 
 /** Synchronous guard for the startup path: the existing key must already be private. */

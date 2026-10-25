@@ -71,7 +71,7 @@ export interface Context {
 export function createContext(options: NodeOptions): Context {
   const ctx: Context = {
     node: options.node_id, baseUrl: options.base_url, instanceId: options.instance_id ?? crypto.randomUUID(), storage: options.plugins.storage, options,
-    now: options.now ?? Date.now, id: options.id ?? (() => crypto.randomUUID()),
+    now: options.now, id: options.id,
     owner(owner) { if (owner !== options.node_id) fail('forbidden', 'This node does not serve the requested owner.'); },
     deadline(until) {
       const time = utc(until);

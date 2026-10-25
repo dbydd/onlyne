@@ -135,12 +135,17 @@ export class OnlyneBootstrap implements Component {
 			this.fail("Region 不能为空。");
 			return;
 		}
+		const scope = keyScope === "" ? "project" : keyScope;
+		if (scope !== "project" && scope !== "global" && scope !== "none") {
+			this.fail("Node key 只能是 project、global 或 none。");
+			return;
+		}
 		const config: OnlyneConfig = {
 			path: configPath(this.ctx.cwd),
 			region: normalizeRegion(region),
 			node: {
 				id: normalizeNodeId(nodeId),
-				...(keyScope === "" || keyScope === "none" ? {} : { key_scope: keyScope === "global" ? "global" as const : "project" as const }),
+				key_scope: scope,
 			},
 			server: { bind },
 			threads: { page_size: Number(this.value("pageSize")) },

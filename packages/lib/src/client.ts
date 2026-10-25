@@ -3,12 +3,13 @@ import { canonical, decimal, fail, key, requireValue, utc } from './core.js';
 import type {
   Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Json, LocalAttention,
   InjectOutcome, Message, MessageQuery, MsgInput, Mutation, Outbound, Page, PageOptions, SendRequest, TraceEvent,
-  Thread, ThreadRef, Transaction, Transport,
+  Thread, ThreadRef, Transaction, Transport, MaintenanceClock,
 } from './types.js';
 import type { MessageService } from './messages.js';
 import type { ResourceService } from './resources.js';
 import type { ThreadService } from './threads.js';
 import type { DomainService } from './domains.js';
+import type { TrustService } from './keys.js';
 
 /** Result of one delivery: `admission` is what the peer recorded, `wait` is what this caller observed. */
 export interface SendOutcome {
@@ -54,6 +55,15 @@ interface Waiter {
 
 /** An outbound record plus the digest that fixes its message identity and the sender's own consumption identity. */
 interface StoredOutbound extends Outbound { digest?: string; local_context?: string }
+
+/** The library-owned maintenance loop's live state (RFC 0017 §6). */
+interface MaintenanceLoop {
+  clock: MaintenanceClock; controller: AbortController;
+  active: { intervalMs: number };
+  handle: unknown;
+  lastPending: boolean;
+  running: boolean;
+}
 
 /** Codes the peer records as a terminal refusal before acceptance (RFC 0003 §5). */
 const TERMINAL: Record<string, true> = {
@@ -156,6 +166,12 @@ export class OnlyneClient {
   readonly #threads: ThreadService;
   readonly #resources: ResourceService;
   readonly #domains: DomainService;
+  readonly #trust?: TrustService;
+  readonly #loop?: MaintenanceLoop;
+  /** The maintenance cadence the loop uses while durable work is pending or the host just woke it. */
+  static readonly ACTIVE_INTERVAL_MS = 2_000;
+  /** The floor the loop drops to once the durable ledger holds no pending work. */
+  static readonly IDLE_INTERVAL_MS = 30_000;
   /** Live waiters, keyed by the original message; an entry lives only while its `send` runs. */
   readonly #waiters = new Map<string, Waiter>();
   /** Replies already returned as tool results, per context, held until consumption confirms them. */
@@ -163,7 +179,7 @@ export class OnlyneClient {
 
   constructor(
     ctx: Context, transport: Transport, messages: MessageService, threads: ThreadService,
-    resources: ResourceService, domains: DomainService,
+    resources: ResourceService, domains: DomainService, trust?: TrustService,
   ) {
     this.#ctx = ctx;
     this.#transport = transport;
@@ -171,6 +187,75 @@ export class OnlyneClient {
     this.#threads = threads;
     this.#resources = resources;
     this.#domains = domains;
+    this.#trust = trust;
+    const clock = ctx.options.plugins.maintenanceClock;
+    if (clock !== undefined) {
+      this.#loop = { clock, controller: new AbortController(), active: { intervalMs: OnlyneClient.ACTIVE_INTERVAL_MS }, handle: undefined, lastPending: true, running: false };
+    }
+  }
+
+  /**
+   * RFC 0017 §6: the library-owned maintenance loop. One pass runs `maintain`,
+   * `recover`, then re-arms: pending durable work keeps the active cadence, an idle
+   * ledger drops to the idle floor. Every clock read goes through the injected
+   * `MaintenanceClock`. A pass is never re-entered; a wake during a pass schedules
+   * the next tick at the active cadence. `notify` carries every pending-work change.
+   */
+  runMaintenance(): void {
+    const loop = this.#loop;
+    if (loop === undefined) fail('unsupported_delivery', 'The host supplied no maintenance clock, so the library cannot own the loop. Pass plugins.maintenanceClock or schedule maintain() yourself.');
+    if (loop.handle !== undefined) return;
+    if (loop.controller.signal.aborted) loop.controller = new AbortController();
+    this.#arm(loop, OnlyneClient.ACTIVE_INTERVAL_MS);
+  }
+
+  stopMaintenance(): void {
+    const loop = this.#loop;
+    if (loop === undefined) return;
+    loop.controller.abort();
+    if (loop.handle === undefined) return;
+    loop.clock.clearTimer(loop.handle);
+    loop.handle = undefined;
+  }
+
+  /** @internal Flips the loop to its active cadence: new evidence arrived while it idled. */
+  wakeLoop(): void {
+    const loop = this.#loop;
+    if (loop === undefined || loop.controller.signal.aborted) return;
+    if (loop.active.intervalMs !== OnlyneClient.ACTIVE_INTERVAL_MS) this.#arm(loop, OnlyneClient.ACTIVE_INTERVAL_MS);
+  }
+
+  #arm(loop: MaintenanceLoop, intervalMs: number): void {
+    if (loop.handle !== undefined) loop.clock.clearTimer(loop.handle);
+    loop.active.intervalMs = intervalMs;
+    loop.handle = loop.clock.setTimer(intervalMs, () => this.#tick(loop));
+  }
+
+  async #tick(loop: MaintenanceLoop): Promise<void> {
+    // The timer that fired is spent. Clear it instead of dropping the handle: a host clock
+    // that keeps a fired timer registered would otherwise leak one handle per pass, and
+    // `stopMaintenance` could only ever clear the newest.
+    if (loop.handle !== undefined) {
+      loop.clock.clearTimer(loop.handle);
+      loop.handle = undefined;
+    }
+    if (loop.running) return this.#arm(loop, OnlyneClient.ACTIVE_INTERVAL_MS);
+    loop.running = true;
+    try {
+      await this.maintain(loop.controller.signal);
+      await this.recover(loop.controller.signal);
+    } catch {
+      // A failed pass keeps its owed records; the next pass retries them.
+    } finally {
+      loop.running = false;
+    }
+    let pending = true;
+    try { pending = await this.hasPendingWork(); } catch { /* unknown keeps the active cadence */ }
+    if (pending !== loop.lastPending) {
+      loop.lastPending = pending;
+      this.#ctx.options.plugins.runtime?.notify?.({ event: 'work-pending', pending });
+    }
+    if (!loop.controller.signal.aborted) this.#arm(loop, pending ? OnlyneClient.ACTIVE_INTERVAL_MS : OnlyneClient.IDLE_INTERVAL_MS);
   }
 
   // ---- delivery ---------------------------------------------------------------
@@ -181,6 +266,7 @@ export class OnlyneClient {
    */
   async send(to: string, message: Message, plan: DeliveryPlan, options: SendOptions = {}): Promise<SendOutcome> {
     const ctx = this.#ctx;
+    this.wakeLoop();
     if (message.sender !== ctx.options.node_id) {
       fail('forbidden', 'This node may only deliver messages this node authors.');
     }
@@ -309,6 +395,7 @@ export class OnlyneClient {
    * HTTP route accepts an `Entry` from a peer, so no peer can supply one.
    */
   async receive(entry: Entry, obligation_id: string, context?: string): Promise<LocalAttention> {
+    this.wakeLoop();
     const attention: Attention = attentionOf(entry, obligation_id, this.#ctx.options.node_id);
     const valid = this.#attest(attention, entry.thread_ref.owner);
     let duplicate = false;
@@ -366,10 +453,11 @@ export class OnlyneClient {
 
   /**
    * Delivers outstanding owner grant notices, replays owed todos and entries whose durable
-   * record never reached the model, then reconciles. Replay follows each thread's own order:
-   * `owner`, `id`, then `seq` as a number. One record that fails never starves the rest, and
-   * the failures are thrown after the pass with their records still owed for the next one.
-   * Caller-scheduled.
+   * record never reached the model, re-drives owed trust statements, then reconciles. Replay
+   * follows each thread's own order: `owner`, `id`, then `seq` as a number. One record that
+   * fails never starves the rest, and the failures are thrown after the pass with their
+   * records still owed for the next one. Caller-scheduled, and the only entry a host without
+   * a maintenance clock needs besides `recover`.
    */
   async maintain(signal?: AbortSignal): Promise<void> {
     await this.#deliverGrants(signal);
@@ -385,6 +473,13 @@ export class OnlyneClient {
     if (signal?.aborted) return;
     try {
       await this.reconcile(signal);
+    } catch (error) {
+      failures.push(error);
+    }
+    // Trust re-drive belongs to the pass, not to the loop: a host that schedules `maintain`
+    // itself must still deliver owed statements (RFC 0017 §3.5).
+    try {
+      await this.#trust?.redrive(signal);
     } catch (error) {
       failures.push(error);
     }
@@ -406,6 +501,13 @@ export class OnlyneClient {
       if (todos.some(row => !row.value.done)) return true;
       const outbound = await tx.scan<StoredOutbound>(key('outbound') + '/');
       if (outbound.some(row => row.value.digest !== undefined && (row.value.state === 'pending' || row.value.state === 'unknown'))) return true;
+      // An approval whose statement the peer has not confirmed is owed work too: the loop
+      // re-drives it once the retry window opens (RFC 0017 §3.5).
+      // A backed-off obligation still counts once its delay has passed; until then the idle
+      // cadence is enough to notice it, so it does not force the active one.
+      const now = this.#ctx.now();
+      const exchanges = await tx.scan<{ blocked?: number }>(key('trust-outbound') + '/');
+      if (exchanges.some(row => row.value.blocked === undefined || row.value.blocked <= now)) return true;
       return false;
     });
   }

@@ -1,4 +1,4 @@
-import type { Entry, LocalAttention, Outbound, Page, Thread, ThreadRef } from "@onlyne/lib";
+import { trustPhase, type Entry, type LocalAttention, type Outbound, type Page, type Thread, type ThreadRef, type TrustPhase } from "@onlyne/lib";
 import { InternalUrlRouter, type InternalResource, type InternalUrl, type ProtocolHandler, type ResolveContext } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getRuntime, type PluginRuntime } from "./runtime.ts";
 import type { ContextRecord } from "./types.ts";
@@ -236,8 +236,8 @@ export interface NeighborRow {
 	region?: string;
 	last_seen?: string;
 	verified: boolean;
-	/** The trust table's state; undefined when no exchange has happened. */
-	trust?: "pending" | "trusted" | "revoked";
+	/** The exchange stage from `trustPhase`; undefined when no exchange has happened. */
+	phase?: TrustPhase;
 	fingerprint?: string;
 }
 
@@ -252,14 +252,15 @@ export async function neighborRows(runtime: PluginRuntime): Promise<NeighborRow[
 		const verified = record.verified_at !== undefined && Date.parse(record.expires_at) > at;
 		const current = byNode.get(record.node_id);
 		if (current !== undefined && (current.verified || !verified)) continue;
+		const entry = trust.get(record.node_id);
 		byNode.set(record.node_id, {
 			node_id: record.node_id,
 			base_url: record.base_url,
 			...(record.membership?.domain_id === undefined ? {} : { region: record.membership.domain_id }),
 			...(record.last_seen === undefined ? {} : { last_seen: record.last_seen }),
 			verified,
-			...(trust.get(record.node_id)?.state === undefined ? {} : { trust: trust.get(record.node_id)!.state }),
-			...(trust.get(record.node_id)?.fingerprint === undefined ? {} : { fingerprint: trust.get(record.node_id)!.fingerprint }),
+			...(entry === undefined ? {} : { phase: trustPhase(entry) }),
+			...(entry?.fingerprint === undefined ? {} : { fingerprint: entry.fingerprint }),
 		});
 	}
 	return [...byNode.values()].sort((left, right) => left.node_id.localeCompare(right.node_id));
@@ -269,11 +270,11 @@ async function renderNeighbors(runtime: PluginRuntime): Promise<string> {
 	const rows = await neighborRows(runtime);
 	const lines = [`# Neighbors · ${runtime.config.node.id}`, ""];
 	for (const row of rows) {
-		const trust = row.trust === undefined ? "no exchange" : row.trust;
+		const handshake = row.phase === undefined ? "no exchange" : row.phase;
 		const region = row.region === undefined ? "no region" : row.region;
 		const seen = row.last_seen === undefined ? "" : ` · last seen ${row.last_seen}`;
 		const fp = row.fingerprint === undefined ? "" : ` · fp ${row.fingerprint}`;
-		lines.push(`- ${row.node_id} · ${region} · ${row.verified ? "verified" : "unverified"} · handshake: ${trust}${seen}${fp}`);
+		lines.push(`- ${row.node_id} · ${region} · ${row.verified ? "verified" : "unverified"} · handshake: ${handshake}${seen}${fp}`);
 	}
 	if (rows.length === 0) lines.push("No neighbor nodes have been observed.");
 	return `${lines.join("\n")}\n`;
