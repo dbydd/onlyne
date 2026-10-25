@@ -116,11 +116,11 @@ export function registerUi(pi: ExtensionAPI): void {
 								() => tui.requestRender(),
 								() => done(),
 								controller.signal,
-								() => tui.terminal.rows,
 							),
 						{
 							overlay: true,
-							overlayOptions: { anchor: "left-center", width: "45%", minWidth: 56, maxHeight: "85%" },
+							// Four columns: the domain rail, threads, the message flow and members.
+							overlayOptions: { anchor: "center", width: "70%", minWidth: 80, maxHeight: "85%" },
 							signal: controller.signal,
 						},
 					);
