@@ -62,7 +62,13 @@ export class FetchTransport implements Transport {
     }
     if (this.signing !== undefined) {
       const peer = await this.signing.trust.entry(target);
-      if (peer?.state === 'trusted') {
+      // No trusted key for this peer: the request cannot be signed, and sending it unsigned
+      // would be refused anyway. Report a retryable outage so the record stays open while the
+      // user completes the exchange, instead of recording a permanent refusal.
+      if (peer?.state !== 'trusted') {
+        throw new OnlyneError('unavailable', `No trusted key for ${target}; complete the key exchange first.`);
+      }
+      {
         const signer = new Request(url.href, { method, headers });
         await this.signing.trust.signRequest(signer, target, serialized);
         for (const [name, value] of signer.headers) headers.set(name, value);

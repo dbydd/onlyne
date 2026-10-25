@@ -62,8 +62,10 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 			...(keys === undefined ? {} : { keys }),
 			...(config.trust === undefined ? {} : { trust_seeds: config.trust }),
 			domainCandidates: id => node.discovery.candidates(id),
-			mayAdmit: actor => known(actor),
-			inboundThread: actor => known(actor),
+			// The keyless development binding checks no identity (RFC 0001 §1): every declared
+			// actor may open a thread. A keyed node admits only peers it has verified.
+			mayAdmit: async actor => keys === undefined || await known(actor),
+			inboundThread: async actor => keys === undefined || await known(actor),
 			executionContexts: async () => (await deps.contexts.list()).map(record => ({ alias: record.alias, summary: record.summary, state: record.state })) as Json,
 			mention: async alias => {
 				const name = alias.replace(/^@/, "");

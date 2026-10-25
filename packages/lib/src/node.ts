@@ -20,6 +20,8 @@ export class OnlyneNode {
   readonly keys: KeyService;
   readonly trust: TrustService;
   readonly client: OnlyneClient;
+  /** The transport this node signs with; a host that talks to peers itself must reuse it. */
+  readonly transport: import('./types.js').Transport;
   readonly fetch: (request: Request) => Promise<Response>;
   readonly auth: Auth;
 
@@ -38,6 +40,7 @@ export class OnlyneNode {
     );
     this.domains = new DomainService(ctx, transport);
     this.discovery = new DiscoveryService(ctx);
+    this.transport = transport;
     this.client = new OnlyneClient(ctx, transport, this.messages, this.threads, this.resources, this.domains);
     this.fetch = createHttpHandler({
       ctx, threads: this.threads, messages: this.messages, resources: this.resources, domains: this.domains, discovery: this.discovery,

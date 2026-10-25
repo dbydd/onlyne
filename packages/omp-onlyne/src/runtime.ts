@@ -90,22 +90,21 @@ class OmpRuntime implements PluginRuntime {
 		const host = advertisedHost(this.config.server.bind);
 		this.endpoint = `http://${host.includes(":") ? `[${host}]` : host}:${this.server.port}/onlyne/v3`;
 		const instanceId = crypto.randomUUID();
-		const transport = new FetchTransport(async id => {
-			const target = await this.node.discovery.resolve(id);
-			return { ...target, headers: { "Onlyne-Actor": this.config.node.id } };
-		});
+		// The decider probes peers for their execution contexts, so it must use the node's own
+		// transport: an unsigned probe is refused by every keyed peer.
+		let transport: OnlyneNode["transport"] | undefined;
 		this.decider = new JudgeDecider({
 			config: this.config, contexts: this.contexts, mainAgentId: this.mainAgentId,
 			log: (message, fields) => this.pi.logger.debug(message, fields),
 			listPeers: async () => (await this.node.discovery.listRecords()).filter(record => record.verified_at !== undefined && Date.parse(record.expires_at) > Date.now()),
 			listReceiverContexts: async id => id === this.config.node.id
 				? [{ alias: "main", summary: "Main OMP session", state: this.main.isIdle() ? "idle" : "running" }, ...await this.contexts.list()]
-				: transport.request(id, "GET", "/contexts", undefined, this.controller.signal),
+				: transport!.request(id, "GET", "/contexts", undefined, this.controller.signal),
 			listThreads: () => allPages(cursor => this.node.threads.list(this.node.auth, { page_size: 100, cursor })),
 			listMessages: (thread, cursor) => this.node.messages.list(this.node.auth, thread, { attention: "thread", page_size: 100, cursor }),
 		});
 		const bridge = createRuntimeBridge({ pi: this.pi, main: this.main, decider: this.decider, contexts: this.contexts, nodeId: this.config.node.id });
-		const keyDir = this.config.node.key_scope === undefined ? undefined : await ensureKeyDir(dirname(this.config.path), this.config.node.id, this.config.node.key_scope);
+		const keyDir = this.config.node.key_scope === undefined ? undefined : await ensureKeyDir(dirname(dirname(this.config.path)), this.config.node.id, this.config.node.key_scope);
 		this.keyDir = keyDir;
 		this.node = createOnlyneNode({ config: this.config, endpoint: this.endpoint, instanceId, storage: this.storage, contexts: this.contexts, runtime: bridge,
 			...(keyDir === undefined ? {} : { keyDir }),
@@ -116,6 +115,7 @@ class OmpRuntime implements PluginRuntime {
 				return this.decider.decide(scope);
 			},
 		});
+		transport = this.node.transport;
 		const memberships = (await this.node.domains.list(this.node.auth)).items;
 		const current = memberships[0];
 		const mutation = () => ({ idempotency_key: crypto.randomUUID(), retry_until: new Date(Date.now() + 60_000).toISOString() });
@@ -239,14 +239,25 @@ class OmpRuntime implements PluginRuntime {
 		const records = await this.node.discovery.listRecords();
 		const inbox = await allPages(cursor => this.node.messages.inbox(this.node.auth, { page_size: 100, cursor }));
 		const at = Date.now();
-		const nodes = new Set(records.map(record => record.node_id));
-		nodes.add(this.config.node.id);
-		const neighbors = new Set(records
+		// Reachable now: a fresh direct observation, never an expired or never-verified clue.
+		const reachable = new Set(records
+			.filter(record => record.verified_at !== undefined && Date.parse(record.expires_at) > at)
+			.map(record => record.node_id));
+		reachable.add(this.config.node.id);
+		// One hop is the set this node can actually address: peers it has verified and, when
+		// keys are in use, trusted. A clue from a relay is not a neighbor.
+		const peers = new Set(records
 			.filter(record => record.node_id !== this.config.node.id && record.verified_at !== undefined && Date.parse(record.expires_at) > at)
 			.map(record => record.node_id));
+		if (this.node.keys.enabled) {
+			const trusted = new Set((await this.node.trust.list(this.node.auth)).filter(entry => entry.state === "trusted").map(entry => entry.node_id));
+			for (const node of [...peers]) if (!trusted.has(node)) peers.delete(node);
+		}
+		// Live attention only: an acknowledged or consumed item is history, not an alert.
+		const alerts = inbox.filter(item => !item.attention.acked && !item.injected).length;
 		return {
-			region: this.config.region, node_id: this.config.node.id, nodes: nodes.size, neighbors: neighbors.size,
-			alerts: inbox.length, unread: inbox.filter(item => !item.injected).length,
+			region: this.config.region, node_id: this.config.node.id, nodes: reachable.size, neighbors: peers.size,
+			alerts, unread: inbox.filter(item => !item.injected).length,
 			...(this.discoveryError === undefined ? {} : { discovery_error: this.discoveryError }),
 		};
 	}
@@ -334,7 +345,8 @@ class OmpRuntime implements PluginRuntime {
 		const trust = this.node.keys.enabled ? await this.node.trust.list(this.node.auth) : [];
 		const identity = this.node.keys.enabled ? await this.node.keys.describe() : undefined;
 		return { region: this.config.region, endpoint: this.endpoint, contexts, queue, threads: views, discovery, contacts,
-			trust: trust.map(row => ({ node_id: row.node_id, fingerprint: row.fingerprint, state: row.state, base_url: row.base_url })),
+			trust: trust.map(row => ({ node_id: row.node_id, fingerprint: row.fingerprint, state: row.state, base_url: row.base_url,
+				local_approved: row.local_approved, remote_approved: row.remote_approved })),
 			...(identity === undefined ? {} : { identity: { public_key: identity.public_key, fingerprint: identity.fingerprint } }),
 			...(this.discoveryError === undefined ? {} : { discovery_error: this.discoveryError }) };
 	}

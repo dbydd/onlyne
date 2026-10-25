@@ -26,7 +26,35 @@ const PAGES: readonly { id: Page; label: string }[] = [
 	{ id: "contacts", label: "联系人" },
 ];
 
-const FOOTER = "1-4 切页 · j/k 移动 · [/] 切域 · t 线程 · space 勾选 · x 撤销信任 · enter 详情 · r 刷新 · Esc 关闭";
+/** Only the keys that do something on the page in view; the rest stay out of the way. */
+function footerFor(page: Page, state: { confirming: boolean; checked: number; folded: boolean }): string {
+	if (state.confirming) return "y 同意交换 · n 取消 · Esc 关闭";
+	switch (page) {
+		case "queue":
+			return "j/k 移动 · 1-4 切页 · r 刷新 · Esc 关闭";
+		case "chat":
+			return state.folded
+				? "j/k 移动 · t 展开线程 · enter 详情 · 1-4 切页 · Esc 关闭"
+				: "j/k 移动 · t 收起线程 · enter 详情 · [/] 切线程 · 1-4 切页 · Esc 关闭";
+		case "discovery":
+			return state.checked > 0
+				? `已选 ${state.checked} · enter 发送申请 · space 取消 · x 撤销 · [/] 切域 · Esc 关闭`
+				: "space 勾选节点 · [/] 切域 · x 撤销 · r 刷新 · 1-4 切页 · Esc 关闭";
+		case "contacts":
+			return "j/k 移动 · space 处理邀请 · x 撤销信任 · 1-4 切页 · Esc 关闭";
+	}
+}
+
+/**
+ * A node's authentication state as a frame: red for a revoked peer, blue while an exchange is
+ * in flight, green once both sides approved, and no frame when nothing is known yet.
+ */
+function trustMark(trust: { state: "pending" | "trusted" | "revoked" } | undefined): { frame: string; label: string; tone: string } {
+	if (trust === undefined) return { frame: "  ", label: "", tone: "muted" };
+	if (trust.state === "trusted") return { frame: "▣ ", label: "已认证", tone: "success" };
+	if (trust.state === "pending") return { frame: "▢ ", label: "申请中", tone: "accent" };
+	return { frame: "▨ ", label: "已撤销", tone: "error" };
+}
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -692,16 +720,17 @@ export class OnlyneViewer implements Component {
 	private discoveryNodeRow(record: ViewerDiscovery, selected: boolean, index: number): BodyRow {
 		const checked = this.checked.has(record.node_id);
 		const trust = this.trustFor(record.node_id);
-		const glyph = trust === undefined ? "" : trust.state === "trusted" ? "✓" : trust.state === "pending" ? "◌" : "✕";
+		const mark = trustMark(trust);
 		const cells: Cell[] = [
-			[checked ? "[x] " : "[ ] ", checked ? "success" : "muted"],
+			[mark.frame, mark.tone],
+			[checked ? " ✓" : "  ", checked ? "success" : "muted"],
 			[shortNodeId(record.node_id), "strong"],
 			[` · ${record.base_url}`, "path"],
 			[` · ${record.source}`, "muted"],
 		];
-		if (glyph !== "") cells.push([` · ${glyph}`, trust?.state === "trusted" ? "success" : trust?.state === "pending" ? "accent" : "error"]);
+		if (mark.label !== "") cells.push([` · ${mark.label}`, mark.tone]);
 		if (record.error !== undefined) cells.push([` · ⚠ ${oneLine(record.error)}`, "error"]);
-		const description = [record.base_url, record.source, glyph, record.error === undefined ? "" : `⚠ ${oneLine(record.error)}`]
+		const description = [record.base_url, record.source, mark.label, record.error === undefined ? "" : `⚠ ${oneLine(record.error)}`]
 			.filter(part => part !== "")
 			.join(" · ");
 		return {
@@ -710,24 +739,56 @@ export class OnlyneViewer implements Component {
 			act: `onlyne.node:${index}`,
 			key: `${record.node_id}/${record.base_url}`,
 			card: {
-				head: `${checked ? "[x]" : "[ ]"} ${shortNodeId(record.node_id)}`,
+				head: `${mark.frame} ${checked ? "✓ " : ""}${shortNodeId(record.node_id)}`,
 				description,
-				tone: record.error === undefined ? undefined : "warning",
+				tone: mark.tone === "error" ? "error" : record.error === undefined ? undefined : "warning",
 			},
 		};
 	}
 
-	private discoveryRows(): BodyRow[] {
+	/** Exchanges the peer already approved and this node has not: the review queue. */
+	private inboundInvites(): Array<{ node_id: string; fingerprint: string; base_url: string }> {
+		return (this.snapshot?.trust ?? [])
+			.filter(entry => entry.state === "pending" && entry.remote_approved && !entry.local_approved)
+			.map(entry => ({ node_id: entry.node_id, fingerprint: entry.fingerprint, base_url: entry.base_url }));
+	}
+
+	private inviteRows(): BodyRow[] {
+		const invites = this.inboundInvites();
+		if (invites.length === 0) return [];
 		const rows: BodyRow[] = [
 			{
-				left: [
-					["刷新发现", "strong"],
-					[" · 重新验证可达节点", "muted"],
-				],
-				act: "onlyne.discovery.refresh",
-				key: "refresh",
+				left: [[`入站申请 ${invites.length}`, "warning"], [" · 对方已批准，等你确认（space 处理）", "muted"]],
+				key: "invites-head",
 			},
 		];
+		for (const invite of invites.slice(0, 3)) {
+			rows.push({
+				left: [
+					["▢ ", "accent"],
+					[shortNodeId(invite.node_id), "strong"],
+					[` · 指纹 ${invite.fingerprint}`, "muted"],
+				],
+				act: `onlyne.invite:${invite.node_id}`,
+				key: `invite-${invite.node_id}`,
+			});
+		}
+		if (invites.length > 3) rows.push({ left: [[`… 还有 ${invites.length - 3} 条，见联系人页`, "muted"]], key: "invites-more" });
+		return rows;
+	}
+
+	private discoveryRows(): BodyRow[] {
+		const rows: BodyRow[] = [];
+		const invites = this.inviteRows();
+		if (invites.length > 0) rows.push(...invites, { left: [], key: "invites-gap" });
+		rows.push({
+			left: [
+				["刷新发现", "strong"],
+				[" · 重新验证可达节点", "muted"],
+			],
+			act: "onlyne.discovery.refresh",
+			key: "refresh",
+		});
 		const groups = this.discoveryDomains();
 		if (groups.length === 0) {
 			rows.push({ left: [["没有发现记录。", "muted"]] });
@@ -779,19 +840,19 @@ export class OnlyneViewer implements Component {
 			const trust = this.trustFor(source.node_id);
 			const checked = this.checked.has(source.node_id);
 			const age = source.last_seen === undefined ? "" : ageText(source.last_seen);
-			const glyph = trust === undefined ? "" : trust.state === "trusted" ? "✓" : trust.state === "pending" ? "◌" : "✕";
-			const cells: Cell[] = [[index === this.contactIndex ? "> " : "  ", "muted"]];
+			const mark = trustMark(trust);
+			const cells: Cell[] = [[index === this.contactIndex ? "> " : "  ", "muted"], [mark.frame, mark.tone]];
 			if (trust?.state === "pending") cells.push([checked ? "[x] " : "[ ] ", checked ? "success" : "muted"]);
 			cells.push([shortNodeId(source.node_id), "strong"]);
 			if (source.region !== undefined) cells.push([` · ${this.domainLabel(source.region)}`, "muted"]);
 			if (source.base_url !== undefined) cells.push([` · ${source.base_url}`, "path"]);
 			if (age !== "") cells.push([` · ${age}`, "muted"]);
-			if (glyph !== "") cells.push([` · ${glyph}`, trust?.state === "trusted" ? "success" : trust?.state === "pending" ? "accent" : "error"]);
+			if (mark.label !== "") cells.push([` · ${mark.label}`, mark.tone]);
 			const description = [
 				source.region === undefined ? "" : this.domainLabel(source.region),
 				source.base_url ?? "",
 				age,
-				trust?.state === "pending" ? "◌ 待确认" : glyph,
+				mark.label,
 			].filter(part => part !== "").join(" · ");
 			return {
 				left: cells,
@@ -816,6 +877,11 @@ export class OnlyneViewer implements Component {
 		while (rows.length < height) rows.push({ left: [] });
 		rows.length = height;
 		return rows;
+	}
+
+	/** The hint line for the page and state in view. */
+	private footerText(): string {
+		return footerFor(this.page, { confirming: this.pendingConfirm !== undefined, checked: this.checked.size, folded: this.threadFolded });
 	}
 
 	private styleCells(cells: readonly Cell[], selected: boolean): string {
@@ -955,7 +1021,7 @@ export class OnlyneViewer implements Component {
 			"row",
 			{ gap: "sm", align: "center" },
 			[
-				textNode([span(FOOTER, "muted")], { grow: 1, truncate: "end" }),
+				textNode([span(this.footerText(), "muted")], { grow: 1, truncate: "end" }),
 				node("row", { role: "omp.btn", actions: { click: "onlyne.close" }, title: "关闭" }, [textNode("关闭")], "close"),
 			],
 			"footer",
@@ -1044,6 +1110,16 @@ export class OnlyneViewer implements Component {
 			this.changed();
 			return;
 		}
+		if (act.startsWith("onlyne.invite:")) {
+			const node = act.slice("onlyne.invite:".length);
+			const invite = this.inboundInvites().find(entry => entry.node_id === node);
+			if (invite !== undefined) {
+				this.pendingConfirm = { node_id: invite.node_id, fingerprint: invite.fingerprint };
+				this.notice = { text: this.confirmText(this.pendingConfirm), error: false };
+				this.changed();
+			}
+			return;
+		}
 		if (act.startsWith("onlyne.node:")) {
 			const index = Number(act.slice("onlyne.node:".length));
 			if (!Number.isInteger(index) || index < 0) return;
@@ -1119,6 +1195,7 @@ export class OnlyneViewer implements Component {
 			return;
 		}
 		if (this.page === "chat") this.handleChatKey(data);
+		else if (this.page === "discovery") this.handleDiscoveryKey(data);
 		else this.handleListKey(this.page, data);
 	}
 
@@ -1257,6 +1334,30 @@ export class OnlyneViewer implements Component {
 		this.handleListKey("chat", data);
 	}
 
+	private handleDiscoveryKey(data: string): void {
+		if (data === "[" || data === "]") {
+			this.cycleDomain(data === "[" ? -1 : 1);
+			return;
+		}
+		if (data === "r") {
+			void this.refreshDiscovery();
+			return;
+		}
+		if (matchesKey(data, "enter")) {
+			this.requestSelectedNode();
+			return;
+		}
+		if (matchesKey(data, "space")) {
+			this.toggleChecked();
+			return;
+		}
+		if (data === "x") {
+			void this.revokeSelected();
+			return;
+		}
+		this.handleListKey("discovery", data);
+	}
+
 	private cycleDomain(delta: number): void {
 		const count = this.discoveryDomains().length;
 		if (count === 0) return;
@@ -1264,6 +1365,22 @@ export class OnlyneViewer implements Component {
 		this.nodeIndex = 0;
 		this.offsets.delete("discovery-nodes");
 		this.changed();
+	}
+
+	/**
+	 * Enter on a discovery node: request the exchange for the row under the cursor. Space only
+	 * marks a row for a batch, so a single request never needs two keystrokes.
+	 */
+	private requestSelectedNode(): void {
+		const record = this.discoveryDomains()[this.domainIndex]?.nodes[this.nodeIndex];
+		if (record === undefined) return;
+		if (this.trustFor(record.node_id)?.state === "trusted") {
+			this.notice = { text: `${shortNodeId(record.node_id)} 已认证`, error: false };
+			this.changed();
+			this.clearNoticeLater();
+			return;
+		}
+		void this.beginExchange(record);
 	}
 
 	private toggleChecked(): void {
@@ -1430,7 +1547,7 @@ export class OnlyneViewer implements Component {
 		const header = this.notice === undefined ? this.summaryText() : this.notice.text;
 		const lines: string[] = [fit(header, width), fit(this.tabLine(width), width)];
 		for (const row of this.bodyRows(width)) lines.push(this.renderRow(row, width));
-		lines.push(fit(FOOTER, width));
+		lines.push(fit(this.footerText(), width));
 		this.rendered = { key, lines };
 		return this.rendered.lines;
 	}

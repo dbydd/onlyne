@@ -57,7 +57,7 @@ interface StoredOutbound extends Outbound { digest?: string; local_context?: str
 
 /** Codes the peer records as a terminal refusal before acceptance (RFC 0003 §5). */
 const TERMINAL: Record<string, true> = {
-  invalid_request: true, unauthenticated: true, forbidden: true, not_a_member: true, not_found: true,
+  invalid_request: true, forbidden: true, not_a_member: true, not_found: true,
   id_conflict: true, revision_conflict: true, conflict: true, thread_closed: true,
   retry_window_expired: true, payload_too_large: true, unsupported_media_type: true,
   unsupported_delivery: true, ambiguous_target: true, ambiguous_resource: true,
@@ -489,8 +489,13 @@ export class OnlyneClient {
       response: action.response, execution: action.execution,
       ...(action.context === undefined ? {} : { context: action.context }),
     };
-    // A decision naming a thread this node hosts is an append here, not a delivery.
+    // A thread this node hosts is appended locally only when the decision targets this node.
+    // A send for another peer that happens to name a local thread is a contradiction: refusing
+    // it is what keeps a delivery from being reported as accepted while nothing left the node.
     if (action.thread !== undefined && action.thread.owner === this.#ctx.options.node_id) {
+      if (action.to !== this.#ctx.options.node_id) {
+        fail('invalid_request', `The decision names local thread ${action.thread.id} but targets ${action.to}; a delivery cannot be a local append.`);
+      }
       return this.#admitHere(message, plan);
     }
     const target = await this.#ctx.options.plugins.resolve(action.to);

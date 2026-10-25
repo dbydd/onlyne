@@ -672,6 +672,8 @@ export class JudgeDecider {
 				criteria: targetCriteria,
 			},
 		};
+		// The thread question is only meaningful for read and thread actions. Asking it on a send
+		// let the answer silently redirect a remote delivery into a local append (issue 1).
 		if (threads.length > 0) {
 			const threadCriteria: Record<string, string> = {};
 			for (const thread of threads) {
@@ -681,7 +683,7 @@ export class JudgeDecider {
 			threadCriteria.none = "No local thread.";
 			questions.thread = {
 				type: "choice",
-				instructions: "Choose the local thread a read or thread action names, or none.",
+				instructions: "Only for a read or thread action: the local thread it names. Choose none for a send.",
 				criteria: threadCriteria,
 			};
 		}

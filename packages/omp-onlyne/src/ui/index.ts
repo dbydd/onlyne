@@ -9,7 +9,14 @@ import { OnlyneViewer } from "./viewer.ts";
 
 export { attachStatus, OnlyneStatus } from "./status.ts";
 
-const USAGE = "用法：/onlyne 打开查看界面，/onlyne init 初始化项目配置，/onlyne settings 编辑项目配置。";
+const USAGE = "用法：/onlyne 查看界面 · /onlyne init 首次创建配置 · /onlyne config 修改配置（含节点密钥）· /onlyne settings 快速改身份与地址。";
+
+/** The subcommands the slash command accepts, with the one-line hint the editor shows. */
+const SUBCOMMANDS: ReadonlyArray<{ label: string; description: string }> = [
+	{ label: "init", description: "首次创建项目配置（含节点密钥）；已配置时改用 config" },
+	{ label: "config", description: "修改项目配置：region、节点身份、密钥位置、种子地址" },
+	{ label: "settings", description: "快速改 region、node id、bind、密钥位置、分页" },
+];
 
 export function registerUi(pi: ExtensionAPI): void {
 	let active: AbortController | undefined;
@@ -24,9 +31,14 @@ export function registerUi(pi: ExtensionAPI): void {
 
 	pi.registerCommand("onlyne", {
 		description: "Show the Onlyne queue and threads, or edit the project config",
+		getArgumentCompletions(argumentPrefix: string) {
+			const prefix = argumentPrefix.trim().toLowerCase();
+			const matches = SUBCOMMANDS.filter(item => item.label.startsWith(prefix));
+			return matches.length === 0 ? null : matches.map(item => ({ label: item.label, value: item.label, description: item.description }));
+		},
 		handler: async (args, ctx) => {
 			const command = args.trim();
-			if (command !== "" && command !== "init" && command !== "settings") {
+			if (command !== "" && command !== "init" && command !== "config" && command !== "settings") {
 				ctx.ui.notify(USAGE, "warning");
 				return;
 			}
@@ -44,17 +56,24 @@ export function registerUi(pi: ExtensionAPI): void {
 			active = controller;
 			try {
 				let runtime = getRuntime();
+				if (command === "init") {
+					const existing = runtime?.config ?? (await loadConfig(ctx.cwd).catch(() => undefined));
+					if (existing !== undefined) {
+						ctx.ui.notify("这个项目已经配置过，修改请用 /onlyne config。", "info");
+						return;
+					}
+				}
 				// A saved config with the runtime down is not a first run: start the node and show
 				// the viewer. Opening the init form here is what made `/onlyne` look like it had
 				// cleared the project.
-				if (runtime === undefined && command !== "init") {
+				if (runtime === undefined && command !== "init" && command !== "config") {
 					try {
 						runtime = await startRuntime(pi, ctx);
 					} catch (error) {
 						if (!(error instanceof ConfigError && error.code === "missing")) throw error;
 					}
 				}
-				const needsBootstrap = command === "init" || runtime === undefined;
+				const needsBootstrap = command === "init" || command === "config" || runtime === undefined;
 				if (needsBootstrap) {
 					const tern = detectTernSession();
 					const current = runtime?.config ?? (await loadConfig(ctx.cwd).catch(() => undefined));

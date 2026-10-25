@@ -109,7 +109,16 @@ export interface ViewerSnapshot {
 	discovery: ViewerDiscovery[];
 	contacts: ViewerContact[];
 	discovery_error?: string;
-	trust?: Array<{ node_id: NodeId; fingerprint: string; state: "pending" | "trusted" | "revoked"; base_url: string }>;
+	trust?: Array<{
+		node_id: NodeId;
+		fingerprint: string;
+		state: "pending" | "trusted" | "revoked";
+		base_url: string;
+		/** This side approved; the other half of a pending exchange. */
+		local_approved: boolean;
+		/** The peer approved, which is what makes an invitation inbound. */
+		remote_approved: boolean;
+	}>;
 	identity?: { public_key: string; fingerprint: string };
 }
 
