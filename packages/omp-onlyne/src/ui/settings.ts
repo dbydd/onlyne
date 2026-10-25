@@ -18,14 +18,14 @@ import { configPath, loadConfig, normalizeNodeId, normalizeRegion, saveConfig, s
 import { getRuntime } from "../runtime.ts";
 import type { OnlyneConfig } from "../types.ts";
 
-const FIELDS = ["region", "nodeId", "bind", "keyRef", "pageSize"] as const;
+const FIELDS = ["region", "nodeId", "bind", "keyScope", "pageSize"] as const;
 type FieldName = (typeof FIELDS)[number];
 
 const LABELS: Record<FieldName, string> = {
 	region: "Region",
 	nodeId: "Node id",
 	bind: "Server bind",
-	keyRef: "Key ref",
+	keyScope: "Node key (project/global/none)",
 	pageSize: "Page size",
 };
 
@@ -33,7 +33,7 @@ const HINTS: Record<FieldName, string> = {
 	region: "短名保存为 urn:onlyne:region:<短名>",
 	nodeId: "短名保存为 urn:onlyne:agent:<短名>",
 	bind: "127.0.0.1",
-	keyRef: "env:NAME 或 file:/path；可留空",
+	keyScope: "project：密钥存 .onlyne/keys（git 内需 ignore）；global：存 ~/.config/onlyne/keys；none：回环开发绑定",
 	pageSize: "1..100",
 };
 
@@ -125,7 +125,7 @@ export class OnlyneSettings implements Component {
 			region: this.makeField(LABELS.region, config.region, HINTS.region),
 			nodeId: this.makeField(LABELS.nodeId, shortNodeId(config.node.id), HINTS.nodeId),
 			bind: this.makeField(LABELS.bind, config.server.bind, HINTS.bind),
-			keyRef: this.makeField(LABELS.keyRef, config.node.key_ref ?? "", HINTS.keyRef),
+			keyScope: this.makeField(LABELS.keyScope, config.node.key_scope ?? "project", HINTS.keyScope),
 			pageSize: this.makeField(LABELS.pageSize, String(config.threads.page_size), HINTS.pageSize),
 		};
 		this.active = "region";
@@ -156,7 +156,7 @@ export class OnlyneSettings implements Component {
 		const base = this.config;
 		if (fields === undefined || base === undefined) return;
 		const region = this.value("region");
-		const keyRef = this.value("keyRef");
+		const keyScope = this.value("keyScope").trim().toLowerCase();
 		if (region.length === 0) {
 			this.error = "Region 不能为空。";
 			this.changed();
@@ -166,7 +166,10 @@ export class OnlyneSettings implements Component {
 			...base,
 			path: base.path.length > 0 ? base.path : configPath(this.cwd),
 			region: normalizeRegion(region),
-			node: { id: normalizeNodeId(this.value("nodeId")), ...(keyRef.length === 0 ? {} : { key_ref: keyRef }) },
+			node: {
+				id: normalizeNodeId(this.value("nodeId")),
+				...(keyScope === "" || keyScope === "none" ? {} : { key_scope: keyScope === "global" ? "global" as const : "project" as const }),
+			},
 			server: { bind: this.value("bind") },
 			threads: { page_size: Number(this.value("pageSize")) },
 		};

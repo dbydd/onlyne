@@ -3,11 +3,13 @@ import { FetchTransport, OnlyneError, type DiscoveryCandidate, type DiscoveryRec
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { currentDecision, JudgeDecider } from "./decider.ts";
 import { ConfigError, loadConfig, saveConfig, shortNodeId } from "./config.ts";
+import { ensureKeyDir } from "./keys.ts";
 import { createRuntimeBridge } from "./messages.ts";
 import { advertisedHost, createOnlyneNode } from "./node.ts";
 import { NetworkDiscovery } from "./network.ts";
 import { ContextRegistry, SqliteStorage } from "./store.ts";
 import type { OnlyneConfig, OnlyneStatus, QueueItem, ViewerContact, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "./types.ts";
+import type { TrustEntry } from "@onlyne/lib";
 
 export interface PluginRuntime {
 	readonly config: OnlyneConfig;
@@ -25,6 +27,10 @@ export interface PluginRuntime {
 	/** Flip the maintenance loop back to its active cadence after an inbound or a send. */
 	wake(): void;
 	contact(endpoint: string): Promise<void>;
+	trustInspect(node: string): Promise<{ node_id: string; public_key: string; fingerprint: string }>;
+	trustAccept(node: string, fingerprint: string): Promise<void>;
+	trustRevoke(node: string): Promise<void>;
+	trustRotate(): Promise<{ fingerprint: string }>;
 	refreshDiscovery(): Promise<void>;
 	updateConfig(next: OnlyneConfig): Promise<void>;
 	close(): Promise<void>;
@@ -61,6 +67,7 @@ class OmpRuntime implements PluginRuntime {
 	decider!: JudgeDecider;
 	endpoint = "";
 	private server?: ReturnType<typeof Bun.serve>;
+	private keyDir?: string;
 	private network?: NetworkDiscovery;
 	private timer?: ReturnType<ExtensionContext["setInterval"]>;
 	private timerMs = ACTIVE_MAINTAIN_MS;
@@ -98,7 +105,10 @@ class OmpRuntime implements PluginRuntime {
 			listMessages: (thread, cursor) => this.node.messages.list(this.node.auth, thread, { attention: "thread", page_size: 100, cursor }),
 		});
 		const bridge = createRuntimeBridge({ pi: this.pi, main: this.main, decider: this.decider, contexts: this.contexts, nodeId: this.config.node.id });
+		const keyDir = this.config.node.key_scope === undefined ? undefined : await ensureKeyDir(dirname(this.config.path), this.config.node.id, this.config.node.key_scope);
+		this.keyDir = keyDir;
 		this.node = createOnlyneNode({ config: this.config, endpoint: this.endpoint, instanceId, storage: this.storage, contexts: this.contexts, runtime: bridge,
+			...(keyDir === undefined ? {} : { keyDir }),
 			decide: input => {
 				const scope = currentDecision();
 				if (!scope) throw new OnlyneError("decision_unavailable", "No OMP session is bound to this decision.");
@@ -203,6 +213,24 @@ class OmpRuntime implements PluginRuntime {
 		} while (cursor);
 		this.changed();
 	}
+	/** Reads and verifies a peer's published key; the UI shows this fingerprint before approval. */
+	async trustInspect(node: string) {
+		const identity = await this.node.trust.inspect(node);
+		return { node_id: identity.node_id, public_key: identity.public_key, fingerprint: identity.fingerprint };
+	}
+	async trustAccept(node: string, fingerprint: string): Promise<void> {
+		await this.node.trust.accept(this.node.auth, node, fingerprint);
+		this.changed();
+	}
+	async trustRevoke(node: string): Promise<void> {
+		await this.node.trust.revoke(this.node.auth, node);
+		this.changed();
+	}
+	async trustRotate(): Promise<{ fingerprint: string }> {
+		const identity = await this.node.trust.rotate(this.node.auth);
+		this.changed();
+		return { fingerprint: identity.fingerprint };
+	}
 	async refreshDiscovery(): Promise<void> {
 		await this.node.discovery.refresh(this.controller.signal);
 		this.changed();
@@ -303,7 +331,11 @@ class OmpRuntime implements PluginRuntime {
 			...(record.membership?.domain_id === undefined ? {} : { region: record.membership.domain_id }),
 			last_seen: record.last_seen,
 		}));
+		const trust = this.node.keys.enabled ? await this.node.trust.list(this.node.auth) : [];
+		const identity = this.node.keys.enabled ? await this.node.keys.describe() : undefined;
 		return { region: this.config.region, endpoint: this.endpoint, contexts, queue, threads: views, discovery, contacts,
+			trust: trust.map(row => ({ node_id: row.node_id, fingerprint: row.fingerprint, state: row.state, base_url: row.base_url })),
+			...(identity === undefined ? {} : { identity: { public_key: identity.public_key, fingerprint: identity.fingerprint } }),
 			...(this.discoveryError === undefined ? {} : { discovery_error: this.discoveryError }) };
 	}
 	async updateConfig(next: OnlyneConfig): Promise<void> { await saveConfig(next); await restartRuntime(next, this.pi, this.main); }

@@ -69,7 +69,7 @@ export function registerUi(pi: ExtensionAPI): void {
 						regionSource,
 						nodeId: current?.node.id ?? "",
 						bind: current?.server.bind ?? "127.0.0.1",
-						keyRef: current?.node.key_ref ?? "",
+						keyScope: current?.node.key_scope ?? "project",
 						pageSize: current?.threads.page_size ?? 50,
 						...(current === undefined ? {} : { current }),
 					};

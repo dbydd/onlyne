@@ -1,7 +1,8 @@
 import { networkInterfaces } from "node:os";
-import { OnlyneError, OnlyneNode, type Action, type Auth, type Json, type MsgInput, type Runtime, type Storage, type Target } from "@onlyne/lib";
+import { OnlyneError, OnlyneNode, type Action, type Auth, type Json, type KeyHook, type KeyMaterial, type MsgInput, type Runtime, type Storage, type Target } from "@onlyne/lib";
 import type { ContextRegistry } from "./store.ts";
 import type { OnlyneConfig } from "./types.ts";
+import { loadOrCreateKey, writeKeyMaterial } from "./keys.ts";
 
 export interface NodeDeps {
 	config: OnlyneConfig;
@@ -11,6 +12,8 @@ export interface NodeDeps {
 	contexts: ContextRegistry;
 	decide(input: MsgInput): Promise<Action>;
 	runtime: Runtime;
+	/** The directory the host resolved for this node's identity key; absent keeps the loopback development binding. */
+	keyDir?: string;
 }
 
 export function advertisedHost(bind: string): string {
@@ -25,9 +28,10 @@ export function advertisedHost(bind: string): string {
 
 export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 	const { config } = deps;
-	if (config.node.key_ref) throw new OnlyneError("unsupported_delivery", "Credential exchange is not implemented. Leave key_ref empty for the loopback development binding.");
-	if (!["127.0.0.1", "::1", "localhost"].includes(config.server.bind)) {
-		throw new OnlyneError("unsupported_delivery", "The unauthenticated development binding requires a loopback bind host. Remote authentication needs the security binding.");
+	if (config.node.key_ref) throw new OnlyneError("unsupported_delivery", "External credential references are not implemented; use the managed node key.");
+	// Without a key directory the node keeps the loopback development binding (RFC 0001 §1).
+	if (deps.keyDir === undefined && !["127.0.0.1", "::1", "localhost"].includes(config.server.bind)) {
+		throw new OnlyneError("unsupported_delivery", "The unauthenticated development binding requires a loopback bind host. Create a node key to serve a remote address.");
 	}
 	let node: OnlyneNode;
 	const authenticate = async (request: Request): Promise<Auth | null> => {
@@ -46,10 +50,17 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 		if (id === config.node.id) return true;
 		return node.discovery.known(id);
 	};
+	const keyDir = deps.keyDir;
+	const keys: KeyHook | undefined = keyDir === undefined ? undefined : Object.assign(
+		() => loadOrCreateKey(keyDir, config.node.id),
+		{ replace: (material: KeyMaterial) => writeKeyMaterial(keyDir, material) },
+	);
 	node = new OnlyneNode({
 		node_id: config.node.id, base_url: deps.endpoint, instance_id: deps.instanceId,
-		authentication: ["none"], plugins: {
+		authentication: keys === undefined ? ["none"] : ["signature"], plugins: {
 			storage: deps.storage, authenticate, resolve, decide: deps.decide, runtime: deps.runtime,
+			...(keys === undefined ? {} : { keys }),
+			...(config.trust === undefined ? {} : { trust_seeds: config.trust }),
 			domainCandidates: id => node.discovery.candidates(id),
 			mayAdmit: actor => known(actor),
 			inboundThread: actor => known(actor),

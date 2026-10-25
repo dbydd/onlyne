@@ -97,18 +97,25 @@ export function parseConfig(text: string, path: string): OnlyneConfig {
 	const node = table(raw, "node", path);
 	const server = table(raw, "server", path);
 	const threads = table(raw, "threads", path);
+	const discovery = raw.discovery === undefined ? undefined : table(raw, "discovery", path);
 	rejectRetired(raw, node, server, threads);
 	const id = optionalString(node, "id", "node.id");
 	const region = optionalString(node, "region", "node.region");
 	const keyRef = optionalString(node, "key_ref", "node.key_ref");
+	const keyScope = optionalString(node, "key_scope", "node.key_scope");
+	const publicUrl = optionalString(server, "public_url", "server.public_url");
+	const seeds = discovery === undefined ? undefined : stringArray(discovery, "seeds", "discovery.seeds");
+	const trust = trustSeeds(raw, path);
 	const bind = optionalString(server, "bind", "server.bind");
 	const pageSize = optionalInteger(threads, "page_size", "threads.page_size");
 	return validateConfig({
 		path,
 		region: region ?? "",
-		node: { id: id ?? "", ...(keyRef === undefined ? {} : { key_ref: keyRef }) },
-		server: { bind: bind ?? DEFAULT_BIND },
+		node: { id: id ?? "", ...(keyRef === undefined ? {} : { key_ref: keyRef }), ...(keyScope === undefined ? {} : { key_scope: keyScope as "project" | "global" }) },
+		server: { bind: bind ?? DEFAULT_BIND, ...(publicUrl === undefined ? {} : { public_url: publicUrl }) },
 		threads: { page_size: pageSize ?? DEFAULT_PAGE_SIZE },
+		...(seeds === undefined && trust === undefined ? {} : { discovery: { ...(seeds === undefined ? {} : { seeds }), ...(trust === undefined ? {} : { trust }) } }),
+		...(trust === undefined ? {} : { trust }),
 	});
 }
 
@@ -121,14 +128,24 @@ export function serializeConfig(config: OnlyneConfig): string {
 		`region = ${tomlString(config.region)}`,
 	];
 	if (config.node.key_ref !== undefined) lines.push(`key_ref = ${tomlString(config.node.key_ref)}`);
+	if (config.node.key_scope !== undefined) lines.push(`key_scope = ${tomlString(config.node.key_scope)}`);
 	lines.push(
 		"",
 		"[server]",
 		`bind = ${tomlString(config.server.bind)}`,
+		...(config.server.public_url === undefined ? [] : [`public_url = ${tomlString(config.server.public_url)}`]),
 		"",
 		"[threads]",
 		`page_size = ${String(config.threads.page_size)}`,
 	);
+	if (config.discovery?.seeds !== undefined || config.trust !== undefined) {
+		lines.push("", "[discovery]");
+		const seeds = config.discovery?.seeds ?? [];
+		if (seeds.length > 0) lines.push(`seeds = [${seeds.map(seed => tomlString(seed)).join(", ")}]`);
+		for (const entry of config.trust ?? []) {
+			lines.push("", "[[trust]]", `node_id = ${tomlString(entry.node_id)}`, `fingerprint = ${tomlString(entry.fingerprint)}`);
+		}
+	}
 	return `${lines.join("\n")}\n`;
 }
 
@@ -137,6 +154,13 @@ function validateConfig(config: OnlyneConfig): OnlyneConfig {
 	const id = normalizeNodeId(config.node.id);
 	const keyRef = config.node.key_ref?.trim();
 	const bind = config.server.bind.trim();
+	const publicUrl = config.server.public_url?.trim();
+	const keyScope = config.node.key_scope;
+	if (keyScope !== undefined && keyScope !== "project" && keyScope !== "global") {
+		throw new ConfigError("invalid", `node.key_scope must be project or global, got ${JSON.stringify(keyScope)}.`);
+	}
+	if (publicUrl !== undefined && publicUrl.length === 0) throw new ConfigError("invalid", "server.public_url must not be empty.");
+	const seeds = config.discovery?.seeds?.map(seed => seed.trim()).filter(seed => seed.length > 0);
 	if (bind.length === 0) throw new ConfigError("invalid", "server.bind must not be empty.");
 	if (/[\s/]/.test(bind)) {
 		throw new ConfigError("invalid", `server.bind must be a hostname or IP address, got ${JSON.stringify(bind)}.`);
@@ -148,9 +172,11 @@ function validateConfig(config: OnlyneConfig): OnlyneConfig {
 	return {
 		path: config.path,
 		region,
-		node: { id, ...(keyRef === undefined || keyRef.length === 0 ? {} : { key_ref: keyRef }) },
-		server: { bind },
+		node: { id, ...(keyRef === undefined || keyRef.length === 0 ? {} : { key_ref: keyRef }), ...(keyScope === undefined ? {} : { key_scope: keyScope }) },
+		server: { bind, ...(publicUrl === undefined ? {} : { public_url: publicUrl }) },
 		threads: { page_size: pageSize },
+		...(seeds === undefined || seeds.length === 0 ? {} : { discovery: { seeds } }),
+		...(config.trust === undefined ? {} : { trust: config.trust }),
 	};
 }
 
@@ -192,6 +218,37 @@ function optionalInteger(source: Record<string, unknown>, key: string, field: st
 		throw new ConfigError("invalid", `${field} must be an integer.`);
 	}
 	return value;
+}
+
+/** An array of non-empty strings under `source.name`. */
+function stringArray(source: Record<string, unknown>, key: string, field: string): string[] | undefined {
+	const value = source[key];
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value) || !value.every(entry => typeof entry === "string" && entry.length > 0)) {
+		throw new ConfigError("invalid", `${field} must be an array of non-empty strings.`);
+	}
+	return value;
+}
+
+/** `[[trust]]` rows: a node id and a 16-hex-character fingerprint each. */
+function trustSeeds(raw: Record<string, unknown>, path: string): Array<{ node_id: string; fingerprint: string }> | undefined {
+	const value = raw.trust;
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) throw new ConfigError("invalid", `${path}: trust must be an array of tables.`);
+	const entries: Array<{ node_id: string; fingerprint: string }> = [];
+	for (const row of value) {
+		if (row === null || typeof row !== "object" || Array.isArray(row)) {
+			throw new ConfigError("invalid", `${path}: trust must be an array of tables.`);
+		}
+		const record = row as Record<string, unknown>;
+		const node_id = typeof record.node_id === "string" ? record.node_id.trim() : "";
+		const fingerprint = typeof record.fingerprint === "string" ? record.fingerprint.trim() : "";
+		if (node_id.length === 0 || !/^[0-9a-f]{16}$/.test(fingerprint)) {
+			throw new ConfigError("invalid", `${path}: a trust entry needs node_id and a 16-character fingerprint.`);
+		}
+		entries.push({ node_id, fingerprint });
+	}
+	return entries;
 }
 
 function isTable(value: unknown): value is Record<string, unknown> {

@@ -1,4 +1,4 @@
-import type { NodeId, ThreadRef } from "@onlyne/lib";
+import type { NodeId, ThreadRef, TrustSeed } from "@onlyne/lib";
 
 /**
  * Project-scoped configuration in `<project>/.onlyne/config.toml`.
@@ -13,13 +13,22 @@ export interface OnlyneConfig {
 	node: {
 		id: NodeId;
 		key_ref?: string;
+		key_scope?: "project" | "global";
 	};
 	server: {
 		bind: string;
+		/** The externally reachable base URL when a reverse proxy fronts the node. */
+		public_url?: string;
 	};
 	threads: {
 		page_size: number;
 	};
+	/** Bootstrap contact seeds the node reaches at every start. */
+	discovery?: {
+		seeds?: string[];
+	};
+	/** Pinned peer fingerprints; an arriving key that matches is trusted without a prompt. */
+	trust?: TrustSeed[];
 }
 
 /** One execution context the plugin registered for a delivered message. */
@@ -100,6 +109,8 @@ export interface ViewerSnapshot {
 	discovery: ViewerDiscovery[];
 	contacts: ViewerContact[];
 	discovery_error?: string;
+	trust?: Array<{ node_id: NodeId; fingerprint: string; state: "pending" | "trusted" | "revoked"; base_url: string }>;
+	identity?: { public_key: string; fingerprint: string };
 }
 
 /** The one-line runtime status a status widget renders. */

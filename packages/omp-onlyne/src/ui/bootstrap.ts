@@ -19,14 +19,14 @@ import { configPath, normalizeNodeId, normalizeRegion, saveConfig, shortNodeId }
 import { startRuntime } from "../runtime.ts";
 import type { OnlyneConfig } from "../types.ts";
 
-const FIELDS = ["region", "nodeId", "bind", "keyRef", "pageSize", "contact"] as const;
+const FIELDS = ["region", "nodeId", "bind", "keyScope", "pageSize", "contact"] as const;
 type FieldName = (typeof FIELDS)[number];
 
 const LABELS: Record<FieldName, string> = {
 	region: "Region",
 	nodeId: "Node id",
 	bind: "Server bind",
-	keyRef: "Key ref",
+	keyScope: "Node key (project/global/none)",
 	pageSize: "Page size",
 	contact: "Initial node address (optional)",
 };
@@ -35,7 +35,7 @@ const HINTS: Record<FieldName, string> = {
 	region: "短名保存为 urn:onlyne:region:<短名>",
 	nodeId: "短名保存为 urn:onlyne:agent:<短名>",
 	bind: "127.0.0.1",
-	keyRef: "env:NAME 或 file:/path；回环测试可留空",
+	keyScope: "project：密钥存 .onlyne/keys（git 内需 ignore）；global：存 ~/.config/onlyne/keys；none：回环开发绑定",
 	pageSize: "1..100，默认 50",
 	contact: "自动发现不可达时，联系一个已有节点；不写入配置",
 };
@@ -47,7 +47,7 @@ export interface BootstrapDefaults {
 	regionSource: string;
 	nodeId: string;
 	bind: string;
-	keyRef: string;
+	keyScope: string;
 	pageSize: number;
 	/** Existing configuration; the draft carries what the form does not edit. */
 	current?: OnlyneConfig;
@@ -84,7 +84,7 @@ export class OnlyneBootstrap implements Component {
 			region: this.makeField(LABELS.region, defaults.region, HINTS.region),
 			nodeId: this.makeField(LABELS.nodeId, shortNodeId(defaults.nodeId), HINTS.nodeId),
 			bind: this.makeField(LABELS.bind, defaults.bind, HINTS.bind),
-			keyRef: this.makeField(LABELS.keyRef, defaults.keyRef, HINTS.keyRef),
+			keyScope: this.makeField(LABELS.keyScope, defaults.keyScope, HINTS.keyScope),
 			pageSize: this.makeField(LABELS.pageSize, String(defaults.pageSize), HINTS.pageSize),
 			contact: this.makeField(LABELS.contact, "", HINTS.contact),
 		};
@@ -130,7 +130,7 @@ export class OnlyneBootstrap implements Component {
 		const region = this.value("region");
 		const nodeId = this.value("nodeId");
 		const bind = this.value("bind");
-		const keyRef = this.value("keyRef");
+		const keyScope = this.value("keyScope").trim().toLowerCase();
 		if (region.length === 0) {
 			this.fail("Region 不能为空。");
 			return;
@@ -138,9 +138,13 @@ export class OnlyneBootstrap implements Component {
 		const config: OnlyneConfig = {
 			path: configPath(this.ctx.cwd),
 			region: normalizeRegion(region),
-			node: { id: normalizeNodeId(nodeId), ...(keyRef.length === 0 ? {} : { key_ref: keyRef }) },
+			node: {
+				id: normalizeNodeId(nodeId),
+				...(keyScope === "" || keyScope === "none" ? {} : { key_scope: keyScope === "global" ? "global" as const : "project" as const }),
+			},
 			server: { bind },
 			threads: { page_size: Number(this.value("pageSize")) },
+			...(this.value("contact").trim() === "" ? {} : { discovery: { seeds: [this.value("contact").trim()] } }),
 		};
 		this.saving = true;
 		this.error = undefined;
