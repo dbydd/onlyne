@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Onlyne — 界面设计稿</title>
+<style>
+  :root {
+    --bg: #17181c; --panel: #1e2026; --panel-2: #23262e; --line: #2f333d;
+    --fg: #e6e8ee; --muted: #9aa0ad; --dim: #6f7684;
+    --accent: #5b8cff; --ok: #3fb950; --warn: #d29922; --err: #f85149;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg); display: flex;
+    font: 13px/1.5 ui-sans-serif, system-ui, "PingFang SC", sans-serif;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+
+  /* ---- 域栏 ---- */
+  .rail { width: 68px; background: var(--panel); display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px 0; border-right: 1px solid var(--line); }
+  .guild { width: 44px; height: 44px; border-radius: 14px; background: var(--panel-2); display: grid; place-items: center; color: var(--muted); font-weight: 600; position: relative; }
+  .guild:hover { border-radius: 12px; color: var(--fg); }
+  .guild.on { border-radius: 12px; background: var(--accent); color: #fff; }
+  .guild.on::before { content: ""; position: absolute; left: -12px; top: 10px; bottom: 10px; width: 3px; border-radius: 2px; background: #fff; }
+  .guild .badge { position: absolute; right: -3px; top: -3px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--err); color: #fff; font-size: 10px; display: grid; place-items: center; }
+
+  /* ---- 线程栏 ---- */
+  .channels { width: 232px; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+  .chan-head { padding: 14px 14px 10px; border-bottom: 1px solid var(--line); }
+  .chan-head .region { font-size: 11px; color: var(--dim); letter-spacing: .04em; text-transform: uppercase; }
+  .chan-head .node { font-weight: 600; }
+  .chan-head .fp { color: var(--dim); font-family: ui-monospace, monospace; font-size: 11px; }
+  .section { padding: 12px 10px 4px; font-size: 11px; color: var(--dim); letter-spacing: .04em; display: flex; justify-content: space-between; }
+  .section button { color: var(--muted); font-size: 11px; }
+  .section button:hover { color: var(--fg); }
+  .chan { display: flex; gap: 8px; align-items: center; padding: 7px 12px; margin: 1px 6px; border-radius: 8px; color: var(--muted); }
+  .chan:hover { background: var(--panel-2); color: var(--fg); }
+  .chan.on { background: var(--panel-2); color: var(--fg); }
+  .chan .hash { color: var(--dim); }
+  .chan .meta { margin-left: auto; font-size: 11px; color: var(--dim); }
+  .chan .unread { min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--err); color: #fff; font-size: 10px; display: grid; place-items: center; }
+
+  /* ---- 主区 ---- */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .top { height: 48px; display: flex; align-items: center; gap: 12px; padding: 0 18px; border-bottom: 1px solid var(--line); }
+  .top .title { font-weight: 600; }
+  .top .sub { color: var(--dim); font-size: 12px; }
+  .top .right { margin-left: auto; display: flex; gap: 8px; }
+
+  .requestbar { margin: 12px 18px 0; border: 1px solid var(--warn); border-radius: var(--radius); background: #2a2413; overflow: hidden; }
+  .requestbar .head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; color: var(--warn); font-size: 12px; }
+  .request { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-top: 1px solid #3a3117; }
+  .request .who { font-weight: 600; }
+  .request .fp { color: var(--dim); font-family: ui-monospace, monospace; font-size: 11px; }
+  .request .acts { margin-left: auto; display: flex; gap: 8px; }
+
+  .messages { flex: 1; overflow: auto; padding: 16px 18px 8px; }
+  .msg { padding: 8px 10px; border-radius: var(--radius); }
+  .msg:hover { background: #1b1d22; }
+  .msg .head { display: flex; align-items: baseline; gap: 8px; }
+  .msg .author { font-weight: 600; }
+  .msg .time { color: var(--dim); font-size: 11px; }
+  .msg .dir { color: var(--accent); font-size: 11px; }
+  .msg .body { white-space: pre-wrap; margin-top: 2px; }
+  .msg .tools { display: none; gap: 6px; margin-top: 6px; }
+  .msg:hover .tools { display: flex; }
+  .msg.out { border-left: 2px solid var(--accent); }
+
+  .composer { margin: 0 18px 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); }
+  .composer textarea { width: 100%; min-height: 62px; resize: none; border: 0; background: none; color: var(--fg); padding: 10px 12px; font: inherit; outline: none; }
+  .composer .row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); }
+  .composer .hint { color: var(--dim); font-size: 12px; }
+
+  /* ---- 成员栏 ---- */
+  .members { width: 248px; background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; }
+  .member { display: flex; align-items: center; gap: 8px; padding: 8px 12px; margin: 1px 6px; border-radius: 8px; }
+  .member:hover { background: var(--panel-2); }
+  .member.on { background: var(--panel-2); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot.ok { background: var(--ok); } .dot.pend { background: var(--accent); } .dot.rev { background: var(--err); } .dot.none { background: var(--dim); }
+  .member .name { font-weight: 500; }
+  .member .region { margin-left: auto; color: var(--dim); font-size: 11px; }
+  .detail { border-top: 1px solid var(--line); padding: 12px; }
+  .detail h4 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 600; }
+  .kv { display: grid; grid-template-columns: 64px 1fr; gap: 4px 8px; font-size: 12px; }
+  .kv dt { color: var(--dim); } .kv dd { margin: 0; font-family: ui-monospace, monospace; word-break: break-all; }
+  .detail .acts { display: flex; gap: 8px; margin-top: 12px; }
+
+  /* ---- 按钮 ---- */
+  .btn { padding: 6px 12px; border-radius: 8px; background: var(--panel-2); color: var(--fg); border: 1px solid var(--line); font-size: 12px; }
+  .btn:hover { border-color: #3d4250; background: #2a2d36; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn.ghost { background: none; border-color: transparent; color: var(--muted); }
+  .btn.ghost:hover { color: var(--fg); border-color: var(--line); }
+  .btn.danger { color: var(--err); border-color: #4a2527; background: #2a1c1d; }
+  .chip { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .chip.ok { color: var(--ok); border-color: #274a2c; background: #16231a; }
+  .chip.pend { color: var(--accent); border-color: #24365f; background: #16203a; }
+  .chip.rev { color: var(--err); border-color: #4a2527; background: #2a1c1d; }
+</style>
+</head>
+<body>
+
+<!-- 域 -->
+<nav class="rail">
+  <button class="guild" title="所有域">⌂</button>
+  <button class="guild on" title="research-chamber">R</button>
+  <button class="guild" title="daily-workbench">D</button>
+  <button class="guild" title="alexandria">A<span class="badge">2</span></button>
+  <button class="guild" title="加入或创建域">+</button>
+</nav>
+
+<!-- 线程 -->
+<aside class="channels">
+  <div class="chan-head">
+    <div class="region">research-chamber</div>
+    <div class="node">lazuli</div>
+    <div class="fp">44ec29947cc181db</div>
+  </div>
+
+  <div class="section"><span>待你确认</span><span class="chip pend">2</span></div>
+  <button class="chan"><span class="hash">▢</span> caerulea <span class="meta">aaaa1111</span></button>
+  <button class="chan"><span class="hash">▢</span> cyanea <span class="meta">eeee5555</span></button>
+
+  <div class="section"><span>线程</span><button>+ 新建</button></div>
+  <button class="chan on"><span class="hash">#</span> sea-ice review <span class="unread">3</span></button>
+  <button class="chan"><span class="hash">#</span> 数据集交接</button>
+  <button class="chan"><span class="hash">#</span> 每周同步</button>
+
+  <div class="section"><span>收件箱</span></div>
+  <button class="chan"><span class="hash">✉</span> 待处理 <span class="meta">1</span></button>
+</aside>
+
+<!-- 主区 -->
+<main class="main">
+  <header class="top">
+    <span class="title"># sea-ice review</span>
+    <span class="sub">3 条消息 · 2 位成员 · 最近 2 分钟前</span>
+    <span class="right"><button class="btn ghost">线程设置</button></span>
+  </header>
+
+  <section class="requestbar">
+    <div class="head">▢ caerulea 请求与你交换密钥 · 对方已批准，等你确认</div>
+    <div class="request">
+      <span class="who">caerulea</span>
+      <span class="chip pend">申请中</span>
+      <span class="fp">aaaa1111bbbb2222</span>
+      <span class="acts">
+        <button class="btn primary">同意</button>
+        <button class="btn">拒绝</button>
+        <button class="btn ghost">查看详情</button>
+      </span>
+    </div>
+  </section>
+
+  <section class="messages">
+    <div class="msg out">
+      <div class="head"><span class="dir">→</span><span class="author">lazuli</span><span class="time">14:02</span><span class="chip ok">已送达</span></div>
+      <div class="body">第二组数据我重算了一遍，结论和上次一致。</div>
+      <div class="tools"><button class="btn ghost">回复</button><button class="btn ghost">复制</button><button class="btn ghost">查看投递</button></div>
+    </div>
+    <div class="msg">
+      <div class="head"><span class="dir">←</span><span class="author">caerulea</span><span class="time">14:04</span><span class="chip ok">已读</span></div>
+      <div class="body">收到。我这边核对一下边界条件，稍后把差异贴在这里。</div>
+      <div class="tools"><button class="btn ghost">回复</button><button class="btn ghost">复制</button></div>
+    </div>
+    <div class="msg">
+      <div class="head"><span class="dir">←</span><span class="author">caerulea</span><span class="time">14:05</span><span class="chip pend">等你回复</span></div>
+      <div class="body">你那边能不能同时给出 95% 置信区间？</div>
+      <div class="tools"><button class="btn ghost">回复</button><button class="btn ghost">复制</button></div>
+    </div>
+  </section>
+
+  <div class="composer">
+    <textarea placeholder="发送给 # sea-ice review">可以，我把区间一起贴出来。</textarea>
+    <div class="row">
+      <span class="hint">发送到 caerulea · 等待回复</span>
+      <span style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn">附加引用</button>
+        <button class="btn primary">发送</button>
+      </span>
+    </div>
+  </div>
+</main>
+
+<!-- 成员 -->
+<aside class="members">
+  <div class="section"><span>成员</span><span class="chip">3</span></div>
+  <button class="member on"><span class="dot ok"></span><span class="name">caerulea</span><span class="region">research</span></button>
+  <button class="member"><span class="dot pend"></span><span class="name">cyanea</span><span class="region">research</span></button>
+  <button class="member"><span class="dot none"></span><span class="name">solo</span><span class="region">—</span></button>
+
+  <div class="detail">
+    <h4>caerulea</h4>
+    <dl class="kv">
+      <dt>指纹</dt><dd>aaaa1111bbbb2222</dd>
+      <dt>域</dt><dd>research-chamber</dd>
+      <dt>状态</dt><dd>已认证</dd>
+      <dt>端点</dt><dd>127.0.0.1:54484</dd>
+      <dt>最后可见</dt><dd>2 分钟前</dd>
+    </dl>
+    <div class="acts">
+      <button class="btn">查看详情</button>
+      <button class="btn danger">撤销信任</button>
+    </div>
+  </div>
+</aside>
+
+</body>
+</html>

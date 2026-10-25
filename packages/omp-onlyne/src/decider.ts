@@ -513,16 +513,27 @@ export class JudgeDecider {
 		}
 
 		const response = choice(answers, "response");
-		const execution = choice(answers, "execution");
+		const chosenExecution = choice(answers, "execution");
+		let execution: "existing" | "new" = chosenExecution === "existing" ? "existing" : "new";
 		if (response !== "none" && response !== "async" && response !== "await") {
 			throw new OnlyneError("decision_unavailable", "The judge did not choose a valid response mode.");
 		}
-		if (execution !== "existing" && execution !== "new") {
+		if (chosenExecution !== "existing" && chosenExecution !== "new") {
 			throw new OnlyneError("decision_unavailable", "The judge did not choose a valid execution mode.");
 		}
 
-		const thread = await this.#answerThread(answers, meta);
-		const context = execution === "new" ? undefined : await this.#existingContext(scope, to, meta);
+		// A send targets a thread the receiver owns. The thread question's answer is for read and
+		// thread actions; here only an explicit reference counts, so the judge cannot redirect a
+		// delivery into a local append (report 2, problem 1).
+		const thread = meta?.thread === undefined ? undefined : await this.#thread(meta);
+		if (thread !== undefined && thread.owner !== to) {
+			throw new OnlyneError("invalid_request", `The named thread belongs to ${thread.owner}, but the message targets ${to}.`);
+		}
+		let context = execution === "new" ? undefined : await this.#existingContext(scope, to, meta).catch(() => undefined);
+		// `existing` is a hint about *where* the work lands, not a reason to fail the delivery: when
+		// no published context can be resolved, the receiver starts a new one (report 2, problem 2).
+		if (execution === "existing" && context === undefined) execution = "new";
+		if (execution === "new") context = undefined;
 		const mentions = await this.#mentions(meta);
 		return {
 			kind: "send",

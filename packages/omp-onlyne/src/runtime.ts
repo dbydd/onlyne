@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { FetchTransport, OnlyneError, type DiscoveryCandidate, type DiscoveryRecord, type Entry, type LocalAttention, type OnlyneNode, type Outbound, type Page, type Thread, type ThreadRef } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -108,7 +109,12 @@ class OmpRuntime implements PluginRuntime {
 			listMessages: (thread, cursor) => this.node.messages.list(this.node.auth, thread, { attention: "thread", page_size: 100, cursor }),
 		});
 		const bridge = createRuntimeBridge({ pi: this.pi, main: this.main, decider: this.decider, contexts: this.contexts, nodeId: this.config.node.id });
-		const keyDir = this.config.node.key_scope === undefined ? undefined : await ensureKeyDir(dirname(dirname(this.config.path)), this.config.node.id, this.config.node.key_scope);
+		const projectRoot = dirname(dirname(this.config.path));
+		// The identity is global unless this working tree overrides it: a project key wins.
+		const projectDir = await ensureKeyDir(projectRoot, this.config.node.id, "project").catch(() => undefined);
+		const keyDir = projectDir !== undefined && existsSync(join(projectDir, "priv.pem"))
+			? projectDir
+			: await ensureKeyDir(projectRoot, this.config.node.id, "global");
 		this.keyDir = keyDir;
 		this.node = createOnlyneNode({ config: this.config, endpoint: this.endpoint, instanceId, storage: this.storage, contexts: this.contexts, runtime: bridge,
 			...(keyDir === undefined ? {} : { keyDir }),
@@ -170,6 +176,7 @@ class OmpRuntime implements PluginRuntime {
 			// Re-observing keeps every record's freshness window open and lets an unreachable
 			// candidate be dropped rather than lingering as a permanent stale row.
 			if (rediscover) steps.push(() => this.node.discovery.refresh(this.controller.signal));
+			if (rediscover) steps.push(() => this.#joinDomainPeers());
 			for (const step of steps) {
 				try { await step(); } catch (error) { if (!this.closed) this.pi.logger.warn("onlyne.maintain.failed", { error: errorText(error) }); }
 			}
@@ -237,7 +244,33 @@ class OmpRuntime implements PluginRuntime {
 	}
 	async refreshDiscovery(): Promise<void> {
 		await this.node.discovery.refresh(this.controller.signal);
+		await this.#joinDomainPeers();
 		this.changed();
+	}
+
+	/**
+	 * Domain members form a full mesh: a reachable node that declares this node's region is
+	 * exchanged with automatically, so joining a region is joining its trust group. Nodes in
+	 * other regions, and nodes with no region, still need the explicit flow.
+	 */
+	async #joinDomainPeers(): Promise<void> {
+		if (!this.node.keys.enabled || this.config.region.length === 0) return;
+		const records = await this.node.discovery.listRecords();
+		const now = Date.now();
+		for (const record of records) {
+			if (record.node_id === this.config.node.id) continue;
+			if (record.verified_at === undefined || Date.parse(record.expires_at) <= now) continue;
+			if (record.membership?.state !== "active" || record.membership.domain_id !== this.config.region) continue;
+			const existing = await this.node.trust.entry(record.node_id).catch(() => undefined);
+			if (existing?.state === "trusted" || existing?.state === "pending") continue;
+			try {
+				const identity = await this.node.trust.inspect(record.node_id);
+				await this.node.trust.request(this.node.auth, record.node_id, identity.fingerprint);
+				this.pi.logger.info("onlyne.trust.domain", { node: record.node_id, region: this.config.region });
+			} catch (error) {
+				this.pi.logger.warn("onlyne.trust.domain_failed", { node: record.node_id, error: errorText(error) });
+			}
+		}
 	}
 	async status(): Promise<OnlyneStatus> {
 		const records = await this.node.discovery.listRecords();

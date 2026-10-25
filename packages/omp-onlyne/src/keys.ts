@@ -78,9 +78,16 @@ async function insideGitWorkTree(path: string): Promise<boolean> {
  * tree whose ignore rules do not cover `.onlyne/keys` is refused, with both escapes named.
  */
 export async function ensureKeyDir(cwd: string, nodeId: string, scope: "project" | "global"): Promise<string> {
+	// The global directory holds the node's identity by default; a project directory is an
+	// override for this working tree, read first when both exist.
 	const root = scope === "project" ? projectKeysRoot(cwd) : globalKeysRoot();
 	const dir = keyDirectory(root, nodeId);
-	if (scope === "project" && await insideGitWorkTree(cwd) && !(await ignoredByGit(cwd, dir)) && !(await ignoredByGit(cwd, projectKeysRoot(cwd)))) {
+	if (scope === "global") {
+		await mkdir(dir, { recursive: true });
+		await chmod(dir, 0o700);
+		return dir;
+	}
+	if (await insideGitWorkTree(cwd) && !(await ignoredByGit(cwd, dir)) && !(await ignoredByGit(cwd, projectKeysRoot(cwd)))) {
 		throw new Error(
 			"Refusing to create a node key inside a git work tree: .onlyne/keys is not ignored. "
 			+ "Add '.onlyne/keys' to .gitignore, or set node.key_scope = \"global\" in the config.",
