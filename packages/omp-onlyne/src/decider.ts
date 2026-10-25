@@ -171,12 +171,15 @@ export class JudgeDecider {
 
 		const state = await this.#state(scope);
 		const questions = this.#outboundQuestions(state);
+		const started = Date.now();
 		const answers = await this.#judge(scope.ctx, state, questions, scope.signal);
+		this.#record("outbound", scope.input, answers, Date.now() - started);
 		if (scope.readOnly === true && choice(answers, "action") !== "read") {
 			throw new OnlyneError("forbidden", "Subagent sessions may only read Onlyne state; return the result to the main agent.");
 		}
 		const action = await this.#action(scope, answers);
 		await this.#guard(scope, action);
+		this.deps.log?.("onlyne.judge.action", { direction: "outbound", ...actionFacts(action) });
 		return action;
 	}
 
@@ -192,7 +195,9 @@ export class JudgeDecider {
 			thread_dialogue: await this.#threadEvidenceFor([entry.thread_ref]),
 		};
 		const questions = this.#inboundQuestions(state);
+		const started = Date.now();
 		const answers = await this.#judge(scope, state, questions);
+		this.#record("inbound", { delivery_kind: entry.message.delivery_kind, msg: entry.message.msg, meta: entry.message.meta }, answers, Date.now() - started);
 		const action = choice(answers, "action");
 		if (action === "fragment" || action === "wake" || action === "queue" || action === "new_subagent") {
 			return { action };
@@ -226,7 +231,9 @@ export class JudgeDecider {
 			explanation_candidates: candidates.explanations,
 			thread_dialogue: await this.#threadEvidenceFor([entry.thread_ref]),
 		};
+		const started = Date.now();
 		const answers = await this.#judge(ctx, state, todoQuestions(existing, candidates));
+		this.#record("todo", { delivery_kind: entry.message.delivery_kind, msg: entry.message.msg, meta: entry.message.meta }, answers, Date.now() - started);
 		const action = choice(answers, "action");
 		if (action === "none") return { action: "none" };
 		if (action === "associate") {
@@ -274,6 +281,15 @@ export class JudgeDecider {
 				`The judge role could not decide this Onlyne message: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+	}
+
+	/**
+	 * One line per judged message, at info: the intent, every answer the judge gave, and the
+	 * time it took. Tuning the judge needs this record; without it a misrouted send can only be
+	 * reconstructed from its receipt (issue report, problem 5).
+	 */
+	#record(direction: string, input: { delivery_kind: string; msg: string; meta?: unknown }, answers: Answers, ms: number): void {
+		this.deps.log?.("onlyne.judge.decided", judgeRecord(direction, input, answers, ms));
 	}
 
 	/**
@@ -1133,6 +1149,42 @@ function isThreadOp(value: string): value is Extract<Action, { kind: "thread" }>
 
 function isDomainOp(value: string): value is Extract<Action, { kind: "domain" }>["op"] {
 	return value === "create" || value === "join" || value === "leave" || value === "list" || value === "describe" || value === "discover";
+}
+
+/** The fields of one judged message: intent, every answer the judge gave, and the time. */
+export function judgeRecord(
+	direction: string,
+	input: { delivery_kind: string; msg: string; meta?: unknown },
+	answers: Answers,
+	ms: number,
+): Record<string, unknown> {
+	const picked: Record<string, string> = {};
+	for (const [key, value] of Object.entries(answers)) {
+		const answer = value !== null && typeof value === "object" && "choice" in value ? (value as { choice?: unknown }).choice : undefined;
+		if (typeof answer === "string" && answer.length > 0) picked[key] = answer;
+	}
+	return {
+		direction,
+		intent: input.delivery_kind,
+		msg: input.msg.length > 120 ? `${input.msg.slice(0, 120)}…` : input.msg,
+		answers: picked,
+		ms,
+	};
+}
+
+/** The fields of a decided action worth one log line. */
+function actionFacts(action: Action): Record<string, string> {
+	const facts: Record<string, string> = { action: action.kind };
+	const record = action as unknown as Record<string, unknown>;
+	for (const key of ["to", "context", "response", "execution", "relation", "scope", "op", "operation"]) {
+		const value = record[key];
+		if (typeof value === "string" && value.length > 0) facts[key] = value;
+	}
+	const thread = record.thread as { owner?: unknown; id?: unknown } | undefined;
+	if (thread !== undefined && typeof thread.owner === "string" && typeof thread.id === "string") facts.thread = `${thread.owner}/${thread.id}`;
+	const resource = record.resource as { owner?: unknown; id?: unknown } | undefined;
+	if (resource !== undefined && typeof resource.owner === "string" && typeof resource.id === "string") facts.resource = `${resource.owner}/${resource.id}`;
+	return facts;
 }
 
 function choice(answers: Answers, key: string): string | undefined {
