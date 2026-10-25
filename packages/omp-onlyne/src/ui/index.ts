@@ -116,6 +116,7 @@ export function registerUi(pi: ExtensionAPI): void {
 								() => tui.requestRender(),
 								() => done(),
 								controller.signal,
+								() => tui.terminal.rows,
 							),
 						{
 							overlay: true,

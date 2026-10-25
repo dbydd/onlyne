@@ -83,6 +83,26 @@ interface Invite {
 	base_url: string;
 }
 
+/** A TSP line extent, for heights the terminal must never recompute from content. */
+type LineExtent = `${number}lines`;
+
+function linesOf(count: number): LineExtent {
+	return `${Math.max(1, Math.floor(count))}lines` as LineExtent;
+}
+
+/**
+ * Row budgets for the regions inside the sheet. The sheet's own size is the
+ * terminal's (`lg`); these are caps only — a `min` would demand more rows than
+ * the pane has and get the frame clipped. Content past a cap is named, never drawn.
+ */
+interface Geometry {
+	body: number;
+	messages: number;
+	threads: number;
+	members: number;
+	pageRows: number;
+}
+
 /**
  * The Onlyne surface: a domain rail, the thread column with what waits for
  * confirmation, the message flow with its composer, and the member column with
@@ -100,7 +120,6 @@ export class OnlyneViewer implements Component {
 	private domainKey: string | undefined;
 	private threadAlias: string | undefined;
 	private memberKey: string | undefined;
-	private pendingConfirm: string | undefined;
 	/** The recipient the composer names, else the open thread's own peer. */
 	private target: string | undefined;
 	/** The composer's text, mirrored from the editor so a rebuild keeps it. */
@@ -129,6 +148,7 @@ export class OnlyneViewer implements Component {
 		private readonly requestRender: () => void,
 		private readonly done: () => void,
 		private readonly signal: AbortSignal,
+		private readonly rows: () => number = () => 40,
 	) {
 		void this.reload();
 		this.unsubscribe = getRuntime()?.onChange(() => {
@@ -143,6 +163,33 @@ export class OnlyneViewer implements Component {
 		this.described = undefined;
 		this.rendered = undefined;
 		this.requestRender();
+	}
+
+	/**
+	 * The sheet's height is the terminal's, so the regions inside it only need
+	 * caps: what the chrome (status, tabs, gaps) leaves for the body.
+	 */
+	private geometry(): Geometry {
+		const rows = Math.max(20, Math.floor(this.rows()));
+		const body = Math.max(8, rows - 12);
+		return {
+			body,
+			messages: Math.max(2, Math.floor((body - 8) / 3)),
+			threads: Math.max(1, Math.floor((body - 9) / 3)),
+			members: Math.max(1, Math.floor((body - 4) / 3)),
+			pageRows: Math.max(2, body - 4),
+		};
+	}
+
+	/** What the fixed frame shows of a list, and how many rows it left out. */
+	private shown<T>(items: readonly T[], budget: number): { rows: readonly T[]; more: number } {
+		if (items.length <= budget) return { rows: items, more: 0 };
+		const keep = Math.max(1, budget - 1);
+		return { rows: items.slice(0, keep), more: items.length - keep };
+	}
+
+	private moreText(count: number): NativeNode {
+		return textNode([span(`…另有 ${count} 条未显示`, "muted")], { truncate: "end" });
 	}
 
 	async reload(): Promise<void> {
@@ -215,6 +262,11 @@ export class OnlyneViewer implements Component {
 		return (this.snapshot?.trust ?? [])
 			.filter(entry => entry.state === "pending" && entry.remote_approved && !entry.local_approved)
 			.map(entry => ({ node_id: entry.node_id, fingerprint: entry.fingerprint, base_url: entry.base_url }));
+	}
+
+	/** This node's trust row for a peer, undefined when the two never exchanged keys. */
+	private trustOf(nodeId: string): Peer["trust"] {
+		return this.snapshot?.trust?.find(entry => entry.node_id === nodeId);
 	}
 
 	/**
@@ -306,7 +358,7 @@ export class OnlyneViewer implements Component {
 		const waiting = peer.trust?.state === "pending" && peer.trust.remote_approved && !peer.trust.local_approved;
 		const acts: NativeChild[] = [];
 		if (withActions) {
-			if (waiting) acts.push(this.button("待你确认", `onlyne.invite:${id}`, { tone: "accent", title: "查看并批准这次密钥申请" }));
+			if (waiting) acts.push(this.button("待你确认", "onlyne.page.contacts", { tone: "accent", title: "到联系人页核对指纹并批准" }));
 			else if (state !== "trusted") acts.push(this.button("请求交换密钥", `onlyne.request:${id}`, { title: "勾选并请求交换密钥" }));
 			if (state === "trusted" || state === "pending") acts.push(this.button("撤销信任", `onlyne.revoke:${id}`, { tone: "error" }));
 		}
@@ -406,11 +458,19 @@ export class OnlyneViewer implements Component {
 		const domain = this.currentDomain();
 		const peers = this.peers();
 		const threads = this.threads();
+		const geo = this.geometry();
 		const unread = threads.reduce((total, thread) => total + Math.max(0, thread.unread), 0);
 		const fingerprint = this.snapshot?.identity?.fingerprint;
+		const memberList = this.shown(peers, Math.min(3, geo.members));
+		const threadList = this.shown(threads, geo.threads);
 		return node(
 			"col",
-			{ role: "onlyne.threads", gap: "sm", min: { w: "24ch" }, max: { w: "38ch" } },
+			{
+				role: "onlyne.threads",
+				gap: "sm",
+				min: { w: "24ch" },
+				max: { w: "38ch", h: linesOf(geo.body) },
+			},
 			[
 				node(
 					"section",
@@ -426,7 +486,10 @@ export class OnlyneViewer implements Component {
 					{ head: [span(`成员 · ${peers.length}`, "dim")] },
 					peers.length === 0
 						? [textNode([span("这个域还没有可达节点。到「发现」页看看候选。", "muted")], { wrap: "word" })]
-						: peers.map(peer => this.memberCard(peer, false)),
+						: [
+								...memberList.rows.map(peer => this.memberCard(peer, false)),
+								...(memberList.more === 0 ? [] : [this.moreText(memberList.more)]),
+							],
 					"members",
 				),
 				node(
@@ -434,24 +497,27 @@ export class OnlyneViewer implements Component {
 					{ head: [span(`线程 · ${threads.length}`, "dim")] },
 					threads.length === 0
 						? [textNode([span("还没有线程。", "muted")], { wrap: "word" })]
-						: threads.map(thread =>
-								node(
-									"card",
-									{
-										role: "omp.btn",
-										head: [
-											span(`# ${thread.title}`, "strong"),
-											...(thread.unread > 0 ? [span(` · ${thread.unread} 未读`, "info")] : []),
-											...(thread.state === "closed" ? [span(" · 已关闭", "dim")] : []),
-										],
-										title: `${thread.title} · ${shortAlias(thread.alias)}`,
-										actions: { click: `onlyne.thread:${thread.alias}` },
-										selected: this.selectedThread()?.alias === thread.alias,
-									},
-									[textNode([span(`${thread.messages.length} 条消息`, "dim")], { truncate: "end" })],
-									`thread-${thread.alias}`,
+						: [
+								...threadList.rows.map(thread =>
+									node(
+										"card",
+										{
+											role: "omp.btn",
+											head: [
+												span(`# ${thread.title}`, "strong"),
+												...(thread.unread > 0 ? [span(` · ${thread.unread} 未读`, "info")] : []),
+												...(thread.state === "closed" ? [span(" · 已关闭", "dim")] : []),
+											],
+											title: `${thread.title} · ${shortAlias(thread.alias)}`,
+											actions: { click: `onlyne.thread:${thread.alias}` },
+											selected: this.selectedThread()?.alias === thread.alias,
+										},
+										[textNode([span(`${thread.messages.length} 条消息`, "dim")], { truncate: "end" })],
+										`thread-${thread.alias}`,
+									),
 								),
-							),
+								...(threadList.more === 0 ? [] : [this.moreText(threadList.more)]),
+							],
 					"list",
 				),
 				node(
@@ -465,36 +531,30 @@ export class OnlyneViewer implements Component {
 		);
 	}
 
-	/** The banner over a flow: the peer's approval waits for this user. */
-	private requestCards(): NativeChild[] {
-		return this.invites().map(invite => {
-			const opened = this.pendingConfirm === invite.node_id;
-			return node(
+	/**
+	 * The flow shows one line pointing at the approval page. Approving is a
+	 * fingerprint comparison, and it has exactly one surface: the contacts page.
+	 */
+	private approvalsCard(): NativeChild[] {
+		const invites = this.invites();
+		if (invites.length === 0) return [];
+		return [
+			node(
 				"card",
 				{
-					role: "onlyne.request",
+					role: "omp.btn",
 					tone: "warning",
-					head: [span(`${shortNodeId(invite.node_id)} 请求与你交换密钥`, "strong")],
-					...(opened ? {} : { actions: { click: `onlyne.invite:${invite.node_id}` }, title: "展开确认" }),
+					head: [span(`${invites.length} 个密钥申请等你确认`, "strong")],
+					title: "到联系人页核对指纹并批准",
+					actions: { click: "onlyne.page.contacts" },
 				},
-				[
-					textNode([span("指纹 ", "dim"), span(invite.fingerprint, "strong"), span(` · ${invite.base_url}`, "dim")], { wrap: "word" }),
-					...(opened
-						? [
-								node("row", { gap: "sm", align: "center" }, [
-									this.button("同意", `onlyne.accept:${invite.node_id}`, { tone: "accent", title: "批准这次密钥交换" }),
-									this.button("拒绝", `onlyne.reject:${invite.node_id}`, { title: "这次不批准" }),
-									this.button("收起", `onlyne.invite:${invite.node_id}`, { title: "收起确认" }),
-								], "acts"),
-							]
-						: [textNode([span("点开核对指纹，再决定批准。", "muted")], { wrap: "word" })]),
-				],
-				`request-${invite.node_id}`,
-			);
-		});
+				[textNode([span(invites.map(invite => shortNodeId(invite.node_id)).join("、"), "dim")], { truncate: "end" })],
+				"approvals",
+			),
+		];
 	}
 
-	private messageCard(message: ViewerMessage, waiting: boolean, width: number): NativeNode {
+	private messageCard(message: ViewerMessage, waiting: boolean): NativeNode {
 		const out = message.direction === "out";
 		return node(
 			"card",
@@ -511,21 +571,22 @@ export class OnlyneViewer implements Component {
 				actions: { click: `onlyne.message:${message.seq}` },
 				selected: this.target !== undefined && this.target === message.author,
 			},
-			[textNode(message.text, { wrap: "word" })],
+			[textNode(message.text, { wrap: "word", lines: 6, truncate: "end" })],
 			`message-${message.seq}`,
 		);
 	}
 
 	/** The message flow: the head, the messages, then the composer. */
-	private flowNode(width: number): NativeNode {
+	private flowNode(): NativeNode {
 		const thread = this.selectedThread();
 		const invites = this.invites();
+		const geo = this.geometry();
 		if (thread === undefined) {
 			return node(
 				"col",
-				{ role: "onlyne.flow", gap: "sm", grow: 1 },
+				{ role: "onlyne.flow", gap: "sm", grow: 1, min: { w: 0 }, max: { h: linesOf(geo.body) } },
 				[
-					...this.requestCards(),
+					...this.approvalsCard(),
 					textNode([span("从左边打开一个线程，或在「发现」页连接一位节点发起对话。", "muted")], { wrap: "word" }),
 					this.composerNode(),
 				],
@@ -535,9 +596,11 @@ export class OnlyneViewer implements Component {
 		const messages = thread.messages;
 		const peer = this.threadPeer(thread);
 		const last = messages.at(-1);
+		// The newest messages stay in view: an older history is named, not shown, so the frame never grows.
+		const visible = messages.slice(-geo.messages);
 		return node(
 			"col",
-			{ role: "onlyne.flow", gap: "sm", grow: 1 },
+			{ role: "onlyne.flow", gap: "sm", grow: 1, min: { w: 0 }, max: { h: linesOf(geo.body) } },
 			[
 				node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
 					node("col", { gap: "none", grow: 1 }, [
@@ -546,10 +609,18 @@ export class OnlyneViewer implements Component {
 					]),
 					...(peer === undefined ? [] : [this.button("详情", `onlyne.member:${peer}`, { title: "这位对端的详情" })]),
 				], "thread-head"),
-				...this.requestCards(),
+				...this.approvalsCard(),
 				...(messages.length === 0
 					? [textNode([span("这个线程还没有消息。", "muted")], { wrap: "word" })]
-					: messages.map((message, index) => this.messageCard(message, index === messages.length - 1 && !invites.some(invite => invite.node_id === message.author), width))),
+					: [
+							...(visible.length === messages.length ? [] : [textNode([span(`更早的 ${messages.length - visible.length} 条不在这一屏`, "muted")], { truncate: "end" })]),
+							...visible.map((message, index) =>
+								this.messageCard(
+									message,
+									index === visible.length - 1 && !invites.some(invite => invite.node_id === message.author),
+								),
+							),
+						]),
 				this.composerNode(),
 			],
 			"flow",
@@ -564,7 +635,7 @@ export class OnlyneViewer implements Component {
 			const editor = new Editor(getEditorTheme());
 			editor.disableSubmit = true;
 			editor.setText(this.draft);
-			editor.setMaxHeight(6);
+			editor.setMaxHeight(3);
 			this.composer = editor;
 		}
 		this.composer.focused = this.focused;
@@ -596,13 +667,18 @@ export class OnlyneViewer implements Component {
 
 	private memberColumn(): NativeNode {
 		const peers = this.peers();
+		const geo = this.geometry();
+		const roster = this.shown(peers, geo.members);
 		const children: NativeChild[] = [
 			node(
 				"section",
 				{ head: [span(`成员 · ${peers.length}`, "dim")] },
 				peers.length === 0
 					? [textNode([span("这个域还没有可达节点。", "muted")], { wrap: "word" })]
-					: peers.map(peer => this.memberCard(peer, false)),
+					: [
+							...roster.rows.map(peer => this.memberCard(peer, false)),
+							...(roster.more === 0 ? [] : [this.moreText(roster.more)]),
+						],
 				"roster",
 			),
 		];
@@ -635,42 +711,60 @@ export class OnlyneViewer implements Component {
 				),
 			);
 		}
-		return node("col", { role: "onlyne.members", gap: "sm", min: { w: "22ch" }, max: { w: "32ch" } }, children, "members");
+		return node(
+			"col",
+			{
+				role: "onlyne.members",
+				gap: "sm",
+				min: { w: "22ch" },
+				max: { w: "32ch", h: linesOf(geo.body) },
+			},
+			children,
+			"members",
+		);
 	}
 
 	// ── pages ───────────────────────────────────────────────────────────────
 
 	private queuePage(): NativeNode[] {
 		const queue = this.snapshot?.queue ?? [];
+		const geo = this.geometry();
 		const sections: NativeChild[] = [];
+		const sectionsOf = 4;
+		const budget = Math.max(1, Math.floor(geo.pageRows / sectionsOf));
 		for (const [head, kind] of [["来信", "inbound"], ["出站", "outbound"], ["本地上下文", "context"], ["判定", "decision"]] as const) {
 			const rows = queue.filter(item => item.kind === kind);
+			const page = this.shown(rows, budget);
 			sections.push(
 				node(
 					"section",
 					{ head: [span(`${head} · ${rows.length}`, "dim")] },
 					rows.length === 0
 						? [textNode([span("空。", "muted")])]
-						: rows.map(item =>
-								node(
-									"card",
-									{ role: "onlyne.queue-row", head: [span(item.label, "strong"), ...(item.at === undefined ? [] : [span(` · ${ageText(item.at)}前`, "dim")])] },
-									[textNode(item.detail, { wrap: "word" })],
-									item.id,
+						: [
+								...page.rows.map(item =>
+									node(
+										"card",
+										{ role: "onlyne.queue-row", head: [span(item.label, "strong"), ...(item.at === undefined ? [] : [span(` · ${ageText(item.at)}前`, "dim")])] },
+										[textNode(item.detail, { wrap: "word" })],
+										item.id,
+									),
 								),
-							),
+								...(page.more === 0 ? [] : [this.moreText(page.more)]),
+							],
 					head,
 				),
 			);
 		}
-		return [node("col", { gap: "sm", grow: 1 }, sections, "queue")];
+		return [node("col", { gap: "sm", max: { h: linesOf(geo.body) } }, sections, "queue")];
 	}
 
 	private discoveryPage(): NativeNode[] {
 		const groups = this.domainGroups();
+		const geo = this.geometry();
 		const children: NativeChild[] = [
 			node("row", { gap: "sm", align: "center", justify: "between" }, [
-				textNode([span("按域分组的可达候选。同一个域的节点在发现之后会自动请求交换密钥。", "dim")], { wrap: "word", grow: 1 }),
+				textNode([span("按域分组的可达候选。交换密钥从这里发起；同域的节点在发现之后会自动发起一次。", "dim")], { wrap: "word", grow: 1 }),
 				this.button("刷新发现", "onlyne.discovery.refresh", { title: "重新观察一轮发现" }),
 			]),
 		];
@@ -680,74 +774,123 @@ export class OnlyneViewer implements Component {
 		if (groups.length === 0) {
 			children.push(textNode([span("还没发现任何节点。确认对方已经启动，并和你在同一网络上。", "muted")], { wrap: "word" }));
 		}
+		const budget = Math.max(2, Math.floor(geo.pageRows / Math.max(1, groups.length)));
 		for (const group of groups) {
+			const page = this.shown(group.peers, budget);
 			children.push(
 				node(
 					"section",
 					{ head: [span(group.label, "strong"), span(` · ${group.peers.length} 节点`, "dim")] },
-					group.peers.map(peer => this.memberCard(peer, true)),
+					[
+						...page.rows.map(peer => this.memberCard(peer, true)),
+						...(page.more === 0 ? [] : [this.moreText(page.more)]),
+					],
 					`domain-${group.id ?? "none"}`,
 				),
 			);
 		}
-		return [node("col", { gap: "sm", grow: 1 }, children, "discovery")];
+		return [node("col", { gap: "sm", max: { h: linesOf(geo.body) } }, children, "discovery")];
 	}
 
+	/**
+	 * Two lists and nothing else: what waits for this node's approval, then the
+	 * peers whose keys were exchanged both ways. Requesting an exchange is a
+	 * discovery-page job; here the only act is approving or revoking.
+	 */
 	private contactsPage(): NativeNode[] {
-		const contacts = this.snapshot?.contacts ?? [];
+		const geo = this.geometry();
+		const invites = this.invites();
+		const mine = this.snapshot?.identity?.fingerprint ?? "本节点没有密钥";
+		const trusted = (this.snapshot?.contacts ?? []).filter(contact => this.trustOf(contact.node_id)?.state === "trusted");
+		const approvalList = this.shown(invites, Math.max(1, geo.pageRows >> 2));
+		const contactList = this.shown(trusted, Math.max(1, geo.pageRows >> 1));
 		const children: NativeChild[] = [
+			textNode([span("上面是等你批准的申请：核对双方指纹，一致再同意。下面是双方都已批准、可以直接发消息的节点。", "dim")], { wrap: "word" }),
 			node(
 				"section",
-				{ head: [span("可达联系人", "dim")] },
-				contacts.length === 0
-					? [textNode([span("还没有可达联系人。", "muted")], { wrap: "word" })]
-					: contacts.map(contact => {
-							const trust = this.snapshot?.trust?.find(entry => entry.node_id === contact.node_id);
-							return node(
-								"card",
-								{
-									role: "omp.btn",
-									head: [
-										span("● ", trust === undefined ? "muted" : STATE_TONE[trust.state]),
-										span(shortNodeId(contact.node_id), "strong"),
-										span(` · ${regionLabel(contact.region)}`, "dim"),
-										span(` · ${trust === undefined ? "无认证" : STATE_LABEL[trust.state]}`, trust === undefined ? "dim" : STATE_TONE[trust.state]),
+				{ head: [span(`待确认 · ${invites.length}`, invites.length === 0 ? "dim" : "strong")] },
+				invites.length === 0
+					? [textNode([span("没有等你确认的申请。", "muted")], { wrap: "word" })]
+					: [
+							...approvalList.rows.map(invite =>
+								node(
+									"card",
+									{ role: "onlyne.approval", tone: "warning", head: [span(`${shortNodeId(invite.node_id)} 请求与你交换密钥`, "strong")] },
+									[
+										node("kv", {
+											layout: "grid",
+											items: [
+												{ k: "对方指纹", v: invite.fingerprint },
+												{ k: "本机指纹", v: mine },
+												{ k: "端点", v: invite.base_url },
+											],
+										}),
+										node("row", { gap: "sm", align: "center" }, [
+											this.button("同意", `onlyne.accept:${invite.node_id}`, { tone: "accent", title: "双方指纹一致，批准这次交换" }),
+											this.button("拒绝", `onlyne.reject:${invite.node_id}`, { title: "不批准这次申请" }),
+										], "acts"),
 									],
-									actions: { click: `onlyne.member:${contact.node_id}` },
-									title: contact.node_id,
-								},
-								[
-									textNode([span(`${contact.base_url} · 最后可见 ${ageText(contact.last_seen) || "未知"}`, "dim")], { wrap: "word" }),
-									node("row", { gap: "sm", align: "center" }, [
-										this.button("用作发送目标", `onlyne.target:${contact.node_id}`),
-										...(trust === undefined || trust.state === "revoked"
-											? [this.button("请求交换密钥", `onlyne.request:${contact.node_id}`)]
-											: [this.button("撤销信任", `onlyne.revoke:${contact.node_id}`, { tone: "error" })]),
-									], "acts"),
-								],
-								`contact-${contact.node_id}`,
-							);
-						}, "contacts"),
+									`approval-${invite.node_id}`,
+								),
+							),
+							...(approvalList.more === 0 ? [] : [this.moreText(approvalList.more)]),
+						],
+				"approvals",
+			),
+			node(
+				"section",
+				{ head: [span(`已认证 · ${trusted.length}`, "dim")] },
+				trusted.length === 0
+					? [textNode([span("还没有已认证的联系人。到「发现」页找到对方，请求交换密钥。", "muted")], { wrap: "word" })]
+					: [
+							...contactList.rows.map(contact =>
+								node(
+									"card",
+									{
+										role: "omp.btn",
+										head: [
+											span("● ", "success"),
+											span(shortNodeId(contact.node_id), "strong"),
+											span(` · ${regionLabel(contact.region)}`, "dim"),
+											span(" · 已认证", "success"),
+										],
+										actions: { click: `onlyne.member:${contact.node_id}` },
+										title: contact.node_id,
+									},
+									[
+										textNode([span(`${contact.base_url} · 最后可见 ${ageText(contact.last_seen) || "未知"}`, "dim")], { wrap: "word" }),
+										node("row", { gap: "sm", align: "center" }, [
+											this.button("用作发送目标", `onlyne.target:${contact.node_id}`),
+											this.button("撤销信任", `onlyne.revoke:${contact.node_id}`, { tone: "error" }),
+										], "acts"),
+									],
+									`contact-${contact.node_id}`,
+								),
+							),
+							...(contactList.more === 0 ? [] : [this.moreText(contactList.more)]),
+						],
+				"trusted",
 			),
 		];
-		return [node("col", { gap: "sm", grow: 1 }, children, "contacts")];
+		return [node("col", { gap: "sm", max: { h: linesOf(geo.body) } }, children, "contacts")];
 	}
 
 	describe(cx: DescribeContext): NativeNode {
-		const key = `${this.version}:${cx.cols}:${this.page}`;
+		const geo = this.geometry();
+		const key = `${this.version}:${cx.cols}:${this.rows()}:${this.page}`;
 		if (this.described !== undefined && this.describedKey === key) return this.described;
-		// The flow takes the middle column's width: the viewer minus rail, thread and member columns and their gaps.
-		const flowWidth = Math.max(30, cx.cols - 34);
+		// Column widths are constraints, never arithmetic on the terminal: the flow takes what the rest leaves.
+		const row = { gap: "md", align: "stretch", grow: 1, max: { h: linesOf(geo.body) } } as const;
 		const body: NativeChild[] =
 			this.page === "chat"
-				? [node("row", { gap: "md", align: "stretch", grow: 1 }, [this.threadColumn(), this.flowNode(flowWidth), this.memberColumn()], "columns")]
+				? [node("row", row, [this.threadColumn(), this.flowNode(), this.memberColumn()], "columns")]
 				: [
 						node(
 							"row",
-							{ gap: "md", align: "stretch", grow: 1 },
+							row,
 							[
 								this.railNode(),
-								node("col", { gap: "sm", grow: 1 }, [
+								node("col", { gap: "sm", grow: 1, min: { w: 0 } }, [
 									...(this.page === "queue" ? this.queuePage() : this.page === "discovery" ? this.discoveryPage() : this.contactsPage()),
 								], "page"),
 							],
@@ -764,7 +907,7 @@ export class OnlyneViewer implements Component {
 		}
 		if (this.loading) children.push(node("spinner", { label: [span("读取 Onlyne 状态…", "muted")] }, undefined, "loading"));
 		children.push(...body);
-		this.described = node("card", { role: "onlyne.viewer", grow: 1 }, children, "root");
+		this.described = node("card", { role: "onlyne.viewer" }, children, "root");
 		this.describedKey = key;
 		return this.described;
 	}
@@ -851,22 +994,13 @@ export class OnlyneViewer implements Component {
 			}
 			return;
 		}
-		if (act.startsWith("onlyne.invite:")) {
-			const id = act.slice("onlyne.invite:".length);
-			if (!this.invites().some(invite => invite.node_id === id)) return;
-			this.pendingConfirm = this.pendingConfirm === id ? undefined : id;
-			this.changed();
-			return;
-		}
 		if (act.startsWith("onlyne.accept:")) {
 			void this.accept(act.slice("onlyne.accept:".length));
 			return;
 		}
 		if (act.startsWith("onlyne.reject:")) {
-			const id = act.slice("onlyne.reject:".length);
-			if (this.pendingConfirm === id) this.pendingConfirm = undefined;
-			this.setNotice(`已收起 ${shortNodeId(id)} 的这次申请；对方再次申请时会重新出现。`);
-			return;
+			// The runtime's only refusal is a revocation, which leaves the peer able to ask again.
+			void this.revoke(act.slice("onlyne.reject:".length), "拒绝");
 		}
 		if (act.startsWith("onlyne.revoke:")) {
 			void this.revoke(act.slice("onlyne.revoke:".length));
@@ -913,7 +1047,6 @@ export class OnlyneViewer implements Component {
 		if (runtime === undefined || invite === undefined) return;
 		try {
 			await runtime.trustAccept(nodeId, invite.fingerprint);
-			this.pendingConfirm = undefined;
 			this.setNotice(`已批准 ${shortNodeId(nodeId)} 的密钥。`);
 		} catch (error) {
 			this.setNotice(`批准失败：${errorText(error)}`, true);
@@ -921,14 +1054,18 @@ export class OnlyneViewer implements Component {
 		await this.reload();
 	}
 
-	private async revoke(nodeId: string): Promise<void> {
+	private async revoke(nodeId: string, verb = "撤销"): Promise<void> {
 		const runtime = getRuntime();
 		if (runtime === undefined) return;
 		try {
 			await runtime.trustRevoke(nodeId);
-			this.setNotice(`已撤销 ${shortNodeId(nodeId)} 的信任。`);
+			this.setNotice(
+				verb === "拒绝"
+					? `已拒绝 ${shortNodeId(nodeId)} 的这次申请；对方再次申请时会重新出现。`
+					: `已撤销 ${shortNodeId(nodeId)} 的信任。`,
+			);
 		} catch (error) {
-			this.setNotice(`撤销失败：${errorText(error)}`, true);
+			this.setNotice(`${verb}失败：${errorText(error)}`, true);
 		}
 		await this.reload();
 	}
@@ -938,8 +1075,7 @@ export class OnlyneViewer implements Component {
 		const runtime = getRuntime();
 		if (runtime === undefined) return;
 		try {
-			const peer = await runtime.trustInspect(nodeId);
-			this.pendingConfirm = peer.node_id;
+			await runtime.trustInspect(nodeId);
 			this.setNotice(`已向 ${shortNodeId(nodeId)} 请求交换密钥；对方批准后这里会出现确认。`);
 		} catch (error) {
 			this.setNotice(`请求失败：${errorText(error)}`, true);
