@@ -1,21 +1,23 @@
+import type { MsgInput, SendOutcome } from "@onlyne/lib";
 import {
 	type Component,
 	type DescribeContext,
+	Editor,
+	type NativeChild,
 	type NativeNode,
-	type NativeScroll,
 	type NativeUiEvent,
 	type Theme,
 	type TspSpan,
+	getEditorTheme,
 	matchesKey,
 	node,
 	span,
 	text as textNode,
-	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import { shortNodeId } from "../config.ts";
 import { getRuntime } from "../runtime.ts";
-import type { QueueItem, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "../types.ts";
-import { ageText, clockText, fit, kindLabel, kindRank, oneLine, pad, shortAlias } from "./format.ts";
+import type { OnlyneStatus, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "../types.ts";
+import { ageText, clockText, fit, oneLine, shortAlias } from "./format.ts";
 
 type Page = "queue" | "chat" | "discovery" | "contacts";
 
@@ -26,125 +28,113 @@ const PAGES: readonly { id: Page; label: string }[] = [
 	{ id: "contacts", label: "联系人" },
 ];
 
-/** Only the keys that do something on the page in view; the rest stay out of the way. */
-function footerFor(page: Page, state: { confirming: boolean; checked: number; folded: boolean }): string {
-	if (state.confirming) return "y 同意交换 · n 取消 · Esc 关闭";
-	switch (page) {
-		case "queue":
-			return "j/k 移动 · 1-4 切页 · r 刷新 · Esc 关闭";
-		case "chat":
-			return state.folded
-				? "j/k 移动 · t 展开线程 · enter 详情 · 1-4 切页 · Esc 关闭"
-				: "j/k 移动 · t 收起线程 · enter 详情 · [/] 切线程 · 1-4 切页 · Esc 关闭";
-		case "discovery":
-			return state.checked > 0
-				? `已选 ${state.checked} · enter 发送申请 · space 取消 · x 撤销 · [/] 切域 · Esc 关闭`
-				: "space 勾选节点 · [/] 切域 · x 撤销 · r 刷新 · 1-4 切页 · Esc 关闭";
-		case "contacts":
-			return "j/k 移动 · space 处理邀请 · x 撤销信任 · 1-4 切页 · Esc 关闭";
-	}
-}
+const REGION_PREFIX = "urn:onlyne:region:";
 
-/**
- * A node's authentication state as a frame: red for a revoked peer, blue while an exchange is
- * in flight, green once both sides approved, and no frame when nothing is known yet.
- */
-function trustMark(trust: { state: "pending" | "trusted" | "revoked" } | undefined): { frame: string; label: string; tone: string } {
-	if (trust === undefined) return { frame: "  ", label: "", tone: "muted" };
-	if (trust.state === "trusted") return { frame: "▣ ", label: "已认证", tone: "success" };
-	if (trust.state === "pending") return { frame: "▢ ", label: "申请中", tone: "accent" };
-	return { frame: "▨ ", label: "已撤销", tone: "error" };
+/** A region URI is stored for stability; every label shows the short name the user typed. */
+function regionLabel(region: string | undefined): string {
+	if (region === undefined) return "未声明域";
+	if (!region.startsWith(REGION_PREFIX)) return region;
+	const name = region.slice(REGION_PREFIX.length);
+	try {
+		return decodeURIComponent(name);
+	} catch {
+		return name;
+	}
 }
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** One cell of a body row: the ANSI render uses the text, the native one the style token. */
-type Cell = readonly [text: string, style?: string];
-
-/**
- * One fixed-height body row. A row with `right` is drawn as two columns; the
- * single-column form fills the width.
- */
-interface BodyRow {
-	left: readonly Cell[];
-	right?: readonly Cell[];
-	leftWidth?: number;
-	act?: string;
-	leftAct?: string;
-	rightAct?: string;
-	selected?: boolean;
-	key?: string;
-	/** Card presentation: a head line plus a wrapping description, instead of one flat row. */
-	card?: { head: string; description: string; tone?: string };
+function plainAuthor(author: string): string {
+	const tail = author.split(":").pop();
+	return tail === undefined || tail === "" ? shortNodeId(author) : tail;
 }
 
-/** One aggregated domain of the discovery page: its label plus the node records in it. */
-interface DiscoveryGroup {
+type TrustState = "pending" | "trusted" | "revoked";
+
+const STATE_LABEL: Record<TrustState, string> = {
+	trusted: "已认证",
+	pending: "申请中",
+	revoked: "已撤销",
+};
+
+const STATE_TONE: Record<TrustState, string> = {
+	trusted: "success",
+	pending: "info",
+	revoked: "error",
+};
+
+interface Peer {
+	record: ViewerDiscovery;
+	trust?: { state: TrustState; fingerprint: string; local_approved: boolean; remote_approved: boolean };
+}
+
+/** One declared domain with the peers that claim it; `id` is undefined for peers that declare none. */
+interface DomainGroup {
 	id?: string;
 	label: string;
-	nodes: ViewerDiscovery[];
+	peers: Peer[];
 }
 
-/** A node whose key exchange waits for the y/n confirmation, fingerprint already verified. */
-interface PendingExchange {
+interface Invite {
 	node_id: string;
 	fingerprint: string;
-	domain?: string;
+	base_url: string;
 }
 
-/** RFC 0017 trust rows the runtime adds to the snapshot; kept local until the parent types it. */
-interface ViewerTrust {
-	node_id: string;
-	fingerprint: string;
-	state: "pending" | "trusted" | "revoked";
-	base_url?: string;
-}
-
-/** Read-only view of the current OMP process: queue, threads, discovery and contacts over a fixed body. */
+/**
+ * The Onlyne surface: a domain rail, the thread column with what waits for
+ * confirmation, the message flow with its composer, and the member column with
+ * the selected member's detail. Every operation is a click on a described node;
+ * `draftText` is the one way message text enters, because a native editor
+ * reports text through the pointer/keyboard edit events itself.
+ */
 export class OnlyneViewer implements Component {
 	private snapshot: ViewerSnapshot | undefined;
+	private status: OnlyneStatus | undefined;
 	private loading = true;
 	private error: string | undefined;
-	private page: Page = "queue";
-	private queueIndex = 0;
-	private threadIndex = 0;
-	private messageIndex = 0;
-	private domainIndex = 0;
-	private nodeIndex = 0;
-	private contactIndex = 0;
-	/** Node ids ticked for key exchange, this viewing session only. */
-	private checked = new Set<string>();
-	private pendingConfirm: PendingExchange | undefined;
-	private expanded = false;
-	/** Scroll request for the detail text box; bumped per scroll key, like raw-sse's stream page. */
-	private detailScroll: NativeScroll | undefined;
-	/** The chat page's thread column, folded away to give the messages the full width. */
-	private threadFolded = false;
+	private page: Page = "chat";
+	/** The domain the rail highlights; undefined follows this node's own region. */
+	private domainKey: string | undefined;
+	private threadAlias: string | undefined;
+	private memberKey: string | undefined;
+	private pendingConfirm: string | undefined;
+	/** The recipient the composer names, else the open thread's own peer. */
+	private target: string | undefined;
+	/** The composer's text, mirrored from the editor so a rebuild keeps it. */
+	private draft = "";
+	private composer: Editor | undefined;
+	private sending = false;
 	private notice: { text: string; error: boolean } | undefined;
 	private noticeTimer: Timer | undefined;
-	private ages = new Map<string, string>();
-	/** Scroll offsets, one per scrolling list. */
-	private offsets = new Map<string, number>();
+	private unsubscribe: (() => void) | undefined;
 	private described: NativeNode | undefined;
 	private describedKey: string | undefined;
 	private rendered: { key: string; lines: readonly string[] } | undefined;
-	private lastWidth = 100;
 	private version = 0;
 	private disposed = false;
 	private generation = 0;
 	focused = true;
 	readonly nativeOverlay = { role: "onlyne.viewer", size: "lg" as const, head: "Onlyne" };
 
+	/** The text the composer holds; a native `edit`/`undo` event updates it through `handleNativeEvent`. */
+	get draftText(): string {
+		return this.draft;
+	}
+
 	constructor(
 		private readonly theme: Theme,
 		private readonly requestRender: () => void,
 		private readonly done: () => void,
 		private readonly signal: AbortSignal,
-		private readonly rows: () => number = () => 24,
 	) {
 		void this.reload();
+		this.unsubscribe = getRuntime()?.onChange(() => {
+			if (this.disposed || this.signal.aborted) return;
+			void this.reload();
+		});
 	}
 
 	private changed(): void {
@@ -155,32 +145,26 @@ export class OnlyneViewer implements Component {
 		this.requestRender();
 	}
 
-	/** The body window, fixed by the terminal height so message content never changes the frame. */
-	private bodyHeight(): number {
-		return Math.max(6, Math.min(40, Math.floor(this.rows() * 0.8) - 4));
-	}
-
 	async reload(): Promise<void> {
 		if (this.disposed || this.signal.aborted) return;
 		const generation = ++this.generation;
-		this.loading = true;
-		this.error = undefined;
-		this.changed();
 		const runtime = getRuntime();
 		if (runtime === undefined) {
 			this.snapshot = undefined;
+			this.status = undefined;
 			this.loading = false;
-			this.error = "未配置 Onlyne。先运行 /onlyne settings 填写项目配置。";
+			this.error = "未配置 Onlyne。先运行 /onlyne init 填写项目配置。";
 			this.changed();
 			return;
 		}
+		this.loading = this.snapshot === undefined;
 		try {
-			const snapshot = await runtime.snapshot();
+			const [snapshot, status] = await Promise.all([runtime.snapshot(), runtime.status()]);
 			if (this.disposed || this.signal.aborted || generation !== this.generation) return;
 			this.snapshot = snapshot;
-			const now = Date.now();
-			this.ages = new Map(snapshot.queue.map((item) => [item.id, ageText(item.at, now)]));
-			this.clampSelection();
+			this.status = status;
+			if (this.domainKey === undefined) this.domainKey = snapshot.region;
+			this.error = undefined;
 		} catch (error) {
 			if (this.signal.aborted || generation !== this.generation) return;
 			this.error = errorText(error);
@@ -192,26 +176,18 @@ export class OnlyneViewer implements Component {
 		}
 	}
 
-	private clampSelection(): void {
-		this.queueIndex = Math.min(this.queueIndex, Math.max(0, this.queueItems().length - 1));
-		const threads = this.threads();
-		this.threadIndex = Math.min(this.threadIndex, Math.max(0, threads.length - 1));
-		this.messageIndex = Math.min(this.messageIndex, Math.max(0, (threads[this.threadIndex]?.messages.length ?? 0) - 1));
-		const domains = this.discoveryDomains();
-		this.domainIndex = Math.min(this.domainIndex, Math.max(0, domains.length - 1));
-		this.nodeIndex = Math.min(this.nodeIndex, Math.max(0, (domains[this.domainIndex]?.nodes.length ?? 0) - 1));
-		this.contactIndex = Math.min(this.contactIndex, Math.max(0, this.contactSources().length - 1));
+	private setNotice(text: string, error = false): void {
+		this.notice = { text, error };
+		clearTimeout(this.noticeTimer);
+		this.noticeTimer = setTimeout(() => {
+			this.noticeTimer = undefined;
+			this.notice = undefined;
+			this.changed();
+		}, 8000);
+		this.changed();
 	}
 
-	private queueItems(): QueueItem[] {
-		const items = this.snapshot?.queue ?? [];
-		return [...items].sort((left, right) => {
-			const byKind = kindRank(left.kind) - kindRank(right.kind);
-			if (byKind !== 0) return byKind;
-			const byTime = (left.at ?? "").localeCompare(right.at ?? "");
-			return byTime !== 0 ? byTime : left.id.localeCompare(right.id);
-		});
-	}
+	// ── data ────────────────────────────────────────────────────────────────
 
 	private threads(): ViewerThread[] {
 		const threads = this.snapshot?.threads ?? [];
@@ -223,865 +199,591 @@ export class OnlyneViewer implements Component {
 	}
 
 	private selectedThread(): ViewerThread | undefined {
-		return this.threads()[this.threadIndex];
-	}
-
-	/**
-	 * Move the list's offset so `selected` stays visible, then return that
-	 * `height`-row window and where it starts.
-	 */
-	private window<T>(key: string, items: readonly T[], selected: number, height: number): { start: number; items: readonly T[] } {
-		const count = items.length;
-		if (count === 0 || height <= 0) return { start: 0, items: [] };
-		const maxStart = Math.max(0, count - height);
-		let start = Math.min(Math.max(0, this.offsets.get(key) ?? 0), maxStart);
-		if (selected < start) start = selected;
-		else if (selected >= start + height) start = selected - height + 1;
-		start = Math.min(Math.max(0, start), maxStart);
-		this.offsets.set(key, start);
-		return { start, items: items.slice(start, start + height) };
-	}
-
-	private pageCount(page: Page): number {
-		switch (page) {
-			case "queue":
-				return this.queueItems().length;
-			case "chat":
-				return this.selectedThread()?.messages.length ?? 0;
-			case "discovery":
-				return this.discoveryDomains()[this.domainIndex]?.nodes.length ?? 0;
-			case "contacts":
-				return this.contactSources().length;
-		}
-	}
-
-	private pageSelection(page: Page): number {
-		switch (page) {
-			case "queue":
-				return this.queueIndex;
-			case "chat":
-				return this.messageIndex;
-			case "discovery":
-				return this.nodeIndex;
-			case "contacts":
-				return this.contactIndex;
-		}
-	}
-
-	private setSelection(page: Page, index: number): void {
-		switch (page) {
-			case "queue":
-				this.queueIndex = index;
-				return;
-			case "chat":
-				this.messageIndex = index;
-				return;
-			case "discovery":
-				this.nodeIndex = index;
-				return;
-			case "contacts":
-				this.contactIndex = index;
-				return;
-		}
-	}
-
-	/** Rows of the list the page's selection moves in, used for the half-page step. */
-	private pageWindowHeight(page: Page): number {
-		const body = this.bodyHeight();
-		if (page === "discovery") return Math.max(1, body - 2);
-		if (page === "chat") return Math.max(1, this.chatLayout(this.lastWidth).messageHeight);
-		return body;
-	}
-
-	private summaryText(): string {
-		const index = PAGES.findIndex((page) => page.id === this.page) + 1;
 		const threads = this.threads();
-		const unread = threads.reduce((total, thread) => total + Math.max(0, thread.unread), 0);
-		const region = this.snapshot?.region === undefined || this.snapshot.region.length === 0 ? "" : `${this.snapshot.region} · `;
-		const discovery = this.snapshot?.discovery_error;
-		const alert = discovery === undefined ? "" : ` · ⚠ ${oneLine(discovery)}`;
-		return `${index}/4 · ${region}${threads.length} thread · ${unread} 未读 · ${this.snapshot?.contacts.length ?? 0} 可达${alert}`;
-	}
-
-	private titleLine(): string {
-		// The overlay sheet already draws `Onlyne` from `nativeOverlay.head`; a second
-		// copy here reads as a duplicated heading.
-		const title = "";
-		if (this.notice === undefined) return title;
-		const notice = this.notice.error ? this.theme.fg("error", this.notice.text) : this.theme.fg("accent", this.notice.text);
-		return `${title}  ${notice}`;
-	}
-
-	private tabLine(width: number): string {
-		// Tabs own their row and fill it: an equal column each, the active one bold.
-		const slot = Math.max(1, Math.floor(width / PAGES.length));
-		return PAGES.map((page, index) => {
-			const label = `${index + 1} ${page.label}`;
-			const cell = pad(label, slot);
-			return page.id === this.page ? this.theme.bold(cell) : cell;
-		}).join("");
-	}
-
-	private messageHead(message: ViewerMessage): string {
-		const direction = message.direction === "in" ? "in" : "out";
-		const relation = message.relation === undefined ? "" : ` · ${message.relation}`;
-		return `[${message.seq}] ${direction} · ${message.author} · ${clockText(message.at)}${relation}`;
-	}
-
-	private queueRows(): BodyRow[] {
-		const items = this.queueItems();
-		if (items.length === 0) return [{ left: [["没有待处理消息。", "muted"]] }];
-		const { start, items: visible } = this.window("queue", items, this.queueIndex, this.bodyHeight());
-		return visible.map((item, offset) => {
-			const selected = start + offset === this.queueIndex;
-			const age = this.ages.get(item.id) ?? ageText(item.at);
-			const cells: Cell[] = [
-				[selected ? "> " : "  ", "muted"],
-				[`[${kindLabel(item.kind)}] `, "dim"],
-				[item.label, "strong"],
-			];
-			if (age !== "") cells.push([` · ${age}`, "muted"]);
-			const detail = oneLine(item.detail);
-			if (detail !== "") cells.push([` · ${detail}`, "muted"]);
-			return {
-				left: cells, selected, act: `onlyne.queue:${item.id}`, key: item.id,
-				card: { head: item.label, description: [kindLabel(item.kind), detail, age === "" ? "" : age].filter(part => part !== "").join(" · ") },
-			};
-		});
-	}
-
-	private threadRow(thread: ViewerThread, selected: boolean): BodyRow {
-		const unread = thread.unread > 0 ? ` · ${thread.unread} 未读` : "";
-		const closed = thread.state === "closed" ? " · 已关闭" : "";
-		const label = shortAlias(thread.alias);
-		return {
-			left: [
-				[selected ? "> " : "  ", "muted"],
-				[label, "strong"],
-				[` · ${thread.title}${unread}${closed}`, "muted"],
-			],
-			selected,
-			act: `onlyne.thread:${thread.alias}`,
-			key: thread.alias,
-			card: { head: `${label} · ${thread.title}`, description: [unread.replace(" · ", ""), closed.replace(" · ", "")].filter(part => part !== "").join(" · ") },
-		};
-	}
-
-	private messageRow(message: ViewerMessage, selected: boolean): BodyRow {
-		const marker = message.direction === "out" ? "→" : "←";
-		const author = message.author.split(":").pop() ?? message.author;
-		const relation = message.relation === undefined ? "" : ` · ${message.relation}`;
-		// A message rebuilt from an outbound receipt has no send time stored beside it.
-		const at = clockText(message.at);
-		const head = `${at === "" ? author : `${at} · ${author}`}${relation}`;
-		return {
-			left: [[marker, message.direction === "out" ? "accent" : "muted"]],
-			right: [
-				[head, "muted"],
-				[` · ${oneLine(message.text)}`, ""],
-			],
-			selected,
-			act: `onlyne.message:${message.seq}`,
-			key: message.seq,
-			card: {
-				head: `${marker} ${head}`,
-				description: oneLine(message.text),
-			},
-		};
-	}
-
-	/**
-	 * The chat page as two columns. The rows fallback pairs threads and messages line by
-	 * line, which a message card cannot survive: the card is a head over a body line, so it
-	 * covers the row below it. Here each column stacks its own cards instead, and the thread
-	 * column is a `section` the terminal folds.
-	 */
-	private chatBody(cx: DescribeContext, layout: { threadHeight: number; messageHeight: number; threadWidth: number }): NativeNode | undefined {
-		const threads = this.threads();
-		if (threads.length === 0) return undefined;
-		const thread = threads[this.threadIndex] ?? threads[0]!;
-		const threadWindow = this.window("threads", threads, this.threadIndex, layout.threadHeight);
-		const threadCards = threadWindow.items.map((candidate, offset) => {
-			const row = this.threadRow(candidate, threadWindow.start + offset === this.threadIndex);
-			const card = row.card!;
-			return node(
-				"card",
-				{
-					...(row.selected === true ? {} : { variant: "bare" as const }),
-					selected: row.selected === true,
-					actions: { click: row.act! },
-					title: card.head,
-				},
-				[
-					textNode([span(card.head, "strong")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
-					...(card.description === ""
-						? []
-						: [textNode([span(card.description, "muted")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } })]),
-				],
-				candidate.alias,
-			);
-		});
-		// Each message card is a head line over a body line: two rows of the list.
-		const visible = Math.max(1, Math.floor(layout.messageHeight / 2));
-		const messageWindow = this.window("messages", thread.messages, this.messageIndex, visible);
-		const messageCards = messageWindow.items.map((message, offset) => {
-			const selected = messageWindow.start + offset === this.messageIndex;
-			const card = this.messageRow(message, selected).card!;
-			return node(
-				"card",
-				{
-					...(selected ? {} : { variant: "bare" as const }),
-					selected,
-					actions: { click: `onlyne.message:${message.seq}` },
-					title: card.head,
-				},
-				[
-					textNode([span(card.head, "muted")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
-					textNode([span(card.description)], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
-				],
-				message.seq,
-			);
-		});
-		// Folded, the section keeps its head so the same click brings the list back.
-		const columns: NativeNode[] = [
-			node(
-				"section",
-				{
-					head: `线程 · ${threads.length}`,
-					collapsible: true,
-					collapsed: this.threadFolded,
-					...(this.threadFolded
-						? {}
-						: {
-								max: { w: `${layout.threadWidth}ch` as const, h: `${layout.threadHeight}lines` as const },
-								shrink: 0,
-							}),
-				},
-				threadCards,
-				"threads",
-			),
-		];
-		columns.push(
-			node(
-				"col",
-				{
-					grow: 1,
-					shrink: 1,
-					basis: 0 as const,
-					max: { h: `${layout.messageHeight}lines` as const },
-				},
-				messageCards,
-				"messages",
-			),
-		);
-		// The rows fallback fills exactly bodyHeight rows; the columns hug their content,
-		// so the chat row carries the height the page owes the frame.
-		const chatHeight = Math.max(layout.threadHeight, layout.messageHeight);
-		return node(
-			"row",
-			{
-				gap: "sm",
-				align: "start",
-				role: "onlyne.chat",
-				min: { h: `${chatHeight}lines` as const },
-				max: { h: `${chatHeight}lines` as const },
-			},
-			columns,
-			"chat",
-		);
-	}
-
-	/**
-	 * The discovery page as two columns, mirroring the chat body: the domains are a
-	 * `section` on the left, the node checklist grows beside it. A node card is a
-	 * head line over its address, so a window of floor(height / 2) fits.
-	 */
-	private discoveryBody(layout: { threadWidth: number }): NativeNode | undefined {
-		const groups = this.discoveryDomains();
-		if (groups.length === 0) return undefined;
-		const body = this.bodyHeight();
-		const domainWindow = this.window("domains", groups, this.domainIndex, Math.max(1, Math.floor((body - 1) / 2)));
-		const domainCards = domainWindow.items.map((group, offset) => {
-			const index = domainWindow.start + offset;
-			const row = this.domainRow(group, index === this.domainIndex, index);
-			const card = row.card!;
-			return node(
-				"card",
-				{
-					...(row.selected === true ? {} : { variant: "bare" as const }),
-					selected: row.selected === true,
-					actions: { click: row.act! },
-					title: card.head,
-				},
-				[
-					textNode([span(card.head, "strong")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
-					textNode([span(card.description, "muted")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
-				],
-				group.id ?? "no-domain",
-			);
-		});
-		const refresh = node(
-			"card",
-			{ variant: "bare" as const, actions: { click: "onlyne.discovery.refresh" }, title: "刷新发现" },
-			[textNode([span("刷新发现", "strong")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } })],
-			"refresh",
-		);
-		const group = groups[this.domainIndex] ?? groups[0]!;
-		const nodes = group.nodes;
-		const nodeWindow = this.window("discovery-nodes", nodes, this.nodeIndex, Math.max(1, Math.floor(body / 2)));
-		const nodeCards = nodes.length === 0
-			? [textNode([span("该域没有发现节点。", "muted")])]
-			: nodeWindow.items.map((record, offset) => {
-					const index = nodeWindow.start + offset;
-					const row = this.discoveryNodeRow(record, index === this.nodeIndex, index);
-					const card = row.card!;
-					return node(
-						"card",
-						{
-							...(row.selected === true ? {} : { variant: "bare" as const }),
-							selected: row.selected === true,
-							actions: { click: row.act! },
-							title: card.head,
-						},
-						[
-							textNode([span(card.head, "strong")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
-							textNode([span(card.description, "muted")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
-						],
-						record.node_id,
-					);
-				});
-		return node(
-			"row",
-			{
-				gap: "sm",
-				align: "start",
-				role: "onlyne.discovery",
-				min: { h: `${body}lines` as const },
-				max: { h: `${body}lines` as const },
-			},
-			[
-				node(
-					"section",
-					{
-						head: `域 · ${groups.length}`,
-						max: { w: `${layout.threadWidth}ch` as const, h: `${body}lines` as const },
-						shrink: 0,
-					},
-					[refresh, ...domainCards],
-					"domains",
-				),
-				node(
-					"col",
-					{ grow: 1, shrink: 1, basis: 0 as const, max: { h: `${body}lines` as const } },
-					nodeCards,
-					"discovery-nodes",
-				),
-			],
-			"discovery",
-		);
-	}
-
-	/** The selected message as one ANSI block: a dim head, then the body with its escapes dropped. */
-	private detailText(): string | undefined {
-		const message = this.selectedThread()?.messages[this.messageIndex];
-		if (message === undefined) return undefined;
-		const body = message.text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-		return `${this.theme.fg("dim", this.messageHead(message))}\n${body}`;
-	}
-
-	/** The rows fallback for a terminal without the native surface: the head plus the body's first lines. */
-	private detailRows(count: number, columnWidth: number): BodyRow[] {
-		if (count <= 0) return [];
-		const message = this.selectedThread()?.messages[this.messageIndex];
-		if (message === undefined) return Array.from({ length: count }, () => ({ left: [] as Cell[] }));
-		const lines = wrapTextWithAnsi(message.text, Math.max(20, columnWidth - 2)).slice(0, Math.max(1, count - 1));
-		const rows: BodyRow[] = [{ left: [["↳ ", "muted"], [this.messageHead(message), "dim"]], key: "detail-head" }];
-		for (const line of lines) rows.push({ left: [[line]], key: `detail-body-${rows.length}` });
-		return rows.slice(0, count);
-	}
-
-	private chatLayout(width: number): { stacked: boolean; threadHeight: number; messageHeight: number; detailHeight: number; threadWidth: number } {
-		const body = this.bodyHeight();
-		const detail = this.expanded && (this.selectedThread()?.messages.length ?? 0) > 0 ? Math.max(4, Math.floor(body / 3)) : 0;
-		if (width >= 92) {
-			const detailHeight = Math.min(detail, Math.max(0, body - 1));
-			return {
-				stacked: false,
-				threadHeight: body,
-				messageHeight: Math.max(1, body - detailHeight),
-				detailHeight,
-				threadWidth: Math.max(18, Math.min(34, Math.floor(width * 0.3))),
-			};
+		const named = threads.find(thread => thread.alias === this.threadAlias);
+		if (named !== undefined) return named;
+		// A message card's peer target names the conversation it belongs to.
+		if (this.target !== undefined) {
+			const live = threads.find(thread => thread.messages.some(message => message.author === this.target));
+			if (live !== undefined) return live;
 		}
-		const threadHeight = Math.max(2, Math.min(6, Math.floor(body * 0.3)));
-		const area = Math.max(1, body - threadHeight - 2);
-		const detailHeight = Math.min(detail, Math.max(0, area - 1));
-		return { stacked: true, threadHeight, messageHeight: Math.max(1, area - detailHeight), detailHeight, threadWidth: width };
+		return threads[0];
 	}
 
-	private chatRows(width: number): BodyRow[] {
-		const threads = this.threads();
-		if (threads.length === 0) return [{ left: [["没有 thread。", "muted"]] }];
-		const layout = this.chatLayout(width);
-		const thread = threads[this.threadIndex] ?? threads[0]!;
-		const messages = thread.messages;
-		const threadWindow = this.window("threads", threads, this.threadIndex, layout.threadHeight);
-		const threadRows = threadWindow.items.map((candidate, offset) =>
-			this.threadRow(candidate, threadWindow.start + offset === this.threadIndex),
-		);
-		const messageWindow = this.window("messages", messages, this.messageIndex, layout.messageHeight);
-		const messageRows = messageWindow.items.map((message, offset) =>
-			this.messageRow(message, messageWindow.start + offset === this.messageIndex),
-		);
-		// The band lives in the message column, so it wraps to that column's width.
-		const detailRows = this.detailRows(layout.detailHeight, layout.stacked ? width : width - layout.threadWidth - 2);
-
-		if (layout.stacked || this.threadFolded) {
-			const rows: BodyRow[] = [{ left: [[`Threads · ${threads.length}`, "muted"]], key: "threads-head" }];
-			rows.push(...threadRows);
-			rows.push({ left: [[`Messages · ${shortAlias(thread.alias)} · ${thread.title}`, "muted"]], key: "messages-head" });
-			// One column here: the marker leads the message's own line instead of a column of its own.
-			rows.push(
-				...(messages.length === 0
-					? [{ left: [["没有消息。", "muted"]] } as BodyRow]
-					: messageRows.map(row => ({ ...row, left: [...row.left, ...(row.right ?? [])], right: undefined }))),
-			);
-			// The band belongs at the foot of the body, whatever the list length.
-			for (let pad = rows.length + detailRows.length; pad < this.bodyHeight(); pad++) rows.push({ left: [] });
-			rows.push(...detailRows);
-			return rows;
-		}
-
-		const height = this.bodyHeight();
-		const rightRows: BodyRow[] = messages.length === 0 ? [{ left: [["没有消息。", "muted"]] }] : [...messageRows];
-		// Pad before the band so it sits at the bottom of the body, above the footer.
-		for (let pad = rightRows.length + detailRows.length; pad < height; pad++) rightRows.push({ left: [] });
-		rightRows.push(...detailRows);
-		const rows: BodyRow[] = [];
-		for (let index = 0; index < height; index++) {
-			const left = threadRows[index];
-			const right = rightRows[index];
-			rows.push({
-				left: left?.left ?? [],
-				// A message row is marker + head + body; the column beside the threads takes
-				// all three, or the right side shows a direction arrow and nothing else.
-				right: [...(right?.left ?? []), ...(right?.right ?? [])],
-				leftWidth: layout.threadWidth,
-				leftAct: left?.act,
-				rightAct: right?.act,
-				selected: right?.selected === true,
-				card: right?.card,
-				key: `${left?.key ?? ""}/${right?.key ?? ""}`,
-			});
-		}
-		return rows;
-	}
-
-	/** Discovery records grouped by the domain they declare; records without one group last. */
-	private discoveryDomains(): DiscoveryGroup[] {
-		const groups = new Map<string, ViewerDiscovery[]>();
-		for (const record of this.snapshot?.discovery ?? []) {
-			const id = record.region ?? "";
-			const nodes = groups.get(id);
-			if (nodes === undefined) groups.set(id, [record]);
-			else nodes.push(record);
-		}
-		return [...groups.entries()]
-			.map(([id, nodes]) => ({
-				...(id === "" ? {} : { id }),
-				label: id === "" ? "未入域" : this.domainLabel(id),
-				nodes: [...nodes].sort((left, right) => left.node_id.localeCompare(right.node_id) || left.base_url.localeCompare(right.base_url)),
-			}))
-			.sort((left, right) => {
-				if ((left.id === undefined) !== (right.id === undefined)) return left.id === undefined ? 1 : -1;
-				return left.label.localeCompare(right.label);
-			});
-	}
-
-	/** The columns show the bare domain label; the full id stays in the snapshot. */
-	private domainLabel(id: string): string {
-		return id.startsWith("urn:onlyne:region:") ? id.slice("urn:onlyne:region:".length) : id;
-	}
-
-	private trustFor(nodeId: string): ViewerTrust | undefined {
-		return this.snapshot?.trust?.find(entry => entry.node_id === nodeId);
-	}
-
-	private domainRow(group: DiscoveryGroup, selected: boolean, index: number): BodyRow {
-		return {
-			left: [[group.label, "strong"], [` · ${group.nodes.length} 节点`, "muted"]],
-			selected,
-			act: `onlyne.domain:${index}`,
-			key: group.id ?? "no-domain",
-			card: { head: group.label, description: `${group.nodes.length} 节点` },
-		};
-	}
-
-	private discoveryNodeRow(record: ViewerDiscovery, selected: boolean, index: number): BodyRow {
-		const checked = this.checked.has(record.node_id);
-		const trust = this.trustFor(record.node_id);
-		const mark = trustMark(trust);
-		const cells: Cell[] = [
-			[mark.frame, mark.tone],
-			[checked ? " ✓" : "  ", checked ? "success" : "muted"],
-			[shortNodeId(record.node_id), "strong"],
-			[` · ${record.base_url}`, "path"],
-			[` · ${record.source}`, "muted"],
-		];
-		if (mark.label !== "") cells.push([` · ${mark.label}`, mark.tone]);
-		if (record.error !== undefined) cells.push([` · ⚠ ${oneLine(record.error)}`, "error"]);
-		const description = [record.base_url, record.source, mark.label, record.error === undefined ? "" : `⚠ ${oneLine(record.error)}`]
-			.filter(part => part !== "")
-			.join(" · ");
-		return {
-			left: cells,
-			selected,
-			act: `onlyne.node:${index}`,
-			key: `${record.node_id}/${record.base_url}`,
-			card: {
-				head: `${mark.frame} ${checked ? "✓ " : ""}${shortNodeId(record.node_id)}`,
-				description,
-				tone: mark.tone === "error" ? "error" : record.error === undefined ? undefined : "warning",
-			},
-		};
-	}
-
-	/** Exchanges the peer already approved and this node has not: the review queue. */
-	private inboundInvites(): Array<{ node_id: string; fingerprint: string; base_url: string }> {
+	/** Key requests the peer already approved: the ones waiting for this user. */
+	private invites(): Invite[] {
 		return (this.snapshot?.trust ?? [])
 			.filter(entry => entry.state === "pending" && entry.remote_approved && !entry.local_approved)
 			.map(entry => ({ node_id: entry.node_id, fingerprint: entry.fingerprint, base_url: entry.base_url }));
 	}
 
-	private inviteRows(): BodyRow[] {
-		const invites = this.inboundInvites();
-		if (invites.length === 0) return [];
-		const rows: BodyRow[] = [
-			{
-				left: [[`入站申请 ${invites.length}`, "warning"], [" · 对方已批准，等你确认（space 处理）", "muted"]],
-				key: "invites-head",
-			},
-		];
-		for (const invite of invites.slice(0, 3)) {
-			rows.push({
-				left: [
-					["▢ ", "accent"],
-					[shortNodeId(invite.node_id), "strong"],
-					[` · 指纹 ${invite.fingerprint}`, "muted"],
-				],
-				act: `onlyne.invite:${invite.node_id}`,
-				key: `invite-${invite.node_id}`,
+	/**
+	 * Peers grouped by the domain they declare. Expired records stay in the
+	 * list, flagged: this page is the one place a user can revoke or retry a
+	 * node whose observation aged out.
+	 */
+	private domainGroups(): DomainGroup[] {
+		const groups = new Map<string, DomainGroup>();
+		for (const record of this.snapshot?.discovery ?? []) {
+			if (record.node_id === this.status?.node_id) continue;
+			const key = record.region ?? "";
+			const group = groups.get(key) ?? { ...(record.region === undefined ? {} : { id: record.region }), label: regionLabel(record.region), peers: [] };
+			groups.set(key, group);
+			const trust = this.snapshot?.trust?.find(entry => entry.node_id === record.node_id);
+			group.peers.push({
+				record,
+				...(trust === undefined
+					? {}
+					: { trust: { state: trust.state, fingerprint: trust.fingerprint, local_approved: trust.local_approved, remote_approved: trust.remote_approved } }),
 			});
 		}
-		if (invites.length > 3) rows.push({ left: [[`… 还有 ${invites.length - 3} 条，见联系人页`, "muted"]], key: "invites-more" });
-		return rows;
+		const own = this.snapshot?.region;
+		for (const group of groups.values()) {
+			group.peers.sort((left, right) => left.record.node_id.localeCompare(right.record.node_id));
+		}
+		return [...groups.values()].sort((left, right) => {
+			if (left.id === own) return -1;
+			if (right.id === own) return 1;
+			return left.label.localeCompare(right.label);
+		});
 	}
 
-	private discoveryRows(): BodyRow[] {
-		const rows: BodyRow[] = [];
-		const invites = this.inviteRows();
-		if (invites.length > 0) rows.push(...invites, { left: [], key: "invites-gap" });
-		rows.push({
-			left: [
-				["刷新发现", "strong"],
-				[" · 重新验证可达节点", "muted"],
-			],
-			act: "onlyne.discovery.refresh",
-			key: "refresh",
-		});
-		const groups = this.discoveryDomains();
-		if (groups.length === 0) {
-			rows.push({ left: [["没有发现记录。", "muted"]] });
-			return rows;
+	private currentDomain(): DomainGroup | undefined {
+		const groups = this.domainGroups();
+		if (this.domainKey !== undefined) {
+			const picked = groups.find(group => group.id === this.domainKey);
+			if (picked !== undefined) return picked;
 		}
-		const group = groups[this.domainIndex] ?? groups[0]!;
-		rows.push({
-			left: [
-				[`域 ${this.domainIndex + 1}/${groups.length} · `, "muted"],
-				[group.label, "strong"],
-				[" · [ / ] 切换域", "muted"],
-			],
-			key: "domain-head",
-		});
-		if (group.nodes.length === 0) {
-			rows.push({ left: [["该域没有发现节点。", "muted"]] });
-			return rows;
-		}
-		const height = Math.max(1, this.bodyHeight() - 2);
-		const { start, items } = this.window("discovery-nodes", group.nodes, this.nodeIndex, height);
-		for (const [offset, record] of items.entries()) {
-			rows.push(this.discoveryNodeRow(record, start + offset === this.nodeIndex, start + offset));
-		}
-		return rows;
+		return groups.find(group => group.id === this.snapshot?.region) ?? groups[0];
 	}
 
-	/** Contacts plus every pending trust invite whose contact record is already gone. */
-	private contactSources(): { node_id: string; base_url?: string; region?: string; last_seen?: string }[] {
-		const contacts = this.snapshot?.contacts ?? [];
-		const seen = new Set(contacts.map(contact => contact.node_id));
-		const invites = (this.snapshot?.trust ?? []).filter(entry => entry.state === "pending" && !seen.has(entry.node_id));
+	private peers(): Peer[] {
+		return this.currentDomain()?.peers ?? [];
+	}
+
+	/** The thread's own peer: the author of its last inbound message, else its owner prefix. */
+	private threadPeer(thread: ViewerThread | undefined): string | undefined {
+		if (thread === undefined) return undefined;
+		const inbound = [...thread.messages].reverse().find(message => message.direction === "in");
+		return inbound?.author;
+	}
+
+	private sendBlocked(): string | undefined {
+		if (this.error !== undefined) return this.error;
+		if (this.draft.trim() === "") return "输入内容后发送";
+		if (this.target === undefined && this.threadPeer(this.selectedThread()) === undefined) {
+			return "先在线程栏选一位成员，或打开一个线程";
+		}
+		return undefined;
+	}
+
+	// ── recurring pieces ────────────────────────────────────────────────────
+
+	private button(label: string, act: string, options: { tone?: "accent" | "error"; title?: string } = {}): NativeNode {
+		return node(
+			"row",
+			{ role: "omp.btn", align: "center", actions: { click: act }, title: options.title ?? label, ...(options.tone === undefined ? {} : { tone: options.tone }) },
+			[textNode([span(label, options.tone === undefined ? undefined : options.tone === "error" ? "error" : "strong")])],
+			act,
+		);
+	}
+
+	/** Peer chrome shared by every list: the trust dot, the short id, its domain and state. */
+	private peerHead(peer: Peer): TspSpan[] {
+		const state = peer.trust?.state;
 		return [
-			...contacts.map(contact => ({
-				node_id: contact.node_id,
-				base_url: contact.base_url,
-				...(contact.region === undefined ? {} : { region: contact.region }),
-				last_seen: contact.last_seen,
-			})),
-			...invites.map(entry => ({ node_id: entry.node_id })),
+			span("● ", state === undefined ? "muted" : STATE_TONE[state]),
+			span(shortNodeId(peer.record.node_id), "strong"),
+			span(` · ${regionLabel(peer.record.region)}`, "dim"),
+			span(` · ${state === undefined ? "无认证" : STATE_LABEL[state]}`, state === undefined ? "dim" : STATE_TONE[state]),
 		];
 	}
 
-	private contactRows(): BodyRow[] {
-		const sources = this.contactSources();
-		if (sources.length === 0) return [{ left: [["没有可达联系人。", "muted"]] }];
-		const { start, items } = this.window("contacts", sources, this.contactIndex, this.bodyHeight());
-		return items.map((source, offset) => {
-			const index = start + offset;
-			const trust = this.trustFor(source.node_id);
-			const checked = this.checked.has(source.node_id);
-			const age = source.last_seen === undefined ? "" : ageText(source.last_seen);
-			const mark = trustMark(trust);
-			const cells: Cell[] = [[index === this.contactIndex ? "> " : "  ", "muted"], [mark.frame, mark.tone]];
-			if (trust?.state === "pending") cells.push([checked ? "[x] " : "[ ] ", checked ? "success" : "muted"]);
-			cells.push([shortNodeId(source.node_id), "strong"]);
-			if (source.region !== undefined) cells.push([` · ${this.domainLabel(source.region)}`, "muted"]);
-			if (source.base_url !== undefined) cells.push([` · ${source.base_url}`, "path"]);
-			if (age !== "") cells.push([` · ${age}`, "muted"]);
-			if (mark.label !== "") cells.push([` · ${mark.label}`, mark.tone]);
-			const description = [
-				source.region === undefined ? "" : this.domainLabel(source.region),
-				source.base_url ?? "",
-				age,
-				mark.label,
-			].filter(part => part !== "").join(" · ");
-			return {
-				left: cells,
-				selected: index === this.contactIndex,
-				act: `onlyne.contacts:${index}`,
-				key: `${source.node_id}/${source.base_url ?? ""}`,
-				card: { head: shortNodeId(source.node_id), description },
-			};
-		});
-	}
-
-	/** Exactly `bodyHeight()` rows, padded with blanks so the frame never resizes. */
-	private bodyRows(width: number): BodyRow[] {
-		const height = this.bodyHeight();
-		let rows: BodyRow[];
-		if (this.loading) rows = [{ left: [["加载中…", "muted"]] }];
-		else if (this.error !== undefined) rows = [{ left: [[this.error, "error"]] }];
-		else if (this.page === "queue") rows = this.queueRows();
-		else if (this.page === "chat") rows = this.chatRows(width);
-		else if (this.page === "discovery") rows = this.discoveryRows();
-		else rows = this.contactRows();
-		while (rows.length < height) rows.push({ left: [] });
-		rows.length = height;
-		return rows;
-	}
-
-	/** The hint line for the page and state in view. */
-	private footerText(): string {
-		return footerFor(this.page, { confirming: this.pendingConfirm !== undefined, checked: this.checked.size, folded: this.threadFolded });
-	}
-
-	private styleCells(cells: readonly Cell[], selected: boolean): string {
-		const text = cells.map((cell) => cell[0]).join("");
-		if (cells.some((cell) => cell[1] === "error")) return this.theme.fg("error", text);
-		return selected ? this.theme.bold(text) : text;
-	}
-
-	private renderRow(row: BodyRow, width: number): string {
-		if (row.right !== undefined) {
-			const leftWidth = Math.min(Math.max(1, row.leftWidth ?? 20), Math.max(1, width - 2));
-			const rightWidth = Math.max(1, width - leftWidth - 2);
-			return `${pad(this.styleCells(row.left, row.selected === true), leftWidth)}  ${fit(this.styleCells(row.right, false), rightWidth)}`;
+	private memberCard(peer: Peer, withActions: boolean): NativeNode {
+		const id = peer.record.node_id;
+		const state = peer.trust?.state;
+		const stale = Date.parse(peer.record.expires_at) <= Date.now();
+		const waiting = peer.trust?.state === "pending" && peer.trust.remote_approved && !peer.trust.local_approved;
+		const acts: NativeChild[] = [];
+		if (withActions) {
+			if (waiting) acts.push(this.button("待你确认", `onlyne.invite:${id}`, { tone: "accent", title: "查看并批准这次密钥申请" }));
+			else if (state !== "trusted") acts.push(this.button("请求交换密钥", `onlyne.request:${id}`, { title: "勾选并请求交换密钥" }));
+			if (state === "trusted" || state === "pending") acts.push(this.button("撤销信任", `onlyne.revoke:${id}`, { tone: "error" }));
 		}
-		return fit(this.styleCells(row.left, row.selected === true), width);
+		return node(
+			"card",
+			{
+				role: "omp.btn",
+				head: this.peerHead(peer),
+				title: `${id}\n点击查看详情`,
+				actions: { click: `onlyne.member:${id}` },
+				selected: this.memberKey === id,
+			},
+			[
+				textNode([span(peer.record.base_url, "dim"), span(` · 最后可见 ${ageText(peer.record.last_seen) || "未知"}`, "dim"), ...(stale ? [span(" · 记录已过期", "warning")] : []), ...(peer.record.error === undefined ? [] : [span(` · ${peer.record.error}`, "error")]),], { wrap: "word" }),
+				...(acts.length === 0 ? [] : [node("row", { gap: "sm", align: "center" }, acts, "acts")]),
+			],
+			`peer-${id}`,
+		);
 	}
 
-	private spans(cells: readonly Cell[]): TspSpan[] {
-		if (cells.length === 0) return [span(" ")];
-		return cells.map((cell) => span(cell[0], cell[1]));
-	}
+	// ── columns ─────────────────────────────────────────────────────────────
 
-	private titleNode(): NativeNode {
-		// No `Onlyne` copy: the sheet head carries it. This row holds the transient
-		// notice only, and is omitted entirely when there is none.
-		if (this.notice === undefined) return node("col", {}, [], "title");
+	/** The status strip: region, topology, live alerts and unread. Modules spread, never left-packed. */
+	private statusRow(): NativeNode {
+		const status = this.status;
+		const alerts = status?.alerts ?? this.invites().length;
+		const modules: Array<[string, string, string]> = [
+			["域", regionLabel(status?.region), "strong"],
+			["节点", status === undefined ? "…" : String(status.nodes), "strong"],
+			["邻居", status === undefined ? "…" : String(status.neighbors), "strong"],
+			["告警", String(alerts), alerts > 0 ? "strong warning" : "muted"],
+			["未读", String(status?.unread ?? 0), (status?.unread ?? 0) > 0 ? "strong info" : "muted"],
+		];
 		return node(
 			"row",
-			{ gap: "sm", align: "baseline" },
-			[textNode([span(this.notice.text, this.notice.error ? "error" : "accent")], { grow: 1, truncate: "end" })],
-			"title",
+			{ role: "onlyne.status", gap: "md", justify: "between", align: "center" },
+			modules.map(([label, value, tone], index) =>
+				node(
+					"col",
+					{ gap: "none", min: { w: "8ch" } },
+					[textNode([span(label, "dim")]), node("text", { spans: [span(value, tone)] })],
+					`status-${index}`,
+				),
+			),
+			"status",
 		);
 	}
 
-	/** The summary wraps under the title, so a long region URI never squeezes the tabs. */
-	private summaryNode(): NativeNode {
-		return node(
-			"col",
-			{},
-			[textNode([span(this.summaryText(), "muted")], { wrap: "word", truncate: "end" })],
-			"summary",
-		);
-	}
-
-	private tabsNode(): NativeNode {
-		const tabs = PAGES.map((page, index) =>
+	private railNode(): NativeNode {
+		const groups = this.domainGroups();
+		const current = this.currentDomain();
+		const waiting = this.invites().length;
+		const buttons: NativeChild[] = groups.map(group =>
 			node(
 				"row",
 				{
 					role: "omp.btn",
-					actions: { click: `onlyne.page.${page.id}` },
-					title: `${index + 1} ${page.label}`,
-					tone: page.id === this.page ? "accent" : undefined,
+					align: "center",
+					actions: { click: `onlyne.domain:${group.id ?? ""}` },
+					title: group.label,
+					tone: current?.id === group.id ? "accent" : undefined,
 				},
-				[textNode([span(`${index + 1} ${page.label}`, page.id === this.page ? "strong" : "muted")])],
-				`tab-${page.id}`,
+				[textNode([span(group.label.slice(0, 4), current?.id === group.id ? "strong" : "muted")], { truncate: "end" })],
+				`domain-${group.id ?? "none"}`,
 			),
 		);
-		// Each tab grows to an equal share, so the row is filled rather than left-packed.
-		const tabRow = node(
-			"row",
-			{ gap: "sm", align: "center" },
-			tabs.map((tab, index) => node("col", { key: `tab-wrap-${index}`, grow: 1 }, [tab], `tab-wrap-${index}`)),
-			"tabs",
+		if (waiting > 0) {
+			buttons.push(
+				node(
+					"row",
+					{ role: "omp.btn", align: "center", actions: { click: "onlyne.page.contacts" }, title: `${waiting} 个密钥申请等你确认` },
+					[node("badge", { text: String(waiting) }, undefined, "badge"), textNode([span("确认", "strong")])],
+					"waiting",
+				),
+			);
+		}
+		return node(
+			"col",
+			{ role: "onlyne.rail", gap: "xs", align: "stretch", min: { w: "10ch" } },
+			buttons.length === 0 ? [textNode([span("无域", "muted")])] : buttons,
+			"rail",
 		);
-		return tabRow;
 	}
 
-	private describeRow(row: BodyRow, index: number): NativeNode {
-		// Every selectable row is a bare card: `selected` only exists on `card`, and a
-		// `tone: accent` fills the row like a button. The terminal draws `selected: true`
-		// as a quiet background band instead.
-		const asCard = row.card ?? {
-			head: row.left.map(cell => cell[0]).join(""),
-			description: "",
-		};
-		const actions = row.act ?? row.leftAct;
-		if (row.right === undefined) {
+	/** The page strip: one click per page, spread across the width. */
+	private tabsNode(): NativeNode {
+		return node(
+			"tabs",
+			{ items: PAGES.map(page => ({ id: page.id, label: page.label })), active: this.page },
+			undefined,
+			"tabs",
+		);
+	}
+
+	/** The thread column: this node's header, the domain's peers, its threads, the inbox entry. */
+	private threadColumn(): NativeNode {
+		const domain = this.currentDomain();
+		const peers = this.peers();
+		const threads = this.threads();
+		const unread = threads.reduce((total, thread) => total + Math.max(0, thread.unread), 0);
+		const fingerprint = this.snapshot?.identity?.fingerprint;
+		return node(
+			"col",
+			{ role: "onlyne.threads", gap: "sm", min: { w: "24ch" }, max: { w: "38ch" } },
+			[
+				node(
+					"section",
+					{ head: [span(domain?.label ?? regionLabel(this.snapshot?.region), "strong")] },
+					[
+						textNode([span(shortNodeId(this.status?.node_id ?? ""), "strong")], { wrap: "word" }),
+						textNode([span(fingerprint ?? "无节点密钥", "dim")], { wrap: "word" }),
+					],
+					"identity",
+				),
+				node(
+					"section",
+					{ head: [span(`成员 · ${peers.length}`, "dim")] },
+					peers.length === 0
+						? [textNode([span("这个域还没有可达节点。到「发现」页看看候选。", "muted")], { wrap: "word" })]
+						: peers.map(peer => this.memberCard(peer, false)),
+					"members",
+				),
+				node(
+					"section",
+					{ head: [span(`线程 · ${threads.length}`, "dim")] },
+					threads.length === 0
+						? [textNode([span("还没有线程。", "muted")], { wrap: "word" })]
+						: threads.map(thread =>
+								node(
+									"card",
+									{
+										role: "omp.btn",
+										head: [
+											span(`# ${thread.title}`, "strong"),
+											...(thread.unread > 0 ? [span(` · ${thread.unread} 未读`, "info")] : []),
+											...(thread.state === "closed" ? [span(" · 已关闭", "dim")] : []),
+										],
+										title: `${thread.title} · ${shortAlias(thread.alias)}`,
+										actions: { click: `onlyne.thread:${thread.alias}` },
+										selected: this.selectedThread()?.alias === thread.alias,
+									},
+									[textNode([span(`${thread.messages.length} 条消息`, "dim")], { truncate: "end" })],
+									`thread-${thread.alias}`,
+								),
+							),
+					"list",
+				),
+				node(
+					"row",
+					{ role: "omp.btn", align: "center", gap: "sm", actions: { click: "onlyne.page.queue" }, title: "打开待处理队列" },
+					[textNode([span("✉ 收件箱", "muted")]), textNode([span(`${unread} 未读`, unread > 0 ? "info" : "dim")])],
+					"inbox",
+				),
+			],
+			"threads",
+		);
+	}
+
+	/** The banner over a flow: the peer's approval waits for this user. */
+	private requestCards(): NativeChild[] {
+		return this.invites().map(invite => {
+			const opened = this.pendingConfirm === invite.node_id;
 			return node(
 				"card",
 				{
-					...(row.selected === true ? {} : { variant: "bare" as const }),
-					selected: row.selected === true,
-					...(actions === undefined ? {} : { actions: { click: actions } }),
-					...(actions === undefined ? {} : { title: asCard.head }),
+					role: "onlyne.request",
+					tone: "warning",
+					head: [span(`${shortNodeId(invite.node_id)} 请求与你交换密钥`, "strong")],
+					...(opened ? {} : { actions: { click: `onlyne.invite:${invite.node_id}` }, title: "展开确认" }),
 				},
 				[
-					// One head row plus one clamped description row keeps the frame at bodyHeight;
-					// the ANSI row already carries the same text as a single line.
-					textNode([span(asCard.head, "strong")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
-					...(asCard.description === "" ? [] : [textNode([span(asCard.description, "muted")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } })]),
+					textNode([span("指纹 ", "dim"), span(invite.fingerprint, "strong"), span(` · ${invite.base_url}`, "dim")], { wrap: "word" }),
+					...(opened
+						? [
+								node("row", { gap: "sm", align: "center" }, [
+									this.button("同意", `onlyne.accept:${invite.node_id}`, { tone: "accent", title: "批准这次密钥交换" }),
+									this.button("拒绝", `onlyne.reject:${invite.node_id}`, { title: "这次不批准" }),
+									this.button("收起", `onlyne.invite:${invite.node_id}`, { title: "收起确认" }),
+								], "acts"),
+							]
+						: [textNode([span("点开核对指纹，再决定批准。", "muted")], { wrap: "word" })]),
 				],
-				row.key ?? `row-${index}`,
+				`request-${invite.node_id}`,
 			);
-		}
-		// Two-column chat rows: each column is its own bare card so either side can show
-		// a selection band. The left column is capped at the width the ANSI layout gives
-		// it and the right one grows into the rest; without both bounds a long line widens
-		// its card past the sheet and the row pushes past the column beside it.
-		const leftBound = row.leftWidth === undefined ? {} : { max: { w: `${row.leftWidth}ch` as const } };
-		// A message keeps its head-over-body card on the right; the thread column beside it
-		// is a single line, and only the message carries the selection there.
-		const rightChildren =
-			row.card === undefined
-				? [textNode(this.spans(row.right ?? []), { wrap: "none", truncate: "end", grow: 1, shrink: 1, min: { w: 0 } })]
-				: [
-						textNode([span(row.card.head, "muted")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
-						...(row.card.description === ""
-							? []
-							: [textNode([span(row.card.description)], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } })]),
-					];
+		});
+	}
+
+	private messageCard(message: ViewerMessage, waiting: boolean, width: number): NativeNode {
+		const out = message.direction === "out";
 		return node(
-			"row",
-			{ gap: "sm", align: "start" },
-			[
-				node("card", {
-					variant: "bare",
-					shrink: 1,
-					...leftBound,
-					...(row.leftAct === undefined ? {} : { actions: { click: row.leftAct } }),
-				}, [textNode(this.spans(row.left), { wrap: "none", truncate: "end", shrink: 1, min: { w: 0 } })], `${row.key ?? index}/left`),
-				node("card", {
-					...(row.selected === true ? {} : { variant: "bare" as const }),
-					selected: row.selected === true,
-					grow: 1,
-					shrink: 1,
-					basis: 0 as const,
-					...(row.rightAct === undefined ? {} : { actions: { click: row.rightAct } }),
-				}, rightChildren, `${row.key ?? index}/right`),
-			],
-			row.key ?? `row-${index}`,
+			"card",
+			{
+				role: "omp.btn",
+				head: [
+					span(out ? "→ " : "← ", out ? "accent" : "dim"),
+					span(plainAuthor(message.author), "strong"),
+					span(` ${clockText(message.at) || "—"} `, "dim"),
+					span(out ? "已送达" : waiting ? "等你回复" : "已读", out ? "success" : waiting ? "info" : "success"),
+					...(message.relation === undefined ? [] : [span(` · ${message.relation}`, "dim")]),
+				],
+				title: `#${message.seq} · 点击以此为发送目标`,
+				actions: { click: `onlyne.message:${message.seq}` },
+				selected: this.target !== undefined && this.target === message.author,
+			},
+			[textNode(message.text, { wrap: "word" })],
+			`message-${message.seq}`,
 		);
 	}
 
-	private footerNode(): NativeNode {
+	/** The message flow: the head, the messages, then the composer. */
+	private flowNode(width: number): NativeNode {
+		const thread = this.selectedThread();
+		const invites = this.invites();
+		if (thread === undefined) {
+			return node(
+				"col",
+				{ role: "onlyne.flow", gap: "sm", grow: 1 },
+				[
+					...this.requestCards(),
+					textNode([span("从左边打开一个线程，或在「发现」页连接一位节点发起对话。", "muted")], { wrap: "word" }),
+					this.composerNode(),
+				],
+				"flow",
+			);
+		}
+		const messages = thread.messages;
+		const peer = this.threadPeer(thread);
+		const last = messages.at(-1);
 		return node(
-			"row",
-			{ gap: "sm", align: "center" },
+			"col",
+			{ role: "onlyne.flow", gap: "sm", grow: 1 },
 			[
-				textNode([span(this.footerText(), "muted")], { grow: 1, truncate: "end" }),
-				node("row", { role: "omp.btn", actions: { click: "onlyne.close" }, title: "关闭" }, [textNode("关闭")], "close"),
+				node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
+					node("col", { gap: "none", grow: 1 }, [
+						textNode([span(`# ${thread.title}`, "strong"), ...(thread.state === "closed" ? [span(" · 已关闭", "dim")] : [])], { wrap: "word" }),
+						textNode([span(`${messages.length} 条消息 · ${this.peers().length} 位成员${last === undefined ? "" : ` · 最近 ${ageText(last.at) || "未知"}前`}`, "dim"),], { wrap: "word" }),
+					]),
+					...(peer === undefined ? [] : [this.button("详情", `onlyne.member:${peer}`, { title: "这位对端的详情" })]),
+				], "thread-head"),
+				...this.requestCards(),
+				...(messages.length === 0
+					? [textNode([span("这个线程还没有消息。", "muted")], { wrap: "word" })]
+					: messages.map((message, index) => this.messageCard(message, index === messages.length - 1 && !invites.some(invite => invite.node_id === message.author), width))),
+				this.composerNode(),
 			],
-			"footer",
+			"flow",
 		);
+	}
+
+	private composerNode(): NativeNode {
+		const thread = this.selectedThread();
+		const target = this.target ?? this.threadPeer(thread);
+		const blocked = this.sendBlocked();
+		if (this.composer === undefined) {
+			const editor = new Editor(getEditorTheme());
+			editor.disableSubmit = true;
+			editor.setText(this.draft);
+			editor.setMaxHeight(6);
+			this.composer = editor;
+		}
+		this.composer.focused = this.focused;
+		return node(
+			"card",
+			{ role: "onlyne.composer", inset: true },
+			[
+				this.composer,
+				node("row", { gap: "md", align: "center", justify: "between" }, [
+					textNode([span( target === undefined ? "先选择收件人：线程栏里的一位成员，或一个线程" : `发送到 ${shortNodeId(target)}${thread === undefined ? "" : ` · 线程 ${thread.title}`}`, blocked === undefined ? "dim" : "warning", ),], { wrap: "word", grow: 1 }),
+					...(this.target === undefined ? [] : [this.button("改回线程对端", "onlyne.target:", { title: "清除手动指定的收件人" })]),
+					node(
+						"row",
+						{
+							role: "omp.btn",
+							align: "center",
+							actions: { click: "onlyne.send" },
+							tone: blocked === undefined ? "accent" : undefined,
+							title: blocked ?? "发送这条消息",
+						},
+						[textNode([span(this.sending ? "发送中…" : "发送", blocked === undefined ? "strong" : "muted")])],
+						"send",
+					),
+				], "row"),
+			],
+			"composer",
+		);
+	}
+
+	private memberColumn(): NativeNode {
+		const peers = this.peers();
+		const children: NativeChild[] = [
+			node(
+				"section",
+				{ head: [span(`成员 · ${peers.length}`, "dim")] },
+				peers.length === 0
+					? [textNode([span("这个域还没有可达节点。", "muted")], { wrap: "word" })]
+					: peers.map(peer => this.memberCard(peer, false)),
+				"roster",
+			),
+		];
+		const peer = peers.find(entry => entry.record.node_id === this.memberKey);
+		if (peer !== undefined) {
+			const state = peer.trust?.state;
+			const waiting = peer.trust?.state === "pending" && peer.trust.remote_approved && !peer.trust.local_approved;
+			children.push(
+				node(
+					"card",
+					{ role: "onlyne.member-detail", head: [span(shortNodeId(peer.record.node_id), "strong"), ...(state === undefined ? [] : [span(` · ${STATE_LABEL[state]}`, STATE_TONE[state])])] },
+					[
+						node("kv", {
+							layout: "grid",
+							items: [
+								{ k: "指纹", v: peer.trust?.fingerprint ?? "未交换" },
+								{ k: "域", v: regionLabel(peer.record.region) },
+								{ k: "状态", v: state === undefined ? "无认证" : STATE_LABEL[state] },
+								{ k: "端点", v: peer.record.base_url },
+								{ k: "最后可见", v: ageText(peer.record.last_seen) || "未知" },
+							],
+						}),
+						node("row", { gap: "sm", align: "center", wrap: true }, [
+							this.button("用作发送目标", `onlyne.target:${peer.record.node_id}`, { title: "把消息发给这位节点" }),
+							...(waiting ? [this.button("同意交换", `onlyne.accept:${peer.record.node_id}`, { tone: "accent" })] : []),
+							...(state === "trusted" || state === "pending" ? [this.button("撤销信任", `onlyne.revoke:${peer.record.node_id}`, { tone: "error" })] : []),
+						], "acts"),
+					],
+					"member-detail",
+				),
+			);
+		}
+		return node("col", { role: "onlyne.members", gap: "sm", min: { w: "22ch" }, max: { w: "32ch" } }, children, "members");
+	}
+
+	// ── pages ───────────────────────────────────────────────────────────────
+
+	private queuePage(): NativeNode[] {
+		const queue = this.snapshot?.queue ?? [];
+		const sections: NativeChild[] = [];
+		for (const [head, kind] of [["来信", "inbound"], ["出站", "outbound"], ["本地上下文", "context"], ["判定", "decision"]] as const) {
+			const rows = queue.filter(item => item.kind === kind);
+			sections.push(
+				node(
+					"section",
+					{ head: [span(`${head} · ${rows.length}`, "dim")] },
+					rows.length === 0
+						? [textNode([span("空。", "muted")])]
+						: rows.map(item =>
+								node(
+									"card",
+									{ role: "onlyne.queue-row", head: [span(item.label, "strong"), ...(item.at === undefined ? [] : [span(` · ${ageText(item.at)}前`, "dim")])] },
+									[textNode(item.detail, { wrap: "word" })],
+									item.id,
+								),
+							),
+					head,
+				),
+			);
+		}
+		return [node("col", { gap: "sm", grow: 1 }, sections, "queue")];
+	}
+
+	private discoveryPage(): NativeNode[] {
+		const groups = this.domainGroups();
+		const children: NativeChild[] = [
+			node("row", { gap: "sm", align: "center", justify: "between" }, [
+				textNode([span("按域分组的可达候选。同一个域的节点在发现之后会自动请求交换密钥。", "dim")], { wrap: "word", grow: 1 }),
+				this.button("刷新发现", "onlyne.discovery.refresh", { title: "重新观察一轮发现" }),
+			]),
+		];
+		if (this.snapshot?.discovery_error !== undefined) {
+			children.push(node("text", { spans: [span(`发现失败：${this.snapshot.discovery_error}`, "error")], wrap: "word" }, undefined, "discovery-error"));
+		}
+		if (groups.length === 0) {
+			children.push(textNode([span("还没发现任何节点。确认对方已经启动，并和你在同一网络上。", "muted")], { wrap: "word" }));
+		}
+		for (const group of groups) {
+			children.push(
+				node(
+					"section",
+					{ head: [span(group.label, "strong"), span(` · ${group.peers.length} 节点`, "dim")] },
+					group.peers.map(peer => this.memberCard(peer, true)),
+					`domain-${group.id ?? "none"}`,
+				),
+			);
+		}
+		return [node("col", { gap: "sm", grow: 1 }, children, "discovery")];
+	}
+
+	private contactsPage(): NativeNode[] {
+		const contacts = this.snapshot?.contacts ?? [];
+		const children: NativeChild[] = [
+			node(
+				"section",
+				{ head: [span("可达联系人", "dim")] },
+				contacts.length === 0
+					? [textNode([span("还没有可达联系人。", "muted")], { wrap: "word" })]
+					: contacts.map(contact => {
+							const trust = this.snapshot?.trust?.find(entry => entry.node_id === contact.node_id);
+							return node(
+								"card",
+								{
+									role: "omp.btn",
+									head: [
+										span("● ", trust === undefined ? "muted" : STATE_TONE[trust.state]),
+										span(shortNodeId(contact.node_id), "strong"),
+										span(` · ${regionLabel(contact.region)}`, "dim"),
+										span(` · ${trust === undefined ? "无认证" : STATE_LABEL[trust.state]}`, trust === undefined ? "dim" : STATE_TONE[trust.state]),
+									],
+									actions: { click: `onlyne.member:${contact.node_id}` },
+									title: contact.node_id,
+								},
+								[
+									textNode([span(`${contact.base_url} · 最后可见 ${ageText(contact.last_seen) || "未知"}`, "dim")], { wrap: "word" }),
+									node("row", { gap: "sm", align: "center" }, [
+										this.button("用作发送目标", `onlyne.target:${contact.node_id}`),
+										...(trust === undefined || trust.state === "revoked"
+											? [this.button("请求交换密钥", `onlyne.request:${contact.node_id}`)]
+											: [this.button("撤销信任", `onlyne.revoke:${contact.node_id}`, { tone: "error" })]),
+									], "acts"),
+								],
+								`contact-${contact.node_id}`,
+							);
+						}, "contacts"),
+			),
+		];
+		return [node("col", { gap: "sm", grow: 1 }, children, "contacts")];
 	}
 
 	describe(cx: DescribeContext): NativeNode {
-		this.lastWidth = cx.cols;
-		const height = this.bodyHeight();
-		const key = `${this.version}:${cx.cols}:${height}`;
+		const key = `${this.version}:${cx.cols}:${this.page}`;
 		if (this.described !== undefined && this.describedKey === key) return this.described;
-		// The native surface takes the detail band as one `ansi` block: the terminal draws it
-		// as a mini terminal and scrolls it itself (the jobs sheet shows job output the same
-		// way), so the whole message stays reachable without the viewer windowing it.
-		const layout = this.chatLayout(cx.cols);
-		const chatPage = this.page === "chat";
-		const detail = chatPage && layout.detailHeight > 0 ? this.detailText() : undefined;
-		const chat = chatPage ? this.chatBody(cx, layout) : undefined;
-		// The discovery page takes the same two-column body; below the chat width it
-		// falls back to the single-column rows like every other page.
-		const discovery = this.page === "discovery" && !layout.stacked ? this.discoveryBody(layout) : undefined;
-		const body = chat ?? discovery;
-		const rows = body === undefined ? this.bodyRows(cx.cols).filter(row => detail === undefined || row.key?.includes("detail-") !== true) : [];
-		const children: NativeNode[] = [
-			this.titleNode(),
-			this.summaryNode(),
-			this.tabsNode(),
-			...(body === undefined
-				? rows.map((row, index) => this.describeRow(row, index))
-				: [body, node("col", { grow: 1 }, [], "page-spacer")]),
-			...(detail === undefined
-				? []
+		// The flow takes the middle column's width: the viewer minus rail, thread and member columns and their gaps.
+		const flowWidth = Math.max(30, cx.cols - 34);
+		const body: NativeChild[] =
+			this.page === "chat"
+				? [node("row", { gap: "md", align: "stretch", grow: 1 }, [this.threadColumn(), this.flowNode(flowWidth), this.memberColumn()], "columns")]
 				: [
-						{
-							...node(
-								"ansi",
-								{
-									text: detail,
-									cols: Math.max(20, (this.threadFolded ? cx.cols : cx.cols - layout.threadWidth) - 4),
-									max: { h: `${layout.detailHeight}lines` as const },
-									role: "onlyne.detail",
-								},
-								undefined,
-								"detail",
-							),
-							...(this.detailScroll === undefined ? {} : { scroll: this.detailScroll }),
-						},
-					]),
-			this.footerNode(),
-		];
-		this.described = node("card", { role: "onlyne.viewer" }, children);
+						node(
+							"row",
+							{ gap: "md", align: "stretch", grow: 1 },
+							[
+								this.railNode(),
+								node("col", { gap: "sm", grow: 1 }, [
+									...(this.page === "queue" ? this.queuePage() : this.page === "discovery" ? this.discoveryPage() : this.contactsPage()),
+								], "page"),
+							],
+							"columns",
+						),
+					];
+		const children: NativeChild[] = [this.statusRow(), this.tabsNode()];
+		if (this.notice !== undefined) {
+			children.push(node("text", { spans: [span(this.notice.text, this.notice.error ? "error" : "info")], wrap: "word" }, undefined, "notice"));
+		}
+		if (this.error !== undefined) {
+			children.push(node("text", { spans: [span(this.error, "error")], wrap: "word" }, undefined, "error"));
+			children.push(this.button("重新读取", "onlyne.reload"));
+		}
+		if (this.loading) children.push(node("spinner", { label: [span("读取 Onlyne 状态…", "muted")] }, undefined, "loading"));
+		children.push(...body);
+		this.described = node("card", { role: "onlyne.viewer", grow: 1 }, children, "root");
 		this.describedKey = key;
 		return this.described;
 	}
 
+	// ── events ──────────────────────────────────────────────────────────────
+
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.disposed || this.signal.aborted) return;
-		if (event.type === "toggle") {
-			if (event.key === "threads" || event.key.endsWith("/threads")) {
-				this.threadFolded = event.collapsed;
+		if (event.type === "edit" || event.type === "undo") {
+			this.composer?.handleNativeEvent(event);
+			this.draft = this.composer?.getExpandedText() ?? this.draft;
+			this.described = undefined;
+			this.requestRender();
+			return;
+		}
+		if ((event.type === "select" || event.type === "activate") && event.key === "tabs") {
+			const page = PAGES.find(entry => entry.id === event.item);
+			if (page !== undefined && page.id !== this.page) {
+				this.page = page.id;
 				this.changed();
 			}
 			return;
@@ -1092,464 +794,257 @@ export class OnlyneViewer implements Component {
 			this.done();
 			return;
 		}
-		if (act.startsWith("onlyne.page.")) {
-			const id = act.slice("onlyne.page.".length) as Page;
-			if (PAGES.some((page) => page.id === id)) this.switchPage(id);
+		if (act === "onlyne.reload") {
+			void this.reload();
+			return;
+		}
+		if (act === "onlyne.send") {
+			void this.send();
 			return;
 		}
 		if (act === "onlyne.discovery.refresh") {
 			void this.refreshDiscovery();
 			return;
 		}
-		if (act.startsWith("onlyne.domain:")) {
-			const index = Number(act.slice("onlyne.domain:".length));
-			if (!Number.isInteger(index) || index < 0) return;
-			this.domainIndex = Math.min(index, Math.max(0, this.discoveryDomains().length - 1));
-			this.nodeIndex = 0;
-			this.offsets.delete("discovery-nodes");
-			this.changed();
-			return;
-		}
-		if (act.startsWith("onlyne.invite:")) {
-			const node = act.slice("onlyne.invite:".length);
-			const invite = this.inboundInvites().find(entry => entry.node_id === node);
-			if (invite !== undefined) {
-				this.pendingConfirm = { node_id: invite.node_id, fingerprint: invite.fingerprint };
-				this.notice = { text: this.confirmText(this.pendingConfirm), error: false };
+		if (act.startsWith("onlyne.page.")) {
+			const id = act.slice("onlyne.page.".length) as Page;
+			if (PAGES.some(page => page.id === id)) {
+				this.page = id;
 				this.changed();
 			}
 			return;
 		}
-		if (act.startsWith("onlyne.node:")) {
-			const index = Number(act.slice("onlyne.node:".length));
-			if (!Number.isInteger(index) || index < 0) return;
-			this.nodeIndex = Math.min(index, Math.max(0, this.pageCount("discovery") - 1));
-			this.toggleChecked();
-			return;
-		}
-		if (act.startsWith("onlyne.contacts:")) {
-			const index = Number(act.slice("onlyne.contacts:".length));
-			if (!Number.isInteger(index) || index < 0) return;
-			this.contactIndex = Math.min(index, Math.max(0, this.contactSources().length - 1));
+		if (act.startsWith("onlyne.domain:")) {
+			this.domainKey = act.slice("onlyne.domain:".length) || undefined;
+			this.memberKey = undefined;
 			this.changed();
 			return;
 		}
 		if (act.startsWith("onlyne.thread:")) {
 			const alias = act.slice("onlyne.thread:".length);
-			const index = this.threads().findIndex((thread) => thread.alias === alias);
-			if (index >= 0) {
-				this.threadIndex = index;
-				this.messageIndex = 0;
-				this.expanded = false;
-				this.offsets.delete("messages");
+			if (this.threads().some(thread => thread.alias === alias)) {
+				this.threadAlias = alias;
+				this.target = undefined;
+				this.page = "chat";
 				this.changed();
 			}
 			return;
 		}
-		if (act.startsWith("onlyne.queue:")) {
-			const id = act.slice("onlyne.queue:".length);
-			const index = this.queueItems().findIndex((item) => item.id === id);
-			if (index >= 0) {
-				this.queueIndex = index;
-				this.changed();
-			}
+		if (act.startsWith("onlyne.member:")) {
+			const id = act.slice("onlyne.member:".length);
+			this.memberKey = this.memberKey === id ? undefined : id;
+			this.changed();
+			return;
+		}
+		if (act.startsWith("onlyne.target:")) {
+			const id = act.slice("onlyne.target:".length);
+			this.target = id === "" || this.target === id ? undefined : id;
+			this.changed();
 			return;
 		}
 		if (act.startsWith("onlyne.message:")) {
 			const seq = act.slice("onlyne.message:".length);
-			const messages = this.selectedThread()?.messages ?? [];
-			const index = messages.findIndex((message) => message.seq === seq);
-			if (index >= 0) {
-				if (this.messageIndex === index) this.expanded = !this.expanded;
-				else {
-					this.messageIndex = index;
-					this.expanded = true;
-				}
-				this.detailScroll = undefined;
+			const message = this.selectedThread()?.messages.find(entry => entry.seq === seq);
+			if (message !== undefined) {
+				this.target = message.author;
 				this.changed();
 			}
+			return;
+		}
+		if (act.startsWith("onlyne.invite:")) {
+			const id = act.slice("onlyne.invite:".length);
+			if (!this.invites().some(invite => invite.node_id === id)) return;
+			this.pendingConfirm = this.pendingConfirm === id ? undefined : id;
+			this.changed();
+			return;
+		}
+		if (act.startsWith("onlyne.accept:")) {
+			void this.accept(act.slice("onlyne.accept:".length));
+			return;
+		}
+		if (act.startsWith("onlyne.reject:")) {
+			const id = act.slice("onlyne.reject:".length);
+			if (this.pendingConfirm === id) this.pendingConfirm = undefined;
+			this.setNotice(`已收起 ${shortNodeId(id)} 的这次申请；对方再次申请时会重新出现。`);
+			return;
+		}
+		if (act.startsWith("onlyne.revoke:")) {
+			void this.revoke(act.slice("onlyne.revoke:".length));
+			return;
+		}
+		if (act.startsWith("onlyne.request:")) {
+			void this.request(act.slice("onlyne.request:".length));
 		}
 	}
 
+	/** Escape closes the overlay; every other key belongs to the composer, which the terminal drives by pointer. */
 	handleInput(data: string): void {
 		if (this.disposed || this.signal.aborted) return;
-		if (matchesKey(data, "escape") || matchesKey(data, "q")) {
+		if (matchesKey(data, "escape")) {
 			this.done();
 			return;
 		}
-		if (matchesKey(data, "shift+tab")) {
-			this.cyclePage(-1);
+		if (matchesKey(data, "ctrl+enter")) {
+			void this.send();
 			return;
 		}
-		if (matchesKey(data, "tab")) {
-			this.cyclePage(1);
-			return;
-		}
-		if (matchesKey(data, "r")) {
-			void this.reload();
-			return;
-		}
-		const pageIndex = PAGES.findIndex((_page, index) => data === String(index + 1));
-		if (pageIndex >= 0) {
-			this.switchPage(PAGES[pageIndex]!.id);
-			return;
-		}
-		if (this.page === "chat") this.handleChatKey(data);
-		else if (this.page === "discovery") this.handleDiscoveryKey(data);
-		else this.handleListKey(this.page, data);
-	}
-
-	private cyclePage(delta: number): void {
-		const index = PAGES.findIndex((page) => page.id === this.page);
-		this.switchPage(PAGES[(index + delta + PAGES.length) % PAGES.length]!.id);
-	}
-
-	/** Every page change funnels here so an open confirmation never leaks across pages. */
-	private switchPage(page: Page): void {
-		if (page !== "discovery" && page !== "contacts") this.cancelExchange();
-		this.page = page;
-		this.changed();
-	}
-
-	private moveIndex(data: string, selection: number, count: number, height: number): number | undefined {
-		const half = Math.max(1, Math.floor(height / 2));
-		if (matchesKey(data, "down") || matchesKey(data, "j")) return Math.min(count - 1, selection + 1);
-		if (matchesKey(data, "up") || matchesKey(data, "k")) return Math.max(0, selection - 1);
-		if (matchesKey(data, "ctrl+d")) return Math.min(count - 1, selection + half);
-		if (matchesKey(data, "ctrl+u")) return Math.max(0, selection - half);
-		if (data === "g") return 0;
-		if (data === "G") return count - 1;
-		return undefined;
-	}
-
-	private handleListKey(page: Page, data: string): void {
-		if ((page === "discovery" || page === "contacts") && this.handleConfirmKey(data)) return;
-		if ((page === "discovery" || page === "contacts") && data === "x") {
-			void this.revokeSelected();
-			return;
-		}
-		if (page === "discovery") {
-			if (matchesKey(data, "space")) {
-				this.toggleChecked();
-				return;
-			}
-			if (data === "[" || data === "]") {
-				this.cycleDomain(data === "[" ? -1 : 1);
-				return;
-			}
-		}
-		if (page === "contacts" && matchesKey(data, "space")) {
-			this.beginContactExchange();
-			return;
-		}
-		const count = this.pageCount(page);
-		if (count === 0) return;
-		const next = this.moveIndex(data, this.pageSelection(page), count, this.pageWindowHeight(page));
-		if (next === undefined) return;
-		this.setSelection(page, next);
-		this.changed();
-	}
-
-	/** y/n or enter resolves the open confirmation before any movement key is read. */
-	private handleConfirmKey(data: string): boolean {
-		if (this.pendingConfirm === undefined) return false;
-		if (data === "n") {
-			this.cancelExchange();
-			return true;
-		}
-		if (data === "y" || matchesKey(data, "enter")) {
-			void this.acceptExchange();
-			return true;
-		}
-		return false;
-	}
-
-	/** x on a trusted or pending row calls trustRevoke; the confirm bar's r keeps n purely local. */
-	private async revokeSelected(): Promise<void> {
-		const nodeId = this.page === "discovery"
-			? this.discoveryDomains()[this.domainIndex]?.nodes[this.nodeIndex]?.node_id
-			: this.contactSources()[this.contactIndex]?.node_id;
-		const runtime = getRuntime();
-		if (nodeId === undefined || runtime === undefined) return;
-		this.notice = { text: `正在撤销 ${shortNodeId(nodeId)} 的信任…`, error: false };
-		this.changed();
-		try {
-			await runtime.trustRevoke(nodeId);
-			this.notice = { text: `已撤销 ${shortNodeId(nodeId)} 的信任`, error: false };
-		} catch (error) {
-			this.notice = { text: `撤销失败：${errorText(error)}`, error: true };
-		}
-		await this.reload();
-		this.clearNoticeLater();
-	}
-
-	private handleChatKey(data: string): void {
-		const threads = this.threads();
-		if (threads.length === 0) return;
-		if (data === "[" || data === "]") {
-			const delta = data === "[" ? -1 : 1;
-			this.threadIndex = (this.threadIndex + delta + threads.length) % threads.length;
-			this.messageIndex = 0;
-			this.expanded = false;
-			this.detailScroll = undefined;
-			this.offsets.delete("messages");
-			this.changed();
-			return;
-		}
-		const messages = threads[this.threadIndex]?.messages ?? [];
-		if (data === "t") {
-			this.threadFolded = !this.threadFolded;
-			this.changed();
-			return;
-		}
-		if (matchesKey(data, "enter")) {
-			if (messages.length === 0) return;
-			this.expanded = !this.expanded;
-			this.detailScroll = undefined;
-			this.changed();
-			return;
-		}
-		// While the band is open the movement keys move through the message instead of the
-		// list: the band shows a window of the wrapped body and this is what shifts it.
-		if (this.expanded && messages.length > 0) {
-			const by = matchesKey(data, "up") || matchesKey(data, "k")
-				? "line-up" as const
-				: matchesKey(data, "down") || matchesKey(data, "j")
-					? "line-down" as const
-					: matchesKey(data, "pageUp")
-						? "page-up" as const
-						: matchesKey(data, "pageDown")
-							? "page-down" as const
-							: data === "g"
-								? "start" as const
-								: data === "G"
-									? "end" as const
-									: undefined;
-			if (by !== undefined) {
-				this.detailScroll = { by, n: (this.detailScroll?.n ?? 0) + 1 };
-				this.changed();
-				return;
-			}
-		}
-		this.handleListKey("chat", data);
-	}
-
-	private handleDiscoveryKey(data: string): void {
-		if (data === "[" || data === "]") {
-			this.cycleDomain(data === "[" ? -1 : 1);
-			return;
-		}
-		if (data === "r") {
-			void this.refreshDiscovery();
-			return;
-		}
-		if (matchesKey(data, "enter")) {
-			this.requestSelectedNode();
-			return;
-		}
-		if (matchesKey(data, "space")) {
-			this.toggleChecked();
-			return;
-		}
-		if (data === "x") {
-			void this.revokeSelected();
-			return;
-		}
-		this.handleListKey("discovery", data);
-	}
-
-	private cycleDomain(delta: number): void {
-		const count = this.discoveryDomains().length;
-		if (count === 0) return;
-		this.domainIndex = (this.domainIndex + delta + count) % count;
-		this.nodeIndex = 0;
-		this.offsets.delete("discovery-nodes");
-		this.changed();
-	}
-
-	/**
-	 * Enter on a discovery node: request the exchange for the row under the cursor. Space only
-	 * marks a row for a batch, so a single request never needs two keystrokes.
-	 */
-	private requestSelectedNode(): void {
-		const record = this.discoveryDomains()[this.domainIndex]?.nodes[this.nodeIndex];
-		if (record === undefined) return;
-		if (this.trustFor(record.node_id)?.state === "trusted") {
-			this.notice = { text: `${shortNodeId(record.node_id)} 已认证`, error: false };
-			this.changed();
-			this.clearNoticeLater();
-			return;
-		}
-		void this.beginExchange(record);
-	}
-
-	private toggleChecked(): void {
-		const record = this.discoveryDomains()[this.domainIndex]?.nodes[this.nodeIndex];
-		if (record === undefined) return;
-		if (this.checked.has(record.node_id)) {
-			this.checked.delete(record.node_id);
-			if (this.pendingConfirm?.node_id === record.node_id) this.pendingConfirm = undefined;
-			this.changed();
-			return;
-		}
-		void this.beginExchange(record);
-	}
-
-	/**
-	 * Space on a discovery node: tick it as local consent, verify the peer's key
-	 * (RFC 0017 §4 — the discovery record carries no key of its own), then ask for
-	 * the y/n confirmation with both fingerprints on screen.
-	 */
-	private async beginExchange(record: ViewerDiscovery): Promise<void> {
-		this.checked.add(record.node_id);
-		this.pendingConfirm = undefined;
-		this.changed();
-		const runtime = getRuntime();
-		if (runtime === undefined) {
-			this.checked.delete(record.node_id);
-			this.notice = { text: "未配置 Onlyne。", error: true };
-			this.changed();
-			return;
-		}
-		let fingerprint = this.trustFor(record.node_id)?.fingerprint;
-		if (fingerprint === undefined) {
-			this.notice = { text: `正在校验 ${shortNodeId(record.node_id)} 的公钥…`, error: false };
-			this.changed();
-			try {
-				const inspected = await runtime.trustInspect(record.node_id);
-				if (this.disposed || this.signal.aborted || !this.checked.has(record.node_id)) return;
-				fingerprint = inspected.fingerprint;
-			} catch (error) {
-				if (this.disposed || this.signal.aborted) return;
-				this.checked.delete(record.node_id);
-				this.notice = { text: `校验失败：${errorText(error)}`, error: true };
-				this.changed();
-				this.clearNoticeLater();
-				return;
-			}
-		}
-		const pending: PendingExchange = {
-			node_id: record.node_id,
-			fingerprint,
-			...(record.region === undefined ? {} : { domain: record.region }),
-		};
-		this.pendingConfirm = pending;
-		this.notice = { text: this.confirmText(pending), error: false };
-		this.changed();
-	}
-
-	/** Space on a contact with a pending exchange confirms it; the invite already carries the key. */
-	private beginContactExchange(): void {
-		const source = this.contactSources()[this.contactIndex];
-		if (source === undefined) return;
-		const trust = this.trustFor(source.node_id);
-		if (trust?.state !== "pending") return;
-		if (this.checked.has(source.node_id)) {
-			this.checked.delete(source.node_id);
-			if (this.pendingConfirm?.node_id === source.node_id) this.pendingConfirm = undefined;
-			this.changed();
-			return;
-		}
-		this.checked.add(source.node_id);
-		const pending: PendingExchange = {
-			node_id: source.node_id,
-			fingerprint: trust.fingerprint,
-			...(source.region === undefined ? {} : { domain: source.region }),
-		};
-		this.pendingConfirm = pending;
-		this.notice = { text: this.confirmText(pending), error: false };
-		this.changed();
-	}
-
-	private confirmText(pending: PendingExchange): string {
-		const own = this.snapshot?.identity?.fingerprint ?? "未配置";
-		const where = pending.domain === undefined
-			? `与 ${shortNodeId(pending.node_id)} 交换密钥`
-			: `该节点处于 ${this.domainLabel(pending.domain)} 域中`;
-		return `${where} · 对方指纹 ${pending.fingerprint} · 本机指纹 ${own} · 确认交换密钥 y/n`;
-	}
-
-	/** Local consent goes to the runtime; the peer still has to approve, so the row stays pending. */
-	private async acceptExchange(): Promise<void> {
-		const pending = this.pendingConfirm;
-		if (pending === undefined) return;
-		this.pendingConfirm = undefined;
-		const runtime = getRuntime();
-		if (runtime === undefined) {
-			this.notice = { text: "未配置 Onlyne。", error: true };
-			this.changed();
-			return;
-		}
-		this.notice = { text: `正在提交 ${shortNodeId(pending.node_id)} 的密钥交换…`, error: false };
-		this.changed();
-		try {
-			await runtime.trustAccept(pending.node_id, pending.fingerprint);
-			// A confirm bar opened while the round-trip ran keeps the headline.
-			if (this.pendingConfirm === undefined) {
-				this.notice = { text: `已同意交换，等待 ${shortNodeId(pending.node_id)} 确认`, error: false };
-				this.changed();
-			}
-		} catch (error) {
-			this.checked.delete(pending.node_id);
-			if (this.pendingConfirm === undefined) {
-				this.notice = { text: `交换失败：${errorText(error)}`, error: true };
-				this.changed();
-			}
-		}
-		await this.reload();
-		this.clearNoticeLater();
-	}
-
-	private cancelExchange(): void {
-		const pending = this.pendingConfirm;
-		if (pending === undefined) return;
-		this.pendingConfirm = undefined;
-		this.checked.delete(pending.node_id);
-		this.notice = undefined;
-		this.changed();
+		if (this.composer === undefined) return;
+		this.composer.handleInput(data);
+		this.draft = this.composer.getExpandedText();
+		this.described = undefined;
 	}
 
 	private async refreshDiscovery(): Promise<void> {
 		const runtime = getRuntime();
-		this.notice = { text: "刷新发现…", error: false };
-		this.changed();
-		if (runtime === undefined) {
-			this.notice = { text: "未配置 Onlyne。", error: true };
-			this.changed();
-			return;
-		}
+		if (runtime === undefined) return;
+		this.setNotice("正在刷新发现…");
 		try {
 			await runtime.refreshDiscovery();
-			this.notice = { text: "发现已刷新", error: false };
+			this.setNotice("发现已刷新。");
 		} catch (error) {
-			this.notice = { text: `刷新失败：${errorText(error)}`, error: true };
+			this.setNotice(`刷新失败：${errorText(error)}`, true);
 		}
 		await this.reload();
-		this.clearNoticeLater();
 	}
 
-	private clearNoticeLater(): void {
-		clearTimeout(this.noticeTimer);
-		this.noticeTimer = setTimeout(() => {
-			this.noticeTimer = undefined;
-			if (this.disposed || this.signal.aborted) return;
-			this.notice = undefined;
-			this.changed();
-		}, 5_000);
+	private async accept(nodeId: string): Promise<void> {
+		const runtime = getRuntime();
+		const invite = this.invites().find(entry => entry.node_id === nodeId);
+		if (runtime === undefined || invite === undefined) return;
+		try {
+			await runtime.trustAccept(nodeId, invite.fingerprint);
+			this.pendingConfirm = undefined;
+			this.setNotice(`已批准 ${shortNodeId(nodeId)} 的密钥。`);
+		} catch (error) {
+			this.setNotice(`批准失败：${errorText(error)}`, true);
+		}
+		await this.reload();
 	}
 
+	private async revoke(nodeId: string): Promise<void> {
+		const runtime = getRuntime();
+		if (runtime === undefined) return;
+		try {
+			await runtime.trustRevoke(nodeId);
+			this.setNotice(`已撤销 ${shortNodeId(nodeId)} 的信任。`);
+		} catch (error) {
+			this.setNotice(`撤销失败：${errorText(error)}`, true);
+		}
+		await this.reload();
+	}
+
+	/** Ask a peer for a key exchange; the domain's automatic pass does this on its own for same-domain nodes. */
+	private async request(nodeId: string): Promise<void> {
+		const runtime = getRuntime();
+		if (runtime === undefined) return;
+		try {
+			const peer = await runtime.trustInspect(nodeId);
+			this.pendingConfirm = peer.node_id;
+			this.setNotice(`已向 ${shortNodeId(nodeId)} 请求交换密钥；对方批准后这里会出现确认。`);
+		} catch (error) {
+			this.setNotice(`请求失败：${errorText(error)}`, true);
+		}
+		await this.reload();
+	}
+
+	/**
+	 * The composer sends down the one message path the tool uses: the node's own
+	 * client with this session as the consumption context, so a click and a `msg`
+	 * call leave the same records.
+	 */
+	private async send(): Promise<void> {
+		if (this.sending) return;
+		const runtime = getRuntime();
+		const blocked = this.sendBlocked();
+		if (blocked !== undefined) {
+			this.setNotice(blocked, true);
+			return;
+		}
+		if (runtime === undefined) return;
+		const thread = this.selectedThread();
+		const target = this.target ?? this.threadPeer(thread);
+		const meta: Record<string, string> = {};
+		if (target !== undefined) meta.to = target;
+		const input: MsgInput = {
+			delivery_kind: thread === undefined
+				? `给 ${shortNodeId(target ?? "")} 发一条消息`
+				: `在 ${thread.title} 里回一条消息`,
+			msg: this.draft.trim(),
+			...(Object.keys(meta).length === 0 ? {} : { meta }),
+		};
+		this.sending = true;
+		this.changed();
+		try {
+			const outcome = (await runtime.node.client.msg(input, { context: runtime.mainAgentId })) as SendOutcome;
+			this.setNotice(this.describeOutcome(outcome), outcome.admission === "refused" || outcome.error !== undefined);
+			if (outcome.admission === "accepted" || outcome.admission === "unknown") {
+				this.draft = "";
+				this.composer?.setText("");
+			}
+		} catch (error) {
+			this.setNotice(`发送失败：${errorText(error)}`, true);
+		} finally {
+			this.sending = false;
+			await this.reload();
+		}
+	}
+
+	private describeOutcome(outcome: SendOutcome): string {
+		if (outcome.admission === "refused") return `未送达：${outcome.error?.message ?? "对方拒绝"}`;
+		const reply = outcome.reply?.message.msg;
+		if (reply !== undefined) return `已送达，对方回了：${oneLine(reply) || "（空）"}`;
+		if (outcome.admission === "accepted") return "已送达。";
+		return "投递结果未知，会在重试窗口内继续。";
+	}
+
+	/** The ANSI fallback for a terminal without the native surface: a listing, no interaction. */
 	render(width: number): readonly string[] {
-		this.lastWidth = width;
 		const key = `${this.version}:${width}`;
 		if (this.rendered !== undefined && this.rendered.key === key) return this.rendered.lines;
-		// The ANSI path has no title row: a notice takes the summary's line so the
-		// confirmation bar stays visible and the frame keeps its height.
-		const header = this.notice === undefined ? this.summaryText() : this.notice.text;
-		const lines: string[] = [fit(header, width), fit(this.tabLine(width), width)];
-		for (const row of this.bodyRows(width)) lines.push(this.renderRow(row, width));
-		lines.push(fit(this.footerText(), width));
+		const status = this.status;
+		const lines: string[] = [
+			fit(
+				`Onlyne · ${regionLabel(status?.region)} · 节点 ${status?.nodes ?? "…"} · 邻居 ${status?.neighbors ?? "…"} · 告警 ${status?.alerts ?? 0} · 未读 ${status?.unread ?? 0}`,
+				width,
+			),
+			fit(PAGES.map(page => (page.id === this.page ? `[${page.label}]` : ` ${page.label} `)).join(" "), width),
+		];
+		if (this.error !== undefined) lines.push(this.theme.fg("error", fit(this.error, width)));
+		for (const line of this.ansiRows(width)) lines.push(line);
 		this.rendered = { key, lines };
 		return this.rendered.lines;
+	}
+
+	private ansiRows(width: number): string[] {
+		const lines: string[] = [];
+		const short = (text: string): string => fit(text, width);
+		if (this.page === "chat") {
+			const thread = this.selectedThread();
+			lines.push(short(`线程 ${this.threads().length} · ${thread === undefined ? "未选择" : thread.title}`));
+			for (const message of thread?.messages.slice(-12) ?? []) {
+				lines.push(short(`${message.direction === "out" ? "→" : "←"} [${message.seq}] ${plainAuthor(message.author)} ${clockText(message.at)}`));
+				for (const line of message.text.split("\n")) lines.push(short(`  ${line}`));
+			}
+			const blocked = this.sendBlocked();
+			lines.push(short(`传入：${oneLine(this.draft) || "（空）"}${blocked === undefined ? "" : ` · ${blocked}`}`));
+			return lines;
+		}
+		if (this.page === "queue") {
+			for (const item of this.snapshot?.queue ?? []) lines.push(short(`${item.kind} ${item.label} · ${oneLine(item.detail)}`));
+			return lines;
+		}
+		if (this.page === "discovery") {
+			for (const group of this.domainGroups()) {
+				lines.push(short(group.label));
+				for (const peer of group.peers) {
+					lines.push(short(`  ${shortNodeId(peer.record.node_id)} · ${peer.trust === undefined ? "无认证" : STATE_LABEL[peer.trust.state]} · ${peer.record.base_url}`));
+				}
+			}
+			return lines;
+		}
+		for (const contact of this.snapshot?.contacts ?? []) lines.push(short(`${shortNodeId(contact.node_id)} · ${regionLabel(contact.region)} · ${contact.base_url}`));
+		for (const invite of this.invites()) lines.push(short(`待确认 ${shortNodeId(invite.node_id)} · ${invite.fingerprint}`));
+		return lines;
 	}
 
 	invalidate(): void {
@@ -1563,6 +1058,9 @@ export class OnlyneViewer implements Component {
 		this.disposed = true;
 		clearTimeout(this.noticeTimer);
 		this.noticeTimer = undefined;
+		this.unsubscribe?.();
+		this.unsubscribe = undefined;
+		this.composer = undefined;
 		this.described = undefined;
 		this.rendered = undefined;
 	}
