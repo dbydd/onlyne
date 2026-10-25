@@ -136,7 +136,8 @@ export class OnlyneViewer implements Component {
 	private disposed = false;
 	private generation = 0;
 	focused = true;
-	readonly nativeOverlay = { role: "onlyne.viewer", size: "lg" as const, head: "Onlyne" };
+	// The four columns need the pane: a fixed `lg` sheet is about 68 cells and drops one of them.
+	readonly nativeOverlay = { role: "onlyne.viewer", size: "full" as const, head: "Onlyne" };
 
 	/** The text the composer holds; a native `edit`/`undo` event updates it through `handleNativeEvent`. */
 	get draftText(): string {
@@ -171,7 +172,9 @@ export class OnlyneViewer implements Component {
 	 */
 	private geometry(): Geometry {
 		const rows = Math.max(20, Math.floor(this.rows()));
-		const body = Math.max(8, rows - 12);
+		// Chrome (sheet title, borders, status, tabs, gaps) is about ten rows; leave slack so a
+		// smaller-than-estimated pane can never demand more rows than it has.
+		const body = Math.max(6, rows - 16);
 		return {
 			body,
 			messages: Math.max(1, Math.floor((body - 10) / 5)),
@@ -468,7 +471,8 @@ export class OnlyneViewer implements Component {
 			{
 				role: "onlyne.threads",
 				gap: "sm",
-				min: { w: "24ch" },
+				grow: 1,
+				min: { w: "24ch", h: linesOf(geo.body) },
 				max: { w: "38ch", h: linesOf(geo.body) },
 			},
 			[
@@ -584,7 +588,7 @@ export class OnlyneViewer implements Component {
 		if (thread === undefined) {
 			return node(
 				"col",
-				{ role: "onlyne.flow", gap: "sm", grow: 1, min: { w: 0 }, max: { h: linesOf(geo.body) } },
+				{ role: "onlyne.flow", gap: "sm", grow: 1, shrink: 1, min: { w: 0, h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } },
 				[
 					...this.approvalsCard(),
 					textNode([span("从左边打开一个线程，或在「发现」页连接一位节点发起对话。", "muted")], { wrap: "word", lines: 3 }),
@@ -601,7 +605,7 @@ export class OnlyneViewer implements Component {
 		const visible = messages.slice(-geo.messages);
 		return node(
 			"col",
-			{ role: "onlyne.flow", gap: "sm", grow: 1, min: { w: 0 }, max: { h: linesOf(geo.body) } },
+			{ role: "onlyne.flow", gap: "sm", grow: 1, shrink: 1, min: { w: 0, h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } },
 			[
 				node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
 					node("col", { gap: "none", grow: 1 }, [
@@ -722,7 +726,8 @@ export class OnlyneViewer implements Component {
 			{
 				role: "onlyne.members",
 				gap: "sm",
-				min: { w: "22ch" },
+				grow: 1,
+				min: { w: "22ch", h: linesOf(geo.body) },
 				max: { w: "32ch", h: linesOf(geo.body) },
 			},
 			children,
@@ -762,7 +767,7 @@ export class OnlyneViewer implements Component {
 				),
 			);
 		}
-		return [node("col", { gap: "sm", max: { h: linesOf(geo.body) } }, sections, "queue")];
+		return [node("col", { gap: "sm", grow: 1, min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } }, sections, "queue")];
 	}
 
 	private discoveryPage(): NativeNode[] {
@@ -795,7 +800,7 @@ export class OnlyneViewer implements Component {
 				),
 			);
 		}
-		return [node("col", { gap: "sm", max: { h: linesOf(geo.body) } }, children, "discovery")];
+		return [node("col", { gap: "sm", grow: 1, min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } }, children, "discovery")];
 	}
 
 	/**
@@ -878,7 +883,7 @@ export class OnlyneViewer implements Component {
 				"trusted",
 			),
 		];
-		return [node("col", { gap: "sm", max: { h: linesOf(geo.body) } }, children, "contacts")];
+		return [node("col", { gap: "sm", grow: 1, min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } }, children, "contacts")];
 	}
 
 	describe(cx: DescribeContext): NativeNode {
@@ -886,7 +891,7 @@ export class OnlyneViewer implements Component {
 		const key = `${this.version}:${cx.cols}:${this.rows()}:${this.page}`;
 		if (this.described !== undefined && this.describedKey === key) return this.described;
 		// Column widths are constraints, never arithmetic on the terminal: the flow takes what the rest leaves.
-		const row = { gap: "md", align: "stretch", grow: 1, max: { h: linesOf(geo.body) } } as const;
+		const row = { gap: "md", align: "stretch", grow: 1, shrink: 1, min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } } as const;
 		const body: NativeChild[] =
 			this.page === "chat"
 				? [node("row", row, [this.threadColumn(), this.flowNode(), this.memberColumn()], "columns")]
@@ -913,7 +918,7 @@ export class OnlyneViewer implements Component {
 		}
 		if (this.loading) children.push(node("spinner", { label: [span("读取 Onlyne 状态…", "muted")] }, undefined, "loading"));
 		children.push(...body);
-		this.described = node("card", { role: "onlyne.viewer" }, children, "root");
+		this.described = node("card", { role: "onlyne.viewer", grow: 1 }, children, "root");
 		this.describedKey = key;
 		return this.described;
 	}
@@ -929,7 +934,8 @@ export class OnlyneViewer implements Component {
 			this.requestRender();
 			return;
 		}
-		if ((event.type === "select" || event.type === "activate") && event.key === "tabs") {
+		// The keypath carries the component's ancestry (`root/tabs`), so match its leaf.
+		if ((event.type === "select" || event.type === "activate") && event.key.split("/").pop() === "tabs") {
 			const page = PAGES.find(entry => entry.id === event.item);
 			if (page !== undefined && page.id !== this.page) {
 				this.page = page.id;

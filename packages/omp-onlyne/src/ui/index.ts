@@ -120,8 +120,10 @@ export function registerUi(pi: ExtensionAPI): void {
 							),
 						{
 							overlay: true,
-							// Four columns: the domain rail, threads, the message flow and members.
-							overlayOptions: { anchor: "center", width: "92%", minWidth: 90, maxHeight: "90%" },
+							// Fullscreen is what turns on pointer reporting: a normal overlay never gets mouse
+							// events, so every click on a described node would go nowhere. The alt screen also
+							// gives the sheet the whole pane, which the four columns need.
+							overlayOptions: { anchor: "center", fullscreen: true },
 							signal: controller.signal,
 						},
 					);
