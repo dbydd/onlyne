@@ -337,8 +337,10 @@ export class OnlyneViewer implements Component {
 	private button(label: string, act: string, options: { tone?: "accent" | "error"; title?: string } = {}): NativeNode {
 		return node(
 			"row",
-			{ role: "omp.btn", align: "center", actions: { click: act }, title: options.title ?? label, ...(options.tone === undefined ? {} : { tone: options.tone }) },
-			[textNode([span(label, options.tone === undefined ? undefined : options.tone === "error" ? "error" : "strong")])],
+			// Tone stays on the glyph, never the row: `accent` is the terminal's button paint and
+			// reads as a selection highlight when spread over a whole row.
+			{ role: "omp.btn", align: "center", actions: { click: act }, title: options.title ?? label },
+			[textNode([span(label, options.tone === undefined ? undefined : options.tone === "error" ? "error" : "accent strong")])],
 			act,
 		);
 	}
@@ -420,11 +422,15 @@ export class OnlyneViewer implements Component {
 				{
 					role: "omp.btn",
 					align: "center",
+					gap: "xs",
 					actions: { click: `onlyne.domain:${group.id ?? ""}` },
-					title: group.label,
-					tone: current?.id === group.id ? "accent" : undefined,
+					title: `${group.label} · ${group.peers.length} 节点`,
 				},
-				[textNode([span(group.label.slice(0, 4), current?.id === group.id ? "strong" : "muted")], { truncate: "end" })],
+				[
+					// The accent tone paints a button; the current domain earns only a dot and weight.
+					textNode([span("●", current?.id === group.id ? "accent" : "dim")]),
+					textNode([span(group.label, current?.id === group.id ? "strong" : "muted")], { truncate: "end" }),
+				],
 				`domain-${group.id ?? "none"}`,
 			),
 		);
@@ -664,10 +670,9 @@ export class OnlyneViewer implements Component {
 							role: "omp.btn",
 							align: "center",
 							actions: { click: "onlyne.send" },
-							tone: blocked === undefined ? "accent" : undefined,
 							title: blocked ?? "发送这条消息",
 						},
-						[textNode([span(this.sending ? "发送中…" : "发送", blocked === undefined ? "strong" : "muted")])],
+						[textNode([span(this.sending ? "发送中…" : "发送", blocked === undefined ? "accent strong" : "muted")])],
 						"send",
 					),
 				], "row"),
