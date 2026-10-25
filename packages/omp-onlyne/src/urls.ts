@@ -59,6 +59,10 @@ const handler: ProtocolHandler = {
 		if (view.host === "inbox") {
 			return inboxLeaves(runtime, caller);
 		}
+		if (view.host === "neighbors" && view.parts.length === 0) {
+			const urls = (await neighborRows(runtime)).map(row => `onlyne://neighbors/${encodeURIComponent(row.node_id)}`);
+			return leafDocuments(runtime, caller, urls);
+		}
 		return leafDocuments(runtime, caller, [`onlyne://${view.host}${view.parts.length === 0 ? "" : `/${view.parts.map(encodeURIComponent).join("/")}`}`]);
 	},
 };
@@ -90,6 +94,13 @@ function viewOfHref(href: string): View {
 
 async function render(runtime: PluginRuntime, caller: Caller, view: View): Promise<Rendered> {
 	if (view.host === "threads") return renderThreads(runtime, caller, view.parts);
+	if (view.host === "neighbors") {
+		requireSession(caller, "neighbors");
+		if (view.parts.length > 0) {
+			return neighborView(runtime, caller, view.parts[0]!);
+		}
+		return { content: await renderNeighbors(runtime), contentType: "text/markdown" };
+	}
 	if (view.host === "contexts" || view.host === "inbox" || view.host === "outbound") {
 		requireSession(caller, view.host);
 		if (view.parts.length > 0 && view.host !== "outbound") {
@@ -144,7 +155,7 @@ async function renderRoot(runtime: PluginRuntime, caller: Caller): Promise<strin
 		lines.push(`- **${thread.title}** \`${thread.thread_ref.id}\` · ${thread.state} · next seq ${thread.next_seq}`);
 	}
 	if (threads.length === 0) lines.push("No threads.");
-	lines.push("", "Views: onlyne://threads, onlyne://inbox, onlyne://contexts, onlyne://outbound");
+	lines.push("", "Views: onlyne://neighbors, onlyne://threads, onlyne://inbox, onlyne://contexts, onlyne://outbound");
 	return `${lines.join("\n")}\n`;
 }
 
@@ -219,6 +230,62 @@ async function renderContexts(runtime: PluginRuntime, caller: Caller): Promise<s
 	return `${lines.join("\n")}\n`;
 }
 
+export interface NeighborRow {
+	node_id: string;
+	base_url: string;
+	region?: string;
+	last_seen?: string;
+	verified: boolean;
+	/** The trust table's state; undefined when no exchange has happened. */
+	trust?: "pending" | "trusted" | "revoked";
+	fingerprint?: string;
+}
+
+/** Every node this process has observed, with its trust state: the viewer and onlyne:// read this. */
+export async function neighborRows(runtime: PluginRuntime): Promise<NeighborRow[]> {
+	const records = await runtime.node.discovery.listRecords();
+	const trust = new Map((await runtime.node.trust.list(runtime.node.auth)).map(entry => [entry.node_id, entry]));
+	const at = Date.now();
+	const byNode = new Map<string, NeighborRow>();
+	for (const record of records) {
+		if (record.node_id === runtime.config.node.id) continue;
+		const verified = record.verified_at !== undefined && Date.parse(record.expires_at) > at;
+		const current = byNode.get(record.node_id);
+		if (current !== undefined && (current.verified || !verified)) continue;
+		byNode.set(record.node_id, {
+			node_id: record.node_id,
+			base_url: record.base_url,
+			...(record.membership?.domain_id === undefined ? {} : { region: record.membership.domain_id }),
+			...(record.last_seen === undefined ? {} : { last_seen: record.last_seen }),
+			verified,
+			...(trust.get(record.node_id)?.state === undefined ? {} : { trust: trust.get(record.node_id)!.state }),
+			...(trust.get(record.node_id)?.fingerprint === undefined ? {} : { fingerprint: trust.get(record.node_id)!.fingerprint }),
+		});
+	}
+	return [...byNode.values()].sort((left, right) => left.node_id.localeCompare(right.node_id));
+}
+
+async function renderNeighbors(runtime: PluginRuntime): Promise<string> {
+	const rows = await neighborRows(runtime);
+	const lines = [`# Neighbors · ${runtime.config.node.id}`, ""];
+	for (const row of rows) {
+		const trust = row.trust === undefined ? "no exchange" : row.trust;
+		const region = row.region === undefined ? "no region" : row.region;
+		const seen = row.last_seen === undefined ? "" : ` · last seen ${row.last_seen}`;
+		const fp = row.fingerprint === undefined ? "" : ` · fp ${row.fingerprint}`;
+		lines.push(`- ${row.node_id} · ${region} · ${row.verified ? "verified" : "unverified"} · handshake: ${trust}${seen}${fp}`);
+	}
+	if (rows.length === 0) lines.push("No neighbor nodes have been observed.");
+	return `${lines.join("\n")}\n`;
+}
+
+async function neighborView(runtime: PluginRuntime, caller: Caller, node: string): Promise<Rendered> {
+	const rows = await neighborRows(runtime);
+	const row = rows.find(entry => entry.node_id === node);
+	if (row === undefined) throw new Error(`No neighbor is named ${node}.`);
+	return { content: `${JSON.stringify(row, null, 2)}\n`, contentType: "application/json" };
+}
+
 async function inboxItems(runtime: PluginRuntime): Promise<LocalAttention[]> {
 	return collect(cursor => runtime.node.messages.inbox(runtime.node.auth, { page_size: PAGE, ...(cursor === undefined ? {} : { cursor }) }));
 }
@@ -253,7 +320,43 @@ async function renderOutbound(runtime: PluginRuntime, caller: Caller, parts: str
 	if (parts.length !== 1) throw new Error("onlyne://outbound/<message-id> has no further routes.");
 	const found = rows.find(row => row.request.message.id === parts[0]);
 	if (found === undefined) throw new Error(`No outbound record is named ${parts[0]}.`);
-	return { content: `${JSON.stringify(found, null, 2)}\n`, contentType: "application/json" };
+	return { content: `${JSON.stringify(await readableOutbound(runtime, found), null, 2)}\n`, contentType: "application/json" };
+}
+
+/**
+ * The outbound record as its sender reads it back: the body itself (not a digest), where the
+ * message landed, and whether the peer answered. The raw record stays internal.
+ */
+async function readableOutbound(runtime: PluginRuntime, outbound: Outbound): Promise<Record<string, unknown>> {
+	const message = outbound.request.message;
+	const receipt = outbound.receipt;
+	let reply: Entry | undefined;
+	const related = message.meta?.in_reply_to;
+	if (related === undefined && receipt !== undefined) {
+		const entries = await allMessages(runtime, receipt.thread_ref);
+		reply = entries.find(entry => entry.message.meta?.in_reply_to !== undefined
+			&& entry.message.meta.in_reply_to.sender === message.sender
+			&& entry.message.meta.in_reply_to.id === message.id);
+	}
+	return {
+		message_id: message.id,
+		to: outbound.request.target_endpoint,
+		body: message.msg,
+		state: outbound.state,
+		error: outbound.error === undefined ? undefined : outbound.error.code,
+		landed: receipt === undefined ? undefined : {
+			thread: `${receipt.thread_ref.owner}/${receipt.thread_ref.id}`,
+			seq: receipt.seq,
+			guarantee: receipt.guarantee,
+		},
+		reply: reply === undefined ? undefined : {
+			by: reply.authenticated_author,
+			seq: reply.seq,
+			message_id: reply.message.id,
+			body: reply.message.msg,
+		},
+		retry_until: outbound.request.retry_until,
+	};
 }
 
 async function leafDocuments(

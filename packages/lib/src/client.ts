@@ -1113,6 +1113,12 @@ export class OnlyneClient {
     if (action.kind === 'read') {
       switch (action.scope) {
         case 'directory': return this.#directory();
+        case 'neighbors': {
+          // Same rows onlyne://neighbors renders: observed nodes with trust state attached.
+          const peers = this.#ctx.options.plugins.neighbors;
+          if (peers === undefined) fail('unsupported_delivery', 'No neighbor directory is available on this host.');
+          return peers();
+        }
         case 'threads': return this.#threads.list(auth);
         case 'inbox':
           // A thread-scoped inbox is the owner's attention list for that thread, so the

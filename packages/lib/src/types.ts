@@ -131,7 +131,7 @@ export interface MsgInput { delivery_kind: string; msg: string; meta?: Record<st
 export type Action =
   | { kind: 'domain'; op: 'create' | 'join' | 'leave' | 'list' | 'describe' | 'discover'; domain_id?: DomainId; expected_revision?: string }
   | { kind: 'send'; to: NodeId; thread?: ThreadRef; context?: string; in_reply_to?: MessageRef; relation?: 'reply' | 'followup'; mentions?: NodeId[]; response: DeliveryPlan['response']; execution: DeliveryPlan['execution'] }
-  | { kind: 'read'; scope: 'directory' | 'threads' | 'inbox' | 'messages' | 'message' | 'evidence'; thread?: ThreadRef; message?: MessageRef; seq?: string; cursor?: string; page_size?: number; attention?: 'inbox' | 'thread' }
+  | { kind: 'read'; scope: 'directory' | 'neighbors' | 'threads' | 'inbox' | 'messages' | 'message' | 'evidence'; thread?: ThreadRef; message?: MessageRef; seq?: string; cursor?: string; page_size?: number; attention?: 'inbox' | 'thread' }
   | { kind: 'thread'; op: 'create' | 'close' | 'list' | 'describe' | 'member_add' | 'member_remove'; thread?: ThreadRef; to?: NodeId; title?: string }
   | { kind: 'resource'; resource: ResourceRef; operation: string; data?: Json; expected_revision?: string };
 /**
@@ -237,6 +237,8 @@ export interface Plugins {
   domainCandidates?(domain_id: DomainId): Promise<NodeId[]>;
   /** Resolves a thread-local mention alias to the member node it names. */
   mention?(alias: string, thread: ThreadRef): Promise<NodeId>;
+  /** Observed nodes with trust state; the same rows onlyne://neighbors renders. */
+  neighbors?(): Promise<unknown>;
 }
 export interface NodeOptions {
   node_id: NodeId; base_url: string; plugins: Plugins;

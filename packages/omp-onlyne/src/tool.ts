@@ -95,23 +95,27 @@ export function summary(result: unknown): string {
 	const where = owner === undefined ? "" : ` to ${owner}`;
 	const ref = outcome.receipt === undefined ? undefined : `thread ${outcome.receipt.thread_ref.id} seq ${outcome.receipt.seq}`;
 	const facts = ref === undefined ? "" : ` (${ref})`;
+	// The receipt names a thread the receiver owns, which is not a local object; the outbound
+	// record is. Point the reader at the handle that opens (dpdp report, problem 1).
+	const handle = outcome.receipt === undefined ? undefined : ` · 读回: onlyne://outbound/${outcome.receipt.message_ref.id}`;
 	if (outcome.admission !== undefined) {
 		if (outcome.admission !== "accepted") {
 			const failure = outcome.error === undefined ? outcome.admission : `${outcome.error.code}: ${outcome.error.message}`;
 			return `Not confirmed: ${failure}. The record stays open for recovery; do not re-send the same intent.`;
 		}
+		const trail = handle ?? "";
 		if (outcome.wait === "answered" && outcome.reply !== undefined) {
 			return outcome.reply_body === "withheld"
-				? `Delivered${where}${facts}. ${outcome.reply.authenticated_author} answered at seq ${outcome.reply.seq}, but that body was already shown in this context, so only its arrival is reported.`
-				: `Delivered${where}${facts}. ${outcome.reply.authenticated_author} answered at seq ${outcome.reply.seq}.`;
+				? `Delivered${where}${facts}${trail}. ${outcome.reply.authenticated_author} answered at seq ${outcome.reply.seq}, but that body was already shown in this context, so only its arrival is reported.`
+				: `Delivered${where}${facts}${trail}. ${outcome.reply.authenticated_author} answered at seq ${outcome.reply.seq}.`;
 		}
 		if (outcome.wait === "timed_out") {
-			return `Delivered${where}${facts} and recorded durably. No reply arrived within the wait; it will arrive on its own as an inbound message.`;
+			return `Delivered${where}${facts}${trail} and recorded durably. No reply arrived within the wait; it will arrive on its own as an inbound message.`;
 		}
 		if (outcome.wait === "cancelled") {
-			return `Delivered${where}${facts} and recorded durably. The wait was cancelled; a reply will arrive on its own as an inbound message.`;
+			return `Delivered${where}${facts}${trail} and recorded durably. The wait was cancelled; a reply will arrive on its own as an inbound message.`;
 		}
-		return `Delivered${where}${facts} and recorded durably.`;
+		return `Delivered${where}${facts}${trail} and recorded durably.`;
 	}
 	return "Onlyne answered; the structured result follows.";
 }

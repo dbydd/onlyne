@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { currentDecision, JudgeDecider } from "./decider.ts";
 import { ConfigError, loadConfig, saveConfig, shortNodeId } from "./config.ts";
 import { ensureKeyDir } from "./keys.ts";
+import { neighborRows } from "./urls.ts";
 import { createRuntimeBridge } from "./messages.ts";
 import { advertisedHost, createOnlyneNode } from "./node.ts";
 import { NetworkDiscovery } from "./network.ts";

@@ -120,7 +120,7 @@ export function registerUi(pi: ExtensionAPI): void {
 							),
 						{
 							overlay: true,
-							overlayOptions: { anchor: "left-center", width: "45%", minWidth: 56, maxHeight: "85%" },
+							overlayOptions: { anchor: "center", width: "92%", minWidth: 90, maxHeight: "90%" },
 							signal: controller.signal,
 						},
 					);

@@ -169,14 +169,24 @@ export class JudgeDecider {
 			return explicit;
 		}
 
+		// A read-only session cannot send; deciding first and refusing after spends a judge call
+		// to produce an action that can never run (caerulea report 2, problem 3).
+		if (scope.readOnly === true) {
+			throw new OnlyneError("forbidden", "Subagent sessions may only read Onlyne state; return the result to the main agent.");
+		}
 		const state = await this.#state(scope);
 		const questions = this.#outboundQuestions(state);
 		const started = Date.now();
 		const answers = await this.#judge(scope.ctx, state, questions, scope.signal);
-		this.#record("outbound", scope.input, answers, Date.now() - started);
-		if (scope.readOnly === true && choice(answers, "action") !== "read") {
-			throw new OnlyneError("forbidden", "Subagent sessions may only read Onlyne state; return the result to the main agent.");
+		// A send beside a non-none read scope is two intents in one answer; executing the send
+		// turned reads into deliveries (dpdp report, problem 4). Refuse instead of guessing.
+		if (choice(answers, "action") === "send") {
+			const scopeChosen = choice(answers, "read_scope");
+			if (scopeChosen !== undefined && scopeChosen !== "none") {
+				throw new OnlyneError("invalid_request", `The decision mixed a send with a read of ${scopeChosen}; state one intent.`);
+			}
 		}
+		this.#record("outbound", scope.input, answers, Date.now() - started);
 		const action = await this.#action(scope, answers);
 		await this.#guard(scope, action);
 		this.deps.log?.("onlyne.judge.action", { direction: "outbound", ...actionFacts(action) });
@@ -198,7 +208,12 @@ export class JudgeDecider {
 		const started = Date.now();
 		const answers = await this.#judge(scope, state, questions);
 		this.#record("inbound", { delivery_kind: entry.message.delivery_kind, msg: entry.message.msg, meta: entry.message.meta }, answers, Date.now() - started);
-		const action = choice(answers, "action");
+		let action = choice(answers, "action");
+		// A subagent session cannot send, so a message that awaits a reply can never be answered
+		// there. Deliver it to the main session instead (caerulea report 2, problem 3).
+		if (action === "new_subagent" && entry.message.meta?.in_reply_to !== undefined) {
+			action = "wake";
+		}
 		if (action === "fragment" || action === "wake" || action === "queue" || action === "new_subagent") {
 			return { action };
 		}
@@ -385,8 +400,11 @@ export class JudgeDecider {
 		const kind = choice(answers, "action");
 		if (kind === "read") {
 			const name = choice(answers, "read_scope");
-			if (name === undefined || name === "none" || !isReadScope(name)) {
-				throw new OnlyneError("decision_unavailable", "The judge did not choose a readable scope.");
+			if (name === undefined || name === "none") {
+				throw new OnlyneError("decision_unavailable", "The decision named no read scope; the readable channels are directory, neighbors, threads, inbox, messages, message and evidence.");
+			}
+			if (!isReadScope(name)) {
+				throw new OnlyneError("decision_unavailable", `No readable channel exists for ${name}; the readable channels are directory, neighbors, threads, inbox, messages, message and evidence.`);
 			}
 			const thread = await this.#answerThread(answers, scope.input.meta);
 			if (name === "messages" && thread === undefined) {
@@ -481,6 +499,7 @@ export class JudgeDecider {
 		let to: NodeId;
 		let resolvedRelation: "reply" | "followup" | undefined;
 		if (reply !== undefined) {
+			// An explicit relation is a fact the caller stated; the judge only fills the gap.
 			resolvedRelation = explicitRelation
 				?? (relationChoice === "reply" || relationChoice === "followup" ? relationChoice : undefined);
 			if (resolvedRelation === undefined) {
@@ -719,6 +738,7 @@ export class JudgeDecider {
 			instructions: "If action is read, choose what to read.",
 			criteria: {
 				directory: "Peers, resources and capabilities.",
+				neighbors: "Observed nodes with their region and handshake state.",
 				threads: "This node's threads.",
 				inbox: "Attention items.",
 				messages: "A thread's message list.",
@@ -1151,7 +1171,7 @@ export class JudgeDecider {
 type ActionReadScope = Extract<Action, { kind: "read" }>["scope"];
 
 function isReadScope(value: string): value is ActionReadScope {
-	return value === "directory" || value === "threads" || value === "inbox" || value === "messages" || value === "message" || value === "evidence";
+	return value === "directory" || value === "neighbors" || value === "threads" || value === "inbox" || value === "messages" || value === "message" || value === "evidence";
 }
 
 function isThreadOp(value: string): value is Extract<Action, { kind: "thread" }>["op"] {
