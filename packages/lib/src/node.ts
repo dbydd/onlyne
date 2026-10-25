@@ -7,6 +7,7 @@ import type { ResourceService } from './resources.js';
 import { DomainService } from './domains.js';
 import { DiscoveryService } from './discovery.js';
 import { OnlyneClient } from './client.js';
+import { KeyService, TrustService } from './keys.js';
 import { FetchTransport } from './transport.js';
 import { createHttpHandler } from './http.js';
 
@@ -16,6 +17,8 @@ export class OnlyneNode {
   readonly resources: ResourceService;
   readonly domains: DomainService;
   readonly discovery: DiscoveryService;
+  readonly keys: KeyService;
+  readonly trust: TrustService;
   readonly client: OnlyneClient;
   readonly fetch: (request: Request) => Promise<Response>;
   readonly auth: Auth;
@@ -26,12 +29,19 @@ export class OnlyneNode {
     this.threads = new ThreadService(ctx);
     this.messages = new MessageService(ctx);
     this.resources = createResourceService(ctx);
-    const transport = options.plugins.transport ?? new FetchTransport(options.plugins.resolve);
+    this.keys = new KeyService(ctx);
+    this.trust = new TrustService(ctx, this.keys);
+    const transport = options.plugins.transport ?? new FetchTransport(
+      options.plugins.resolve,
+      fetch,
+      options.plugins.keys === undefined ? undefined : { trust: this.trust },
+    );
     this.domains = new DomainService(ctx, transport);
     this.discovery = new DiscoveryService(ctx);
     this.client = new OnlyneClient(ctx, transport, this.messages, this.threads, this.resources, this.domains);
     this.fetch = createHttpHandler({
       ctx, threads: this.threads, messages: this.messages, resources: this.resources, domains: this.domains, discovery: this.discovery,
+      keys: this.keys, trust: this.trust,
     });
   }
 }

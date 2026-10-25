@@ -174,9 +174,55 @@ export interface ResourceDriver {
   execute(resource: Resource, request: OperationRequest, signal?: AbortSignal): Promise<Omit<OperationResult, 'operation_id'>>;
   query?(resource: Resource, operation_id: string): Promise<Omit<OperationResult, 'operation_id'>>;
 }
+/** RFC 0017 key material the host hands the library: the signing key and the public key it proves. */
+export interface KeyMaterial {
+  readonly private_key: Uint8Array;
+  readonly public_key: Uint8Array;
+}
+
+/** Load-or-create the node identity key; storage is the host's choice (RFC 0017 §2). */
+export type KeyHook = (() => Promise<KeyMaterial>) & { replace?(material: KeyMaterial): Promise<void> };
+
+export interface KeyIdentity {
+  node_id: NodeId;
+  public_key: string;
+  fingerprint: string;
+}
+
+export interface TrustSeed { node_id: NodeId; fingerprint: string }
+
+export interface TrustStatement {
+  node_id: NodeId;
+  target: NodeId;
+  public_key: string;
+  target_fingerprint: string;
+  base_url: string;
+  approved: boolean;
+  nonce: string;
+  timestamp: number;
+  signature: string;
+  previous_signature?: string;
+}
+
+/** One trust-table row: a peer's verified public key and the exchange state. */
+export interface TrustEntry {
+  readonly node_id: NodeId;
+  readonly public_key: string;
+  readonly fingerprint: string;
+  readonly state: 'pending' | 'trusted' | 'revoked';
+  readonly first_seen: string;
+  readonly last_checked: string;
+  readonly local_approved: boolean;
+  readonly remote_approved: boolean;
+  readonly base_url: string;
+  readonly history?: string[];
+}
+
 export interface Plugins {
   storage: Storage;
   authenticate(request: Request): Promise<Auth | null>;
+  keys?: KeyHook;
+  trust_seeds?: TrustSeed[];
   resolve(node: NodeId): Promise<Target>;
   decide(input: MsgInput): Promise<Action>;
   runtime?: Runtime;

@@ -1,5 +1,11 @@
 import { OnlyneError } from './core.js';
 import type { ErrorCode, Failure, NodeId, Target, Transport } from './types.js';
+import type { TrustService } from './keys.js';
+
+/** RFC 0017 request signing: transcripts, response verification, trust-state gating. */
+export interface SigningTransportOptions {
+  trust: TrustService;
+}
 
 // Loopback hosts may speak plain HTTP. Everything else reached by a resolver
 // could be a remote peer, so it must be HTTPS: a cleartext binding would put
@@ -19,10 +25,12 @@ function failureRecord(parsed: unknown): unknown {
 export class FetchTransport implements Transport {
   private readonly resolve: (node: NodeId) => Promise<Target>;
   private readonly fetcher: typeof fetch;
+  private readonly signing: SigningTransportOptions | undefined;
 
-  constructor(resolve: (node: NodeId) => Promise<Target>, fetcher: typeof fetch = fetch) {
+  constructor(resolve: (node: NodeId) => Promise<Target>, fetcher: typeof fetch = fetch, signing?: SigningTransportOptions) {
     this.resolve = resolve;
     this.fetcher = fetcher;
+    this.signing = signing;
   }
 
   async request<T>(target: NodeId, method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
@@ -42,6 +50,7 @@ export class FetchTransport implements Transport {
     }
 
     const headers = new Headers(endpoint.headers);
+    const serialized = body === undefined ? '' : JSON.stringify(body);
     if (body !== undefined) {
       headers.set('Content-Type', 'application/json');
       // A server rejects the whole request when this header contradicts the
@@ -51,13 +60,22 @@ export class FetchTransport implements Transport {
         headers.set('Idempotency-Key', body.idempotency_key);
       }
     }
+    if (this.signing !== undefined) {
+      const peer = await this.signing.trust.entry(target);
+      if (peer?.state === 'trusted') {
+        const signer = new Request(url.href, { method, headers });
+        await this.signing.trust.signRequest(signer, target, serialized);
+        for (const [name, value] of signer.headers) headers.set(name, value);
+      }
+    }
 
     let response: Response;
+    const request = new Request(url.href, { method, headers });
     try {
       response = await this.fetcher(url, {
         method,
         headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body: body === undefined ? undefined : serialized,
         signal,
       });
     } catch (error) {
@@ -82,6 +100,10 @@ export class FetchTransport implements Transport {
 
     if (response.ok) {
       if (parsed === undefined) throw new OnlyneError('unavailable', 'The target returned a malformed response.');
+      if (this.signing !== undefined) {
+        const peer = await this.signing.trust.entry(target);
+        if (peer?.state === 'trusted') await this.signing.trust.verifyResponse(target, request, response, text);
+      }
       return parsed as T;
     }
 

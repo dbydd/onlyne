@@ -1,4 +1,5 @@
 import { OnlyneError, canonical, fail, same } from './core.js';
+import { createHash } from 'node:crypto';
 import type { Context } from './core.js';
 import type {
   Auth, DeliveryPlan, DomainMutation, Event, Grant, Json, Member, Message, MessageQuery, Mutation, PageOptions,
@@ -9,6 +10,9 @@ import type { MessageService } from './messages.js';
 import type { ResourceService } from './resources.js';
 import type { DomainService } from './domains.js';
 import type { DiscoveryService } from './discovery.js';
+import type { KeyService, TrustService } from './keys.js';
+import { SIGNATURE_HEADER, bodyDigest } from './keys.js';
+import type { TrustStatement } from './types.js';
 import { validateDomainId } from './domains.js';
 
 const PREFIX = '/onlyne/v3';
@@ -23,6 +27,8 @@ export interface HttpServices {
   resources: ResourceService;
   domains: DomainService;
   discovery?: DiscoveryService;
+  keys?: KeyService;
+  trust?: TrustService;
 }
 
 function record(value: unknown, field: string): Record<string, unknown> {
@@ -164,13 +170,21 @@ function messageQuery(params: URLSearchParams): MessageQuery {
   };
 }
 
-async function json(request: Request, limit: number): Promise<unknown> {
+async function json(request: Request, limit: number, rawBody?: string): Promise<unknown> {
   const declared = request.headers.get('content-length');
   if (declared !== null && /^[0-9]+$/.test(declared) && Number(declared) > limit) {
     fail('payload_too_large', `The request body exceeds ${limit} bytes.`);
   }
   const type = (request.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase();
   if (type !== 'application/json') fail('unsupported_media_type', 'Content-Type must be application/json.');
+  if (rawBody !== undefined) {
+    if (rawBody.length === 0) fail('invalid_request', 'A JSON body is required.');
+    try {
+      return JSON.parse(rawBody);
+    } catch {
+      fail('invalid_request', 'The request body is not valid UTF-8 JSON.');
+    }
+  }
   if (request.body === null) fail('invalid_request', 'A JSON body is required.');
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -332,6 +346,11 @@ function eventCursor(value: unknown): { scope: unknown; after: string } | undefi
   return { scope, after };
 }
 
+/** The RFC 0017 content digest: SHA-256 hex of the exact bytes the request carried. */
+function digestOf(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
 function respond(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value ?? null), {
     status,
@@ -349,13 +368,27 @@ function expect(request: Request, allowed: string): void {
 }
 
 /** Maps `/onlyne/v3` HTTP requests onto the services. The caller owns the server lifecycle. */
-export function createHttpHandler({ ctx, threads, messages, resources, domains, discovery }: HttpServices): (request: Request) => Promise<Response> {
+export function createHttpHandler({ ctx, threads, messages, resources, domains, discovery, keys, trust }: HttpServices): (request: Request) => Promise<Response> {
   const limit = ctx.options.request_bytes ?? DEFAULT_BYTES;
 
-  async function authenticate(request: Request): Promise<Auth> {
+  /**
+   * RFC 0017: an `Onlyne-Sig` header is verified against the peer's stored key before the
+   * host plugin sees the request; a verified signature names the actor directly. The
+   * signature covers the body, so it is checked against the raw bytes actually received.
+   */
+  async function authenticate(request: Request, rawBody: string): Promise<Auth> {
+    // A keyed node never falls back to an unauthenticated actor: the signature is the credential.
+    if (trust !== undefined && keys?.enabled === true) return trust.authenticate(request, bodyDigest(rawBody));
     const auth = await ctx.options.plugins.authenticate(request);
     if (auth === null || typeof auth.actor !== 'string' || auth.actor.length === 0) fail('unauthenticated', 'Authentication is required.');
     return auth;
+  }
+
+  /** RFC 0017: an authenticated answer to a signed request carries the responder's signature. */
+  async function signed(request: Request, response: Response): Promise<Response> {
+    if (trust === undefined || request.headers.get(SIGNATURE_HEADER) === null) return response;
+    await trust.signResponse(request, response, await response.clone().text());
+    return response;
   }
 
   /**
@@ -427,7 +460,9 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
       if (running || done) return;
       running = true;
       try {
-        const current = await ctx.options.plugins.authenticate(request);
+        const current = keys?.enabled === true
+          ? ((await trust?.entry(auth.actor))?.state === 'trusted' ? { actor: auth.actor } : null)
+          : await ctx.options.plugins.authenticate(request);
         if (current === null || current.actor !== auth.actor) {
           write(controller, `event: error\ndata: ${JSON.stringify({ error: new OnlyneError('forbidden', 'The credential is no longer valid for this stream.').error })}\n\n`);
           stop(controller);
@@ -471,7 +506,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
     });
   }
 
-  return async function handle(request: Request): Promise<Response> {
+  async function handle(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
       if (!url.pathname.startsWith(`${PREFIX}/`)) fail('not_found', 'Unknown route.');
@@ -495,7 +530,27 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
         return respond(await discovery.list(pageOptions(params)));
       }
 
-      const auth = await authenticate(request);
+      // RFC 0017: the identity lookup a first exchange reads. Public by design — a public key
+      // is not a secret, and the fingerprint is what the two users compare out of band.
+      if (path.length === 1 && path[0] === 'keys') {
+        expect(request, 'GET');
+        const identity = keys === undefined ? undefined : await keys.describe();
+        if (identity === undefined) fail('not_found', 'This node has no identity key.');
+        return respond(identity);
+      }
+
+      // The exchange transcript: each side signs (sender, recipient, key, base_url, approval,
+      // timestamp, nonce), so a captured statement cannot be replayed or retargeted.
+      if (path.length === 1 && path[0] === 'introductions') {
+        expect(request, 'POST');
+        if (trust === undefined) fail('not_found', 'Unknown route.');
+        const statement = await json(request, limit) as TrustStatement;
+        return respond(await trust.introduce(statement), 201);
+      }
+
+      // Authenticated routes read the raw body first: the signature covers exactly these bytes.
+      const rawBody = await request.text();
+      const auth = await authenticate(request, rawBody);
 
       if (path.length === 1 && path[0] === 'contexts') {
         expect(request, 'GET');
@@ -504,15 +559,37 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
         return respond(await contexts());
       }
 
+      if (path.length >= 1 && path[0] === 'trust' && trust !== undefined) {
+        if (path.length === 1) {
+          expect(request, 'GET');
+          return respond(await trust.list(auth));
+        }
+        if (path.length === 2 && path[1] === 'requests') {
+          expect(request, 'POST');
+          const raw = shape(await json(request, limit, rawBody), 'body', ['node_id', 'fingerprint']);
+          return respond(await trust.request(auth, string(raw.node_id, 'node_id'), string(raw.fingerprint, 'fingerprint')), 201);
+        }
+        if (path.length === 2 && path[1] === 'rotate') {
+          expect(request, 'POST');
+          return respond(await trust.rotate(auth));
+        }
+        if (path.length === 3 && path[1] === 'revoke') {
+          expect(request, 'POST');
+          await trust.revoke(auth, path[2]!);
+          return respond({ node_id: path[2]!, state: 'revoked' });
+        }
+        fail('not_found', 'Unknown route.');
+      }
+
       if (path.length === 1 && path[0] === 'messages') {
         expect(request, 'POST');
-        return respond(await messages.admit(auth, sendRequest(request, await json(request, limit), undefined)), 201);
+        return respond(await messages.admit(auth, sendRequest(request, await json(request, limit, rawBody), undefined)), 201);
       }
 
       if (path.length === 1 && path[0] === 'threads') {
         if (request.method === 'GET') return respond(await threads.list(auth, pageOptions(params)));
         if (request.method === 'POST') {
-          const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until', 'title', 'id', 'default']);
+          const raw = shape(await json(request, limit, rawBody), 'body', ['idempotency_key', 'retry_until', 'title', 'id', 'default']);
           if (raw.default !== undefined && typeof raw.default !== 'boolean') fail('invalid_request', 'default must be a boolean.');
           const id = optionalString(raw.id, 'id');
           const created = await threads.create(auth, {
@@ -534,7 +611,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
       if (path.length === 1 && path[0] === 'resources') {
         if (request.method === 'GET') return respond(await resources.list(auth, pageOptions(params)));
         if (request.method === 'POST') {
-          const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until', 'resource']);
+          const raw = shape(await json(request, limit, rawBody), 'body', ['idempotency_key', 'retry_until', 'resource']);
           mutation(request, raw);
           return respond(await resources.register(auth, resourceRecord(raw.resource)), 201);
         }
@@ -544,7 +621,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
       if (path.length === 1 && path[0] === 'grants') {
         if (request.method === 'GET') return respond(await threads.grants(auth, pageOptions(params)));
         if (request.method === 'POST') {
-          const raw = shape(await json(request, limit), 'body', ['grant']);
+          const raw = shape(await json(request, limit, rawBody), 'body', ['grant']);
           return respond(await threads.acceptGrant(auth, grant(raw.grant)), 201);
         }
         fail('not_found', 'Unknown route.');
@@ -552,14 +629,14 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
 
       if (path.length === 3 && path[0] === 'grants' && path[2] === 'ack') {
         expect(request, 'POST');
-        const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until']);
+        const raw = shape(await json(request, limit, rawBody), 'body', ['idempotency_key', 'retry_until']);
         return respond(await threads.ackGrant(auth, path[1]!, mutation(request, raw)));
       }
 
       if (path.length === 1 && path[0] === 'domains') {
         if (request.method === 'GET') return respond(await domains.list(auth, pageOptions(params)));
         if (request.method === 'POST') {
-          const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until']);
+          const raw = shape(await json(request, limit, rawBody), 'body', ['idempotency_key', 'retry_until']);
           // Membership belongs to the node that holds it; a peer's credential never mutates it.
           ctx.owner(auth.actor);
           return respond(await domains.create(auth, mutation(request, raw)), 201);
@@ -580,7 +657,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
         }
         if (path[2] === 'join' || path[2] === 'leave') {
           expect(request, 'POST');
-          const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until', 'expected_revision']);
+          const raw = shape(await json(request, limit, rawBody), 'body', ['idempotency_key', 'retry_until', 'expected_revision']);
           const expected = optionalString(raw.expected_revision, 'expected_revision');
           ctx.owner(auth.actor);
           const change: DomainMutation = {
@@ -604,7 +681,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
         if (tail === 'close') {
           if (path.length !== 4) fail('not_found', 'Unknown route.');
           expect(request, 'POST');
-          const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until']);
+          const raw = shape(await json(request, limit, rawBody), 'body', ['idempotency_key', 'retry_until']);
           return respond(await threads.close(auth, ref, mutation(request, raw)));
         }
 
@@ -612,7 +689,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
           if (path.length === 4) {
             if (request.method === 'GET') return respond(await threads.members(auth, ref, pageOptions(params)));
             if (request.method === 'POST') {
-              const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until', 'peer', 'state', 'access', 'read_scope']);
+              const raw = shape(await json(request, limit, rawBody), 'body', ['idempotency_key', 'retry_until', 'peer', 'state', 'access', 'read_scope']);
               return respond(await threads.member(auth, ref, string(raw.peer, 'peer'), memberPatch(raw, 'body'), mutation(request, raw)), 201);
             }
             fail('not_found', 'Unknown route.');
@@ -628,7 +705,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
         if (tail === 'messages') {
           if (path.length !== 4) fail('not_found', 'Unknown route.');
           if (request.method === 'GET') return respond(await messages.list(auth, ref, messageQuery(params)));
-          if (request.method === 'POST') return respond(await messages.admit(auth, sendRequest(request, await json(request, limit), ref)), 201);
+          if (request.method === 'POST') return respond(await messages.admit(auth, sendRequest(request, await json(request, limit, rawBody), ref)), 201);
           fail('not_found', 'Unknown route.');
         }
 
@@ -645,7 +722,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
           }
           if (path.length === 6 && path[5] === 'ack') {
             expect(request, 'POST');
-            const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until']);
+            const raw = shape(await json(request, limit, rawBody), 'body', ['idempotency_key', 'retry_until']);
             return respond(await messages.ack(auth, ref, path[4]!, mutation(request, raw)));
           }
           fail('not_found', 'Unknown route.');
@@ -674,7 +751,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
           if (path.length === 4) {
             if (request.method === 'GET') return respond(await resources.operations(auth, ref, pageOptions(params)));
             if (request.method === 'POST') {
-              return respond(await resources.operate(auth, ref, operationRequest(request, await json(request, limit)), request.signal), 201);
+              return respond(await resources.operate(auth, ref, operationRequest(request, await json(request, limit, rawBody)), request.signal), 201);
             }
             fail('not_found', 'Unknown route.');
           }
@@ -689,7 +766,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
           if (path.length === 4) {
             if (request.method === 'GET') return respond(await resources.events(auth, ref, pageOptions(params)));
             if (request.method === 'POST') {
-              const event: ResourceEvent = await resources.receive(auth, ref, eventBody(await json(request, limit)));
+              const event: ResourceEvent = await resources.receive(auth, ref, eventBody(await json(request, limit, rawBody)));
               return respond(event, 201);
             }
             fail('not_found', 'Unknown route.');
@@ -700,7 +777,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
           }
           if (path.length === 6 && path[5] === 'ack') {
             expect(request, 'POST');
-            const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until']);
+            const raw = shape(await json(request, limit, rawBody), 'body', ['idempotency_key', 'retry_until']);
             return respond(await resources.ack(auth, ref, path[4]!, mutation(request, raw)));
           }
           fail('not_found', 'Unknown route.');
@@ -709,7 +786,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
         if (tail === 'handovers') {
           if (path.length !== 6 || path[5] !== 'decision') fail('not_found', 'Unknown route.');
           expect(request, 'POST');
-          const raw = shape(await json(request, limit), 'body', ['idempotency_key', 'retry_until', 'accepted']);
+          const raw = shape(await json(request, limit, rawBody), 'body', ['idempotency_key', 'retry_until', 'accepted']);
           if (typeof raw.accepted !== 'boolean') fail('invalid_request', 'accepted must be a boolean.');
           return respond(await resources.decideHandover(auth, ref, path[4]!, raw.accepted, mutation(request, raw)));
         }
@@ -721,5 +798,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
     } catch (error) {
       return failure(error);
     }
-  };
+  }
+
+  return async (request: Request): Promise<Response> => signed(request, await handle(request));
 }

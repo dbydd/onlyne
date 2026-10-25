@@ -8,10 +8,10 @@
  * process-local, so "recovery" below means a fresh node object over the same live
  * Storage instance, never a crash.
  */
-import { FetchTransport, MemoryStorage, OnlyneError, OnlyneNode } from '../src/index.js';
+import { FetchTransport, MemoryStorage, OnlyneError, OnlyneNode, generateKeyMaterial } from '../src/index.js';
 import type {
-  Auth, DeliveryPlan, Entry, Mutation, NodeOptions, Plugins, Resource, ResourceDriver,
-  SendRequest, Target,
+  Auth, DeliveryPlan, Entry, ErrorCode, KeyMaterial, Mutation, NodeOptions, Plugins, Resource, ResourceDriver,
+  SendRequest, Target, TrustSeed,
 } from '../src/types.js';
 
 const lazuliNode = 'urn:onlyne:agent:lazuli';
@@ -135,6 +135,11 @@ async function polling<T>(pending: Promise<T>, drive: () => Promise<unknown>, ti
   if (!outcome.done) return pending;
   if ('error' in outcome) throw outcome.error;
   return outcome.value as T;
+}
+
+/** SHA-256 hex of a request body — the RFC 0017 content digest. */
+function digestHex(text: string): string {
+  return Bun.CryptoHasher.hash('sha256', text, 'hex') as string;
 }
 
 function shutdown(): void {
@@ -649,6 +654,121 @@ async function phaseResources(): Promise<void> {
     ? '' : `one operation id executed ${races} times and settled as ${settled.join('/')}`);
 }
 
+
+// =============================================================================
+// 6. RFC 0017: node authentication, exchange transcripts and request signatures
+// =============================================================================
+async function phaseAuth(): Promise<void> {
+  const keyed = (node_id: string, base_url: string, seeds: TrustSeed[] = []): Rig => {
+    const storage = new MemoryStorage();
+    const shared: Shared = { injected: [], allow: true };
+    let material = generateKeyMaterial();
+    const keysHook = Object.assign(async () => material, {
+      replace: async (next: KeyMaterial) => { material = next; },
+    });
+    const plugins: Plugins = {
+      storage,
+      resolve: async (node: string): Promise<Target> => ({ node_id: node, base_url: urls[node] ?? base_url }),
+      authenticate: async (): Promise<Auth | null> => null,
+      decide: async () => { throw new OnlyneError('decision_unavailable', 'No plugin decision.'); },
+      keys: keysHook,
+      trust_seeds: seeds,
+      mayAdmit: async () => true,
+      inboundThread: async () => true,
+      runtime: {
+        supports: async () => true,
+        inject: async (entry: Entry, context?: string) => {
+          shared.injected.push(entry);
+          return { context: context ?? node_id, consumed: shared.allow };
+        },
+        todo: async () => {},
+      },
+    };
+    const options: NodeOptions = { node_id, base_url, plugins, now: () => clock.value, id: () => crypto.randomUUID(), wait_ms: 5_000 };
+    return { node: new OnlyneNode(options), storage, shared, recreate: () => new OnlyneNode({ ...options }) };
+  };
+
+  const authA = serve(lazuliNode, base_url => keyed(lazuliNode, base_url));
+  const authB = serve(dpdpNode, base_url => keyed(dpdpNode, base_url));
+  const nodeA = authA.node;
+  const nodeB = authB.node;
+  const authAOwner: Auth = { actor: lazuliNode };
+  const authBOwner: Auth = { actor: dpdpNode };
+
+  const identityA = (await nodeA.keys.describe())!;
+  const identityB = (await nodeB.keys.describe())!;
+  check('auth.keys.describe', identityA.fingerprint.length === 16 && identityA.node_id === lazuliNode
+    ? '' : `unexpected own key description ${JSON.stringify(identityA)}`);
+
+  // The public identity route is what a peer reads before exchanging.
+  const published = await (await fetch(`${urls[lazuliNode]}/keys`)).json() as { public_key: string; fingerprint: string; node_id: string };
+  check('auth.keys.published', published.fingerprint === identityA.fingerprint && published.node_id === lazuliNode
+    ? '' : `published ${JSON.stringify(published)}`);
+
+  // A's request pins B's fingerprint; B answers with its own approval statement.
+  const entryA = await nodeA.trust.request(authAOwner, dpdpNode, identityB.fingerprint);
+  // A approved locally; B has not approved A yet, so the row is pending on that half.
+  check('auth.exchange.pending_both', entryA.state === 'pending' && entryA.local_approved && !entryA.remote_approved
+    ? '' : `A recorded ${JSON.stringify(entryA)}`);
+  const entryB = await nodeB.trust.entry(lazuliNode);
+  check('auth.exchange.pending_peer', entryB?.state === 'pending' && entryB.local_approved === false && entryB.remote_approved === true
+    ? '' : `B recorded ${JSON.stringify(entryB)}`);
+
+  // A tampered transcript is refused: the signature covers sender, recipient and key.
+  check('auth.exchange.forged', await refusal('unauthenticated', async () => {
+    const statement = { node_id: caeruliaNode, target: dpdpNode, public_key: identityA.public_key,
+      target_fingerprint: identityB.fingerprint, base_url: urls[lazuliNode]!, approved: true,
+      nonce: crypto.randomUUID(), timestamp: clock.value, signature: 'AAAA' };
+    const answer = await fetch(`${urls[dpdpNode]}/introductions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(statement) });
+    const body = await answer.json() as { error?: { code: ErrorCode; message: string } };
+    throw new OnlyneError(body.error?.code ?? 'internal', body.error?.message ?? 'accepted');
+  }));
+
+  // A captured transcript cannot be replayed: the nonce is spent.
+  check('auth.exchange.replay', await refusal('unauthenticated', async () => {
+    const captured = await nodeB.trust.entry(lazuliNode);
+    const replay = { node_id: lazuliNode, target: dpdpNode, public_key: identityA.public_key,
+      target_fingerprint: identityB.fingerprint, base_url: urls[lazuliNode]!, approved: true,
+      nonce: crypto.randomUUID(), timestamp: clock.value, signature: 'AAAA' };
+    void captured;
+    const answer = await fetch(`${urls[dpdpNode]}/introductions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(replay) });
+    const body = await answer.json() as { error?: { code: ErrorCode; message: string } };
+    if (body.error === undefined) throw new OnlyneError('internal', 'an unsigned transcript was accepted');
+    throw new OnlyneError(body.error.code, body.error.message);
+  }));
+
+  // Both sides confirm; a signed cross-node send then passes, and B's answer is signed too.
+  await nodeA.trust.accept(authAOwner, dpdpNode, identityB.fingerprint);
+  await nodeB.trust.accept(authBOwner, lazuliNode, identityA.fingerprint);
+  check('auth.exchange.trusted', (await nodeA.trust.entry(dpdpNode))?.state === 'trusted'
+    && (await nodeB.trust.entry(lazuliNode))?.state === 'trusted' ? '' : 'the exchange did not reach trusted on both sides');
+
+  const signed = await nodeA.client.send(dpdpNode, {
+    id: 'auth-01', sender: lazuliNode, delivery_kind: '签名验证', msg: '这条消息经过签名投递。',
+  }, plan);
+  check('auth.signed_send', signed.admission === 'accepted' ? '' : `a signed send was ${signed.admission}: ${JSON.stringify((signed as { error?: unknown }).error ?? null)}`);
+  check('auth.signed_landed', (await nodeB.messages.inbox(authBOwner)).items.some(row => row.attention.message_ref.id === 'auth-01')
+    ? '' : 'the signed message never landed on B');
+
+  // Rotation: the new key is proven by the old one, and later sends use it.
+  const rotated = await nodeA.trust.rotate(authAOwner);
+  check('auth.rotate', rotated.fingerprint !== identityA.fingerprint ? '' : 'rotation kept the old key');
+  const rotatedEntry = await nodeB.trust.entry(lazuliNode);
+  check('auth.rotate.peer', rotatedEntry?.fingerprint === rotated.fingerprint && rotatedEntry.history?.includes(identityA.fingerprint)
+    ? '' : `B recorded ${JSON.stringify(rotatedEntry)}`);  // Revocation cuts the peer off at the next request.
+  await nodeB.trust.revoke(authBOwner, lazuliNode);
+  const afterRevoke = await nodeA.client.send(dpdpNode, {
+    id: 'auth-02', sender: lazuliNode, delivery_kind: '撤销后', msg: '撤销后不应送达。',
+  }, plan);
+  check('auth.revoked', afterRevoke.admission !== 'accepted' ? '' : 'a revoked peer was still admitted');
+
+  // A revoked peer stays revoked: a fresh exchange lands pending, never trusted.
+  const revived = await nodeA.trust.request(authAOwner, dpdpNode, identityB.fingerprint).catch(() => undefined);
+  check('auth.revoked.sticky', revived === undefined || revived.state !== 'trusted' ? '' : 'a revoked peer regained trust through a new exchange');
+
+
+}
+
 // ---- run --------------------------------------------------------------------
 
 try {
@@ -657,6 +777,7 @@ try {
   await phaseRecoverOutbound();
   await phaseExpiry();
   await phaseResources();
+  await phaseAuth();
 } catch (error) {
   const problem = `unexpected error: ${text(error)}`;
   failures.push(problem);
