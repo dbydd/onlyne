@@ -472,6 +472,7 @@ export class OnlyneViewer implements Component {
 				role: "onlyne.threads",
 				gap: "sm",
 				grow: 1,
+				align: "stretch",
 				min: { w: "24ch", h: linesOf(geo.body) },
 				max: { w: "38ch", h: linesOf(geo.body) },
 			},
@@ -588,7 +589,7 @@ export class OnlyneViewer implements Component {
 		if (thread === undefined) {
 			return node(
 				"col",
-				{ role: "onlyne.flow", gap: "sm", grow: 1, shrink: 1, min: { w: 0, h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } },
+				{ role: "onlyne.flow", gap: "sm", grow: 1, shrink: 1, align: "stretch", min: { w: 0, h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } },
 				[
 					...this.approvalsCard(),
 					textNode([span("从左边打开一个线程，或在「发现」页连接一位节点发起对话。", "muted")], { wrap: "word", lines: 3 }),
@@ -605,7 +606,7 @@ export class OnlyneViewer implements Component {
 		const visible = messages.slice(-geo.messages);
 		return node(
 			"col",
-			{ role: "onlyne.flow", gap: "sm", grow: 1, shrink: 1, min: { w: 0, h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } },
+			{ role: "onlyne.flow", gap: "sm", grow: 1, shrink: 1, align: "stretch", min: { w: 0, h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } },
 			[
 				node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
 					node("col", { gap: "none", grow: 1 }, [
@@ -727,6 +728,7 @@ export class OnlyneViewer implements Component {
 				role: "onlyne.members",
 				gap: "sm",
 				grow: 1,
+				align: "stretch",
 				min: { w: "22ch", h: linesOf(geo.body) },
 				max: { w: "32ch", h: linesOf(geo.body) },
 			},
@@ -767,7 +769,7 @@ export class OnlyneViewer implements Component {
 				),
 			);
 		}
-		return [node("col", { gap: "sm", grow: 1, min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } }, sections, "queue")];
+		return [node("col", { gap: "sm", grow: 1, align: "stretch", min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } }, sections, "queue")];
 	}
 
 	private discoveryPage(): NativeNode[] {
@@ -800,7 +802,7 @@ export class OnlyneViewer implements Component {
 				),
 			);
 		}
-		return [node("col", { gap: "sm", grow: 1, min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } }, children, "discovery")];
+		return [node("col", { gap: "sm", grow: 1, align: "stretch", min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } }, children, "discovery")];
 	}
 
 	/**
@@ -883,7 +885,7 @@ export class OnlyneViewer implements Component {
 				"trusted",
 			),
 		];
-		return [node("col", { gap: "sm", grow: 1, min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } }, children, "contacts")];
+		return [node("col", { gap: "sm", grow: 1, align: "stretch", min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } }, children, "contacts")];
 	}
 
 	describe(cx: DescribeContext): NativeNode {
@@ -901,7 +903,7 @@ export class OnlyneViewer implements Component {
 							row,
 							[
 								this.railNode(),
-								node("col", { gap: "sm", grow: 1, min: { w: 0 } }, [
+								node("col", { gap: "sm", grow: 1, align: "stretch", min: { w: 0 } }, [
 									...(this.page === "queue" ? this.queuePage() : this.page === "discovery" ? this.discoveryPage() : this.contactsPage()),
 								], "page"),
 							],
