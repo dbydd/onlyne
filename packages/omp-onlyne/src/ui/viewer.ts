@@ -26,7 +26,7 @@ const PAGES: readonly { id: Page; label: string }[] = [
 	{ id: "contacts", label: "联系人" },
 ];
 
-const FOOTER = "1-4 切页 · j/k 移动 · space 连接 · enter 详情 · r 刷新 · Esc 关闭";
+const FOOTER = "1-4 切页 · j/k 移动 · t 线程 · space 连接 · enter 详情 · r 刷新 · Esc 关闭";
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -66,6 +66,8 @@ export class OnlyneViewer implements Component {
 	private expanded = false;
 	/** Scroll request for the detail text box; bumped per scroll key, like raw-sse's stream page. */
 	private detailScroll: NativeScroll | undefined;
+	/** The chat page's thread column, folded away to give the messages the full width. */
+	private threadFolded = false;
 	private notice: { text: string; error: boolean } | undefined;
 	private noticeTimer: Timer | undefined;
 	private ages = new Map<string, string>();
@@ -332,6 +334,76 @@ export class OnlyneViewer implements Component {
 		};
 	}
 
+	/**
+	 * The chat page as two columns. The rows fallback pairs threads and messages line by
+	 * line, which a message card cannot survive: the card is a head over a body line, so it
+	 * covers the row below it. Here each column stacks its own cards instead, and the thread
+	 * column is a `section` the terminal folds.
+	 */
+	private chatBody(cx: DescribeContext, layout: { threadHeight: number; messageHeight: number; threadWidth: number }): NativeNode | undefined {
+		const threads = this.threads();
+		if (threads.length === 0) return undefined;
+		const thread = threads[this.threadIndex] ?? threads[0]!;
+		const threadWindow = this.window("threads", threads, this.threadIndex, layout.threadHeight);
+		const threadCards = threadWindow.items.map((candidate, offset) => {
+			const row = this.threadRow(candidate, threadWindow.start + offset === this.threadIndex);
+			const card = row.card!;
+			return node(
+				"card",
+				{
+					...(row.selected === true ? {} : { variant: "bare" as const }),
+					selected: row.selected === true,
+					actions: { click: row.act! },
+					title: card.head,
+				},
+				[
+					textNode([span(card.head, "strong")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
+					...(card.description === ""
+						? []
+						: [textNode([span(card.description, "muted")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } })]),
+				],
+				candidate.alias,
+			);
+		});
+		// Each message card is a head line over a body line: two rows of the list.
+		const visible = Math.max(1, Math.floor(layout.messageHeight / 2));
+		const messageWindow = this.window("messages", thread.messages, this.messageIndex, visible);
+		const messageCards = messageWindow.items.map((message, offset) => {
+			const selected = messageWindow.start + offset === this.messageIndex;
+			const card = this.messageRow(message, selected).card!;
+			return node(
+				"card",
+				{
+					...(selected ? {} : { variant: "bare" as const }),
+					selected,
+					actions: { click: `onlyne.message:${message.seq}` },
+					title: card.head,
+				},
+				[
+					textNode([span(card.head, "muted")], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
+					textNode([span(card.description)], { wrap: "none", truncate: "end", lines: 1, shrink: 1, min: { w: 0 } }),
+				],
+				message.seq,
+			);
+		});
+		// Folded, the section keeps its head so the same click brings the list back.
+		const columns: NativeNode[] = [
+			node(
+				"section",
+				{
+					head: `线程 · ${threads.length}`,
+					collapsible: true,
+					collapsed: this.threadFolded,
+					...(this.threadFolded ? {} : { max: { w: `${layout.threadWidth}ch` as const }, shrink: 0 }),
+				},
+				threadCards,
+				"threads",
+			),
+		];
+		columns.push(node("col", { grow: 1, shrink: 1, basis: 0 as const }, messageCards, "messages"));
+		return node("row", { gap: "sm", align: "start", role: "onlyne.chat" }, columns, "chat");
+	}
+
 	/** The selected message as one ANSI block: a dim head, then the body with its escapes dropped. */
 	private detailText(): string | undefined {
 		const message = this.selectedThread()?.messages[this.messageIndex];
@@ -387,7 +459,7 @@ export class OnlyneViewer implements Component {
 		// The band lives in the message column, so it wraps to that column's width.
 		const detailRows = this.detailRows(layout.detailHeight, layout.stacked ? width : width - layout.threadWidth - 2);
 
-		if (layout.stacked) {
+		if (layout.stacked || this.threadFolded) {
 			const rows: BodyRow[] = [{ left: [[`Threads · ${threads.length}`, "muted"]], key: "threads-head" }];
 			rows.push(...threadRows);
 			rows.push({ left: [[`Messages · ${shortAlias(thread.alias)} · ${thread.title}`, "muted"]], key: "messages-head" });
@@ -660,12 +732,15 @@ export class OnlyneViewer implements Component {
 		// way), so the whole message stays reachable without the viewer windowing it.
 		const layout = this.chatLayout(cx.cols);
 		const detail = this.page === "chat" && layout.detailHeight > 0 ? this.detailText() : undefined;
-		const rows = this.bodyRows(cx.cols).filter(row => detail === undefined || row.key?.includes("detail-") !== true);
+		const chat = this.chatBody(cx, layout);
+		const rows = chat === undefined ? this.bodyRows(cx.cols).filter(row => detail === undefined || row.key?.includes("detail-") !== true) : [];
 		const children: NativeNode[] = [
 			this.titleNode(),
 			this.summaryNode(),
 			this.tabsNode(),
-			...rows.map((row, index) => this.describeRow(row, index)),
+			...(chat === undefined
+				? rows.map((row, index) => this.describeRow(row, index))
+				: [chat, node("col", { grow: 1 }, [], "chat-spacer")]),
 			...(detail === undefined
 				? []
 				: [
@@ -674,7 +749,7 @@ export class OnlyneViewer implements Component {
 								"ansi",
 								{
 									text: detail,
-									cols: Math.max(20, cx.cols - layout.threadWidth - 4),
+									cols: Math.max(20, (this.threadFolded ? cx.cols : cx.cols - layout.threadWidth) - 4),
 									max: { h: `${layout.detailHeight}lines` as const },
 									role: "onlyne.detail",
 								},
@@ -692,7 +767,15 @@ export class OnlyneViewer implements Component {
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (this.disposed || this.signal.aborted || event.type !== "action") return;
+		if (this.disposed || this.signal.aborted) return;
+		if (event.type === "toggle") {
+			if (event.key === "threads" || event.key.endsWith("/threads")) {
+				this.threadFolded = event.collapsed;
+				this.changed();
+			}
+			return;
+		}
+		if (event.type !== "action") return;
 		const act = event.act;
 		if (act === "onlyne.close") {
 			this.done();
@@ -833,6 +916,11 @@ export class OnlyneViewer implements Component {
 			return;
 		}
 		const messages = threads[this.threadIndex]?.messages ?? [];
+		if (data === "t") {
+			this.threadFolded = !this.threadFolded;
+			this.changed();
+			return;
+		}
 		if (matchesKey(data, "enter")) {
 			if (messages.length === 0) return;
 			this.expanded = !this.expanded;
