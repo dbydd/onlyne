@@ -173,6 +173,10 @@ export class MessageService {
       message_ref: { sender: message.sender, id: message.id }, receipt_id: this.ctx.id(),
       guarantee: this.ctx.storage.guarantee, thread_ref: threadRef, seq, plan: structuredClone(request.plan),
       thread_created: firstContact, previous_seq: (decimal(seq) - 1n).toString(),
+      // The answer a message gives is part of what the owner admitted: the sender can only
+      // prove "I replied to that one" from the receipt, and the reference here is the pair
+      // both sides' records agree on (cyanea report 2, problem 2).
+      ...(message.meta?.in_reply_to === undefined ? {} : { in_reply_to: message.meta.in_reply_to }),
     };
     await tx.put(key('thread', threadRef.owner, threadRef.id), thread);
     await tx.put(key('entry', threadRef.owner, threadRef.id, seq), entry);

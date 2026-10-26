@@ -59,6 +59,12 @@ export interface Receipt {
   message_ref: MessageRef; receipt_id: string; guarantee: Storage['guarantee'];
   thread_ref: ThreadRef; seq: string; plan: DeliveryPlan;
   thread_created?: boolean; previous_seq?: string;
+  /**
+   * The message this one answers, in the identity the owner stored: the sender's
+   * `{thread,seq}` spelling is resolved before delivery, so this is the pair every
+   * later read agrees on. Absent when the message answers nothing.
+   */
+  in_reply_to?: MessageRef;
 }
 export interface Entry {
   thread_ref: ThreadRef; seq: string; message: Message; authenticated_author: NodeId;
@@ -134,6 +140,14 @@ export interface Conversation {
   last_at: string | null;
 }
 export interface HistoryQuery extends PageOptions { thread?: ThreadRef; message?: MessageRef }
+/**
+ * One queued obligation and what became of it. `context` is where the delivery was sent;
+ * `injected` is **observed**, not submitted: it flips only in `confirmConsumption`, once the
+ * host has seen the entry in a provider request. A message submitted into a session that never
+ * reads it therefore stays `injected: false` and keeps its place in unread and alerts
+ * (caerulea report 3, problem 1). The name predates that rule and is kept because renaming it
+ * would read every stored row as unobserved and re-inject what was already read.
+ */
 export interface LocalAttention { attention: Attention; context?: string; injected: boolean }
 export interface Target { node_id: NodeId; base_url: string; headers?: Record<string, string> }
 export interface Transport {

@@ -267,6 +267,9 @@ async function phaseLocal(): Promise<void> {
     target_endpoint: lazuliNode, plan,
   });
   check('messages.reply', reply.seq === '2' ? '' : `unexpected reply seq ${reply.seq}`);
+  // The receipt is the only place the sender can prove what it answered (cyanea report 2).
+  check('messages.reply.receipt', reply.in_reply_to?.sender === send.message.sender && reply.in_reply_to.id === send.message.id
+    ? '' : `the receipt lost the answered reference: ${JSON.stringify(reply.in_reply_to)}`);
 
   const permit = await lazuli.node.threads.permits(dpdpAuth, {
     message_ref: { sender: send.message.sender, id: send.message.id }, grantee: lazuliNode,

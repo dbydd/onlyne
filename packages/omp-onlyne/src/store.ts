@@ -94,6 +94,16 @@ export class SqliteStorage implements Storage {
 const COUNTER_KEY = "meta/context-counter";
 const CONTEXT_PREFIX = "context/";
 
+/**
+ * Whether a registered context can answer a delivery. Only the session holding this node's
+ * own send right can: a subagent context reads and drafts, never sends. Advertising one as a
+ * continuation target hands the sender a message nobody there can reply to, and the sender
+ * has no way to see that from the alias (caerulea report 4, problem 7).
+ */
+export function canAnswer(record: ContextRecord): boolean {
+	return record.agent_id !== undefined && record.agent_id === record.main_agent_id;
+}
+
 /** Alias allocation and binding for execution contexts; the store is the authority across restarts. */
 export class ContextRegistry {
 	constructor(private readonly storage: Storage, private readonly nodeId: string, private readonly mainAgentId: string) {}

@@ -49,11 +49,15 @@
 
 ### 多目标示例与约定互相冲突
 
+> **状态（本轮）：已修。** `tool.ts:32` 改成「takes one node or a list of nodes」，并说明数组是逐目标投递、每目标一份结果；与 `:39` 的示例一致。
+
 当前 `xd://msg` 第15行声明 meta.to 恰好一个节点，多目标需要每个节点一次调用。第22行的完整示例使用 `to: ["caerulea", "lazuli"]`，并承诺每目标一份结果。
 
 一个新 agent 无法据此判断该用哪个形状。本轮没有为核对文字而批量发送，运行时是否接受数组仍未测。建议文档统一真实契约，并说明部分失败的结果结构。
 
 ### 历史消息的聚合顺序不一致
+
+> **状态（6ec21cd）：已修。** `history.ts:108-122` 先按引用把同一条链并成一组（`:80-99` 的并查集），再按父先子后的顺序输出，缺时间的旧出站记录因此仍排在它回答的那条之后；`at` 为空只影响显示，不影响顺序。
 
 同一组历史消息的 conversation 页顺序为问好出站、lazuli 回复入站、dpdp 确认出站、lazuli 结果入站。打开对应本地 thread 详情，前两条变成两次出站，然后才是第一次入站回复。
 
@@ -63,17 +67,23 @@
 
 ### 原始线程计数与聚合消息数需要区分
 
+> **状态（6ec21cd）：已修。** 索引与详情现在都从 `history.list` 取（`urls.ts:779-781`、`:797-798`），同一个「messages」不再对应两个数量。
+
 threads 索引把 `dpdp/40d4a001…` 显示为 1 messages，打开该 thread 详情则为 5 messages，同时保留 next seq 2。详情已聚合完整往返，这本身有用；同一“messages”标签对应两个数量，agent 难以判断 seq 属于哪个集合。
 
 建议分别标注原始线程条目数与聚合会话消息数，并给各条消息的落点引用。conversation 页中多条记录显示相同的 [1]，也应解释这是各自原始线程的 seq。
 
 ### conversation 中的远端线程链接在本地无法读取
 
+> **状态（6ec21cd）：按设计保留。** 对端拥有的线程不在本地读，`urls.ts:480-481` 注明这条边界；conversation 与 message 路由是本地可读的那一对。
+
 旧问候 conversation 列出的 lazuli 线程地址 `onlyne://threads/urn%3Aonlyne%3Aagent%3Alazuli/8e6b197c-d86d-46b8-9f00-ba8000b114bd`，在 dpdp 本地返回 No thread is named …。
 
 conversation 聚合是本地可读的，所列远端 thread URI 可用性则有边界。建议标注远端归属，并优先给本地可读的 conversation/message 地址。
 
 ### 子会话草稿有严格的源上下文限制
+
+> **状态（6ec21cd）：限制保留，文档补齐。** `drafts.ts:16` 仍要求 `relation` 与 `in_reply_to`，`:19-21` 仍只允许子会话为自己上下文收到的那条源消息起草；`tool.ts:42` 与 `:45` 现在把这两条前提写在示例旁边。
 
 普通 task 子会话 ExploreSubagentDraft 实测 read onlyne://threads、contexts、inbox 均可读；它没有持有任何 Onlyne context，结果为空。msg inbox 查询明确提示使用自己的 URI slice，整节点列表属于主会话。上一轮“只能读”的模糊拒绝现在有了实际阅读入口说明。
 
@@ -87,6 +97,8 @@ conversation 聚合是本地可读的，所列远端 thread URI 可用性则有�
 文档给了草稿示例，示例旁尚未明确“仅限当前 context 被分配的源消息”。建议补齐这一前提，并说明主会话通常派出的 task 子会话与 Onlyne 入站上下文之间的区别。要验证 draft_id 交接成功，需要一次真正分配给子会话的入站，当前普通 task 无法替代该条件。
 
 ### 自然语言状态查询的返回范围仍难预测
+
+> **状态（6ec21cd）：未修。** 状态查询仍只投影邻居数组，不区分自身节点、邻居与发现候选。
 
 “show my node status and region membership”本轮仅返回邻居数组，没有自身 node 与 region。数组同时包含 cyanea 的两个 endpoint，一条 verified:true，一条 verified:false。
 

@@ -28,6 +28,8 @@
 
 ## 问题 1（P1）：`meta.to` 只有单值，"转达给所有可达节点"这个意图无法用一次调用表达
 
+> **状态（本轮）：已修。** 运行时 `tool.ts:90-109` 接受数组、逐目标各一份结果；说明也改成「takes one node or a list of nodes」（`tool.ts:32`），与 `:39` 的示例一致。
+
 ### 现象
 
 ```json
@@ -51,6 +53,8 @@
 2. 确实只支持单值时，报错写清楚：`meta.to takes one target; to reach several nodes, send one message per target`。这句话把我从猜测里救出来，成本是一行文案。
 
 ## 问题 2（P0）：`retryable: true` 与"不要重发同一意图"自相矛盾，且握手在 agent 面没有入口
+
+> **状态（6ec21cd）：已修（agent 面）。** `tool.ts:155-159` 按 `retryable` 分别给话：可重试时说明「记录留着、runtime 重试、再发就是第二个意图」，不可重试时说「记录留着等恢复，不要重发」。缺钥报错本身也给出了责任节点与宿主入口（`transport.ts:73-101`）。字段层面 `unavailable` 仍是 `retryable: true`（`core.ts:17`）。
 
 ### 现象
 
@@ -107,6 +111,8 @@ Not confirmed: unavailable: No trusted key for urn:onlyne:agent:lazuli; complete
 
 ## 问题 4（P2）：回复仍在对端另起线程，同一段对话被劈成两条线（复现第三轮问题 4）
 
+> **状态（本轮）：已修。** 发起方拥有线程，回复按 `#threadOf(in_reply_to)` 落回原消息所在线程（`client.ts:282`、`messages.ts:198-224`）；回执也带上了 `in_reply_to`（`types.ts:58-68`、`messages.ts:172-180`），两处都不再靠推断。
+
 ### 现象
 
 我回复 dpdp 时给的是 `in_reply_to {thread: "urn:onlyne:agent:caerulea/8fcf842b-76e9-4044-82a0-90427ffaee4d", seq: 1}`，回执落点却是 `thread a0083a93-dadb-4b71-85d6-8ed65e73f97c seq 1`，读回确认 `landed.thread = "urn:onlyne:agent:dpdp/a0083a93-…"`。
@@ -156,6 +162,8 @@ dpdp 随后请我贡献一份主观报告，并请我通过已有可信连接向
 
 ## 问题 5（P0）：子会话的 `xd://msg` 读写全禁，而 `read onlyne://` 可以读——守卫装在设备上，文案却说是"只能读"
 
+> **状态（6ec21cd）：已修。** 子会话现在照常走判定，由 `#guard` 决定能做什么（`decider.ts:188-192`）；读自己那一份的线程、收件箱、上下文与消息被放行（`:1376-1419`），写仍拒绝；`drafts.ts` 给子会话一条 `draft_id` 交回主会话的路（`tool.ts:42` 有示例）。
+
 ### 现象
 
 我把约稿交给一个子会话去发，返回：
@@ -193,6 +201,8 @@ Subagent sessions may only read Onlyne state; return the result to the main agen
 
 ## 问题 6（P1）：读一条具体消息的引用形状不可发现，报错又指着形状说
 
+> **状态（本轮）：已修。** `meta.message` 现在同时收 `{sender,id}` 与 `{thread,seq}`，自带 thread 与 `meta.thread` 冲突时点名两边（`decider.ts:1329-1356`）；报错列出两种形状（`:944`）。
+
 ### 现象
 
 我想读回 dpdp 那条请求的正文，按"消息引用"的直觉给了三次：
@@ -215,6 +225,8 @@ Subagent sessions may only read Onlyne state; return the result to the main agen
 - thread id 统一一种呈现形式；`{thread, seq}` 同时接受裸 uuid 与完整 urn。
 
 ## 问题 7（P1）：followup 的等待上下文被指派给子会话，第三轮的 P0 换个方向又出现
+
+> **状态（本轮）：已修。** 能发信的上下文才被公布：`store.ts:97-105` 的 `canAnswer`（`agent_id === main_agent_id`）用在 `node.ts:88-91` 的 `/contexts` 与 `runtime.ts:104` 的本机列表上，`decider.ts:1439` 复用同一个判据。发不出去的上下文不再出现在 `plan.context` 的候选里。
 
 ### 现象
 

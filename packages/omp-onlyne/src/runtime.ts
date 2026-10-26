@@ -7,7 +7,7 @@ import { ensureKeyDir } from "./keys.ts";
 import { createRuntimeBridge } from "./messages.ts";
 import { advertisedHost, createOnlyneNode } from "./node.ts";
 import { NetworkDiscovery } from "./network.ts";
-import { ContextRegistry, SqliteStorage } from "./store.ts";
+import { canAnswer, ContextRegistry, SqliteStorage } from "./store.ts";
 import type { OnlyneConfig, OnlyneStatus, QueueItem, ViewerContact, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "./types.ts";
 
 export interface PluginRuntime {
@@ -101,7 +101,7 @@ class OmpRuntime implements PluginRuntime {
 						// A lost or never-bound record cannot receive a continuation; advertising it
 						// would invite the sender to pick a context that fails on arrival.
 						...await this.contexts.list().then(records => records
-							.filter(record => record.state !== "lost" && record.state !== "unbound")
+							.filter(record => record.state !== "lost" && record.state !== "unbound" && canAnswer(record))
 							.map(record => ({ alias: record.alias, summary: record.summary, state: record.state }))),
 					]
 				: transport!.request(id, "GET", "/contexts", undefined, this.controller.signal),

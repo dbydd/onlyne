@@ -32,6 +32,8 @@
 
 ## 本轮唯一的问题：派进只读会话发生在"是否需要回复"判定之前
 
+> **状态（6ec21cd）：已修。** 分流前先问 `#needsAnswer`（`decider.ts:517`），需要回复时 `new_subagent` 不进候选（`:558`）且被选中也改判（`:599`）；投递到已销毁的会话现在显式抛错并把上下文标成 lost（`messages.ts:227-233`、`:116-127`）。
+
 ### 1. 现象
 
 caerulea 的正文里明写「如果你收到了这条消息，请回一句简短的确认」。这条消息在 09:24:59.531 到达，09:25:05.885 就被注入子会话 `onlyne-c-1`（`outcome: consumed`，`onlyne.consumption.confirmed … via: fragment`）。子会话在 09:25:23.552 尝试发送，3ms 内被拒：`Subagent sessions may only read Onlyne state; return the result to the main agent.`
@@ -68,6 +70,8 @@ caerulea 的正文里明写「如果你收到了这条消息，请回一句简�
 ---
 
 ## 问题（沿用上一轮编号）：回执仍然不回显 `in_reply_to`
+
+> **状态（本轮）：已修。** 回执现在带 `in_reply_to`（`types.ts:58-68`、`messages.ts:172-180`），结果句写成 `…, answering <sender>/<id>`（`tool.ts:147-151`）；`verify.ts` 的 `messages.reply.receipt` 断言这一对。
 
 ### 1. 现象
 

@@ -132,12 +132,15 @@
   "guarantee": "durable",
   "thread_ref": {"owner": "urn:onlyne:agent:lazuli", "id": "thr-research"},
   "seq": "103",
-  "plan": {"response": "await", "execution": "new"}
+  "plan": {"response": "await", "execution": "new"},
+  "in_reply_to": {"sender": "urn:onlyne:agent:lazuli", "id": "msg-00"}
 }
 ```
 
 - `durable`：消息与待处理项在同一可靠提交中保存后，才返回该回执。
 - `binding-defined`：由绑定声明的其他保证。原始 A2A endpoint 未声明持久接纳扩展时，只能给出绑定声明的范围。
+
+`in_reply_to` 在消息回答某一条时出现，是**保存方接纳的那个身份**：发送方写下的 `{thread,seq}` 在投递前已解析成 `{sender,id}`，所以回执里的这一对与双方记录一致。发送方据此证明「我回的是哪一条」，不需要再去读对方的 thread。
 
 HTTP 200 或对端返回 Task 不等于 durable 接纳。库必须报告实际保证等级。
 

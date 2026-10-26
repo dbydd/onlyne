@@ -24,6 +24,8 @@
 
 ## 问题 1（P0）：回复被投进已销毁的子会话，主会话零信号
 
+> **状态（6ec21cd）：已修。** `messages.ts:227-233` 的 `deliverToContext` 遇到没有活会话的上下文直接抛错，`:116-127` 捕获后把该上下文标成 `lost` 并保留欠账；`decider.ts:517` 的分流也不再让需要回复的消息进子会话。建议第 3 条（拆开「提交给谁」与「模型是否读过」）在语义上成立：`injected` 只在 `confirmConsumption` 里置真（`client.ts:891-893`），而「提交给谁」是同一行的 `context`，字段名与注释现在写明了这一点（`types.ts:143-151`）。
+
 ### 现象
 
 cyanea 的回复在 inbox 里完整存在，但标着 `"injected": true`，`plan` 为 `{"response":"async","execution":"existing","context":"c-1"}`。我的提示里没有它，TUI 的未读里也没有它。
@@ -51,6 +53,8 @@ cyanea 的回复在 inbox 里完整存在，但标着 `"injected": true`，`plan
 
 ## 问题 2（P1）：`in_reply_to {thread, seq}` 的 seq 必须是字符串，但错误说「形状不对」
 
+> **状态（6ec21cd）：已修。** `decider.ts:1618-1621` 的 `seqField` 收字符串与安全整数；`:1312` 的报错改成点名 `seq` 的类型。
+
 ### 现象
 
 第一次回 dpdp：
@@ -73,6 +77,8 @@ cyanea 的回复在 inbox 里完整存在，但标着 `"injected": true`，`plan
 
 ## 问题 3（P1）：`meta.thread` 与回复互斥，但文档把两者并列
 
+> **状态（6ec21cd）：已修。** 线程改由发起方拥有，存储节点是线程 owner、`to` 是收件人，两者不再要求相等：`decider.ts:489-506` 只解析 `meta.thread`，`client.ts:279-282` 按线程 owner 路由，旧的那句「线程属于 X 但目标是 Y」已不存在。
+
 ### 现象
 
 第二次，seq 改成字符串，并顺手带上 `meta.thread`（因为工具描述里 `thread` 和 `in_reply_to` 是并列的 meta 字段）：
@@ -92,6 +98,8 @@ The named thread belongs to urn:onlyne:agent:caerulea, but the message targets u
 
 ## 问题 4（P2）：回复在对端开新线程，对话被劈成两条
 
+> **状态（6ec21cd）：已修（落点）。** `client.ts:282` 的回复用 `#threadOf(in_reply_to)` 解析落点，`messages.ts:198-224` 的 `chainLanding` 在 owner 侧走同一条链，回复落回原消息所在线程。回执仍不说明「回的是哪一条」，见 `cyanea-found1.md` 问题 6。
+
 回执：`Delivered to urn:onlyne:agent:dpdp (thread 185097c0-fbfd-42d8-92ba-97dceca55636 seq 1)`。这是 dpdp 侧的一条**新线程**，不是 dpdp 自己那条问候线程的 seq 2。线程按 owner 存放，方向一换就换线程，两边的对话只能靠 `in_reply_to` 关联。
 
 这在语义上讲得通，但对「一个话题一条线」的直觉是破坏性的：`/onlyne` 的视图按线程分组，人和 agent 都会看到两段各说一句的对话。
@@ -99,6 +107,8 @@ The named thread belongs to urn:onlyne:agent:caerulea, but the message targets u
 建议：要么允许 `in_reply_to` 携带的 `thread_ref` 直接作为投递线程（回复落回原线程），要么在回执里同时给出「本条回复落在对端哪条线程」，让「我以为在回原来那条」这个误会没有生存空间。
 
 ## 问题 5（P2）：握手与信任状态在 agent 面上仍然不可见（复述 `dpdp-found2` 问题 1/3，附本轮证据）
+
+> **状态（6ec21cd）：已修（措辞）。** `transport.ts:73-101` 的缺钥报错给出双方节点、`reason`、`responsible_node`、`required_action`，并带上宿主入口；`tool.ts:155-159` 把「记录留着、runtime 重试」与「不要重发」分开写。
 
 本轮我唯一一次发不出去的原因是 `No trusted key for urn:onlyne:agent:cyanea; complete the key exchange first.`（`transport.ts:75-81`）。恢复路径只有 TUI：发现页发起、两侧确认指纹。用户做完之后：
 

@@ -18,7 +18,7 @@ import {
 	OnlyneError,
 } from "@onlyne/lib";
 import type { ContextRecord, OnlyneConfig } from "./types.ts";
-import type { ContextRegistry } from "./store.ts";
+import { canAnswer, type ContextRegistry } from "./store.ts";
 
 type Row = Record<string, unknown>;
 
@@ -1436,7 +1436,7 @@ export class JudgeDecider {
 			return ok(records.map(record => {
 				// A subagent session cannot send, so a reply routed there can never be answered.
 				// The judge sees that fact instead of a bare agent id (caerulea report 3, problem 1).
-				const isMain = record.agent_id !== undefined && record.agent_id === record.main_agent_id;
+				const isMain = canAnswer(record);
 				return {
 					alias: record.alias,
 					summary: record.summary,

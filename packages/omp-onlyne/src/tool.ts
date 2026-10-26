@@ -27,9 +27,9 @@ A reply arrives by itself. The plugin injects it as an onlyne.inbound message an
 
 State reads: read the root \`onlyne://\` for the views this node publishes — neighbors, threads, conversations, inbox, contexts, outbound — instead of guessing a route. A conversation is one exchange with both directions: \`onlyne://conversations\` lists them with the latest message and time, \`onlyne://conversations/<sender>/<id>\` shows every message in it, and one message is at \`onlyne://messages/<sender>/<id>\`. Raw thread entries stay at \`onlyne://threads/<thread-id>/messages/<seq>\`.
 
-A delivery lands in a thread the receiver owns, and a reply lands in the thread that holds the original message; the receipt reports that landing as thread <id> seq <n>. Naming one of your own threads as the landing is refused, not silently redirected, so leave meta.thread out of a reply.
+A delivery is stored in the thread it names, and the thread's owner stores it: the initiator owns the thread for the whole conversation, so a member writes into it and the owner admits. A reply names no thread; it lands in the thread that holds the original message. The receipt reports the landing as thread <id> seq <n> and names the message it answers as in_reply_to.
 
-meta.to names exactly one node. Sending to several peers is one call per peer, and each call returns its own receipt; report them separately rather than expecting one result for a set.
+meta.to takes one node or a list of nodes. A list is delivered one target at a time and returns one result per target, so a failure on one target does not hide the others; report each result separately.
 
 Use cases, each a complete call:
 
@@ -144,7 +144,11 @@ export function summary(result: unknown): string {
 	const owner = outcome.receipt?.thread_ref?.owner ?? outcome.reply?.thread_ref.owner;
 	const where = owner === undefined ? "" : ` to ${owner}`;
 	const ref = outcome.receipt === undefined ? undefined : `thread ${outcome.receipt.thread_ref.id} seq ${outcome.receipt.seq}`;
-	const facts = ref === undefined ? "" : ` (${ref})`;
+	// The answer is part of the delivery fact: a reply the receipt cannot attribute is one the
+	// sender cannot prove landed on the message it meant (cyanea report 2, problem 2).
+	const answers = outcome.receipt?.in_reply_to;
+	const answering = answers === undefined ? "" : `, answering ${answers.sender}/${answers.id}`;
+	const facts = ref === undefined ? "" : ` (${ref}${answering})`;
 	// The receipt names a thread the receiver owns, which is not a local object; the outbound
 	// record is. Point the reader at the handle that opens (dpdp report, problem 1).
 	const handle = outcome.receipt === undefined ? undefined : ` · 读回: onlyne://outbound/${outcome.receipt.message_ref.id}`;
@@ -185,6 +189,7 @@ function outcomeFacts(result: unknown): Record<string, unknown> {
 		...(outcome.wait === undefined ? {} : { wait: outcome.wait }),
 		...(outcome.reply_body === undefined ? {} : { withheld: outcome.reply_body === "withheld" }),
 		...(outcome.receipt?.seq === undefined ? {} : { seq: outcome.receipt.seq }),
+		...(outcome.receipt?.in_reply_to === undefined ? {} : { reply_to: `${outcome.receipt.in_reply_to.sender}/${outcome.receipt.in_reply_to.id}` }),
 		...(outcome.reply === undefined ? {} : { entry: `${outcome.reply.thread_ref.owner}/${outcome.reply.thread_ref.id}/${outcome.reply.seq}` }),
 		...(outcome.error === undefined ? {} : { code: outcome.error.code }),
 	};

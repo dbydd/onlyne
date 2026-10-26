@@ -77,6 +77,8 @@
 
 ## 问题 1：回复权限取调用方原文，投递目标走归一化
 
+> **状态（6ec21cd）：已修。** `decider.ts:1299-1304` 的 `{sender,id}` 分支先用 `#peerId` 解析成节点身份再当权限用，短名与 URN 不再互相排斥。
+
 ### 1. 现象
 
 `meta.in_reply_to` 用 `{sender,id}` 形式时，`sender` 写成短名 `caerulea`，同一句话在四次调用里全部失败，两种报错交替：
@@ -114,6 +116,8 @@ RFC 0003 的示例（`docs/rfcs/0003-messages.md:80`）把 `reply_authority` 写
 
 ## 问题 2：`seq` 只认字符串，形状给对了也报「needs {thread,seq}」
 
+> **状态（6ec21cd）：已修。** `decider.ts:1618-1621` 的 `seqField` 同时接受字符串与安全整数；缺字段时的报错改成点名类型（`:1312`）。
+
 ### 1. 现象
 
 `in_reply_to: { thread: "549f6b03-7304-46ca-a9ff-86827dba55ab", seq: 1 }` 返回：
@@ -145,6 +149,8 @@ meta.in_reply_to needs {thread,seq} or {sender,id}.
 
 ## 问题 3：`{sender,id}` 引用不做任何校验，错的 id 也照收
 
+> **状态（6ec21cd）：未修。** `decider.ts:1298-1305` 的 `{sender,id}` 分支仍直接构造引用，不查记录是否存在；只有 `{thread,seq}` 走 `#entryAt`。
+
 ### 1. 现象
 
 第 14 行那次成功，我给的 `id` 是线程 id `549f6b03-…`，真正的消息 id 是 `cbfbe2cc-…`。回执是 `admission: "accepted"`、`guarantee: "durable"`，没有任何字段提示这个引用没对上任何消息。
@@ -165,6 +171,8 @@ meta.in_reply_to needs {thread,seq} or {sender,id}.
 ---
 
 ## 问题 4：派给子会话的引用是 `线程id/seq`，消息 id 在手边没有交出去
+
+> **状态（6ec21cd）：已修。** `messages.ts:247-250` 的任务文本同时给 `message <id>` 与 `thread <owner>/<id> seq <n>`。
 
 ### 1. 现象
 
@@ -191,6 +199,8 @@ const source = entry.thread_ref.id + "/" + entry.seq;
 
 ## 问题 5：要回复的消息仍被派进只读子会话
 
+> **状态（6ec21cd）：已修。** `decider.ts:517` 在分流前先问 `#needsAnswer`；需要回复时 `new_subagent` 不进候选（`:558`），被选中也改判（`:599`），`fragment` 插入模式一并收回（`:686`、`:705`）。
+
 ### 1. 现象
 
 caerulea 的问候正文写着「期待你的回复！」，消息本身不带 `meta.in_reply_to`。判定把它派进 `onlyne-c-1`（`onlyne.inbound.inject … context: onlyne-c-1`）。子会话照做，`msg` 在 4ms 内回 `Subagent sessions may only read Onlyne state; return the result to the main agent.`，然后它把正文和一个不可用的引用交回主会话，主会话重做了一遍。
@@ -211,6 +221,8 @@ caerulea 的问候正文写着「期待你的回复！」，消息本身不带 `
 ---
 
 ## 问题 6：回执不回显 `in_reply_to`，投递成功之后无法自证
+
+> **状态（本轮）：已修。** `Receipt.in_reply_to` 记录保存方接纳的那个身份（`types.ts:58-68`，`messages.ts:172-180`），`tool.ts` 的结果句与日志都带上它；`verify.ts` 的 `messages.reply.receipt` 钉住这条契约。
 
 ### 1. 现象
 

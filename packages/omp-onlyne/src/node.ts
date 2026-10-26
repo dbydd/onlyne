@@ -1,6 +1,6 @@
 import { networkInterfaces } from "node:os";
 import { FetchTransport, OnlyneError, OnlyneNode, trustPhase, type Action, type Auth, type Json, type KeyHook, type KeyMaterial, type MaintenanceClock, type MsgInput, type Runtime, type SigningTransportOptions, type Storage, type Target } from "@onlyne/lib";
-import type { ContextRegistry } from "./store.ts";
+import { canAnswer, type ContextRegistry } from "./store.ts";
 import type { OnlyneConfig } from "./types.ts";
 import { loadOrCreateKey, writeKeyMaterial } from "./keys.ts";
 
@@ -85,7 +85,10 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 			// actor may open a thread. A keyed node admits only peers it has verified.
 			mayAdmit: async actor => keys === undefined || await known(actor),
 			inboundThread: async actor => keys === undefined || await known(actor),
-			executionContexts: async () => (await deps.contexts.list()).map(record => ({ alias: record.alias, summary: record.summary, state: record.state })) as Json,
+			// A context that cannot answer is not a continuation target: publishing one lets a
+			// sender aim a message at a session that can never reply (caerulea report 4, problem 7).
+			executionContexts: async () => (await deps.contexts.list()).filter(canAnswer)
+				.map(record => ({ alias: record.alias, summary: record.summary, state: record.state })) as Json,
 			mention: async alias => {
 				const name = alias.replace(/^@/, "");
 				if (name === "self" || name === config.node.id) return config.node.id;
