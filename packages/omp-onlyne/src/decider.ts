@@ -6,6 +6,7 @@ import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-ent
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
 	type Action,
+	type DeliveryPlan,
 	type Entry,
 	type Json,
 	type MessageRef,
@@ -270,9 +271,14 @@ export class JudgeDecider {
 		const plan = await this.#deliveryPlan(scope, meta, lockedRelation, reply !== undefined);
 		const thread = await this.#sendThread(meta, to, reply !== undefined);
 		const context = plan.execution === "new" ? undefined : await this.#receiverContext(scope, to, meta);
-		// `existing` names where the work lands, not a reason to fail the delivery: with no
-		// published context to continue, the receiver starts a new one (report 2, problem 2).
-		const execution = plan.execution === "existing" && context === undefined ? "new" : plan.execution;
+		if (plan.execution === "existing" && context === undefined) {
+			// RFC 0005 §1: `existing` disambiguates or refuses. Quietly opening a new context made
+			// the sender's own plan a lie: the receipt said existing and the work started fresh.
+			throw new OnlyneError(
+				"ambiguous_target",
+				`${to} publishes no execution context this message continues. Send it with execution "new" to start one.`,
+			);
+		}
 		const mentions = await this.#mentions(meta);
 		return {
 			kind: "send",
@@ -283,7 +289,7 @@ export class JudgeDecider {
 			...(lockedRelation === undefined ? {} : { relation: lockedRelation }),
 			...(mentions === undefined ? {} : { mentions }),
 			response: plan.response,
-			execution,
+			execution: plan.execution,
 		};
 	}
 
@@ -426,31 +432,40 @@ export class JudgeDecider {
 		return undefined;
 	}
 
-	/** Node O-3A-Ctx: pick among the target's published contexts; empty or unreadable degrades silently to new. */
+	/**
+	 * Node O-3A-Ctx: pick among the target's published contexts. A lost or never-bound record is
+	 * not a candidate, the target's own main session is the fallback every host publishes, and
+	 * an unreadable list is reported rather than read as "no context" (RFC 0005 §1).
+	 */
 	async #receiverContext(scope: DecisionScope, to: NodeId, meta: Record<string, Json>): Promise<string | undefined> {
 		const receiver = await this.#receiverContexts(to);
 		const explicit = stringField(meta, "context");
 		if (!receiver.available) {
 			if (explicit !== undefined) return explicit;
-			return undefined;
+			throw new OnlyneError("unavailable", `The target's published contexts cannot be read: ${receiver.reason}`);
 		}
+		const published = receiver.value.filter(context => context.state !== "lost" && context.state !== "unbound");
 		if (explicit !== undefined) {
-			if (!receiver.value.map(context => context.alias).includes(explicit)) {
+			if (!published.some(context => context.alias === explicit)) {
 				throw new OnlyneError("invalid_request", `The target does not publish an execution context named ${explicit}.`);
 			}
 			return explicit;
 		}
-		if (receiver.value.length === 0) return undefined;
+		if (published.length === 0) return undefined;
+		// The receiver's main session is the one context every host publishes: continuing work
+		// there needs no disambiguation.
+		const main = published.find(context => context.alias === "main")?.alias;
+		if (published.length === 1) return published[0]!.alias;
 		const started = Date.now();
 		const answers = await this.#judge(
 			scope.ctx,
-			{ focus: this.#focus(scope), target_published_contexts: receiver.value },
+			{ focus: this.#focus(scope), target_published_contexts: published },
 			{
 				context: {
 					type: "choice",
 					instructions: "Choose the execution context the target should continue in, or none when this message does not continue one.",
 					criteria: {
-						...Object.fromEntries(receiver.value.map(context => [context.alias, `${context.summary} (${context.state})`])),
+						...Object.fromEntries(published.map(context => [context.alias, `${context.summary} (${context.state})`])),
 						none: "The message does not continue any published context and starts fresh work instead.",
 					},
 				},
@@ -459,11 +474,9 @@ export class JudgeDecider {
 		);
 		this.#record("outbound.o3a-ctx", scope.input, answers, Date.now() - started);
 		const alias = choice(answers, "context");
-		// `existing` names where the work lands, not a reason to fail the delivery: none or an
-		// unknown alias falls back to a new context (report 2, problem 2).
-		if (alias === undefined || alias === "none" || !receiver.value.some(context => context.alias === alias)) {
-			return undefined;
-		}
+		// The plan already says `existing`: with no context named, the target's own main session
+		// is where work continues, and the caller refuses only when there is no such context.
+		if (alias === undefined || alias === "none" || !published.some(context => context.alias === alias)) return main;
 		return alias;
 	}
 
@@ -507,16 +520,38 @@ export class JudgeDecider {
 		throw new OnlyneError("invalid_request", `The named thread belongs to ${thread.owner}, but the message targets ${to}.`);
 	}
 
-	async decideInbound(scope: ExtensionContext, entry: Entry): Promise<InboundDecision> {
-		const needsReply = needsReplyOf(entry);
+	/**
+	 * One inbound entry's route. `plan` is the sender's delivery plan when the delivery named
+	 * one: an explicit `plan.context` is binding, `execution: new` is only a preference.
+	 */
+	async decideInbound(scope: ExtensionContext, entry: Entry, plan?: DeliveryPlan): Promise<InboundDecision> {
+		// The binding is checked first: a plan that names a context needs no obligation question,
+		// and a lost one must fail without spending a judge call on every maintenance pass.
+		const bound = await this.#boundContext(plan);
+		if (bound !== undefined) return bound;
+		const needsAnswer = await this.#needsAnswer(scope, entry, plan);
+		// The sender asked for a fresh context and expects nothing back: that is exactly what a
+		// subagent is, so no routing question can improve on it.
+		if (plan?.execution === "new" && !needsAnswer) return { action: "new_subagent" };
+		if (plan?.execution === "new") {
+			// A new-context preference cannot hold an obligation: a subagent has no send right, so
+			// an answer owed here would never leave this node (dpdp report 4, host shape).
+			this.deps.log?.("onlyne.judge.overridden", {
+				direction: "inbound",
+				chosen: "new_subagent",
+				fallback: "main_agent",
+				reason: "a new-context request cannot hold a message that needs an answer",
+			});
+			return { action: "wake", insertion: await this.#insertionMode(scope, entry, needsAnswer) };
+		}
 		// Deterministic prefilter (design §5.1): a disposed or never-bound session is a delivery
 		// black hole, and a message that needs an answer can only land where a reply can be sent.
 		// Pruned candidates never reach the prompt, so the question only offers positive options.
 		const registry = valueOf<Row[]>(await this.#contextRows()) ?? [];
 		const valid = registry
 			.filter(row =>
-				row.agent_id !== null && row.agent_id !== undefined
-				&& (!needsReply || row.can_answer === true)
+				row.agent_id !== null && row.agent_id !== undefined && row.live === true
+				&& (!needsAnswer || row.can_answer === true)
 				// The main session is its own I-1 option; its registry row is not a context candidate.
 				&& row.alias !== "main")
 			.slice(0, INBOUND_CONTEXT_CAP);
@@ -532,7 +567,7 @@ export class JudgeDecider {
 				String(row.alias),
 				`${String(row.summary)} (state: ${String(row.state)}, agent: ${String(row.agent_id)}${sameThread(row.thread_ref) ? ", same thread as this message" : ""})`,
 			])),
-			...(needsReply ? {} : { new_subagent: "The message is a self-contained work item with its own background, and needs no answer. A status note, greeting, relay or summary is not this." }),
+			...(needsAnswer ? {} : { new_subagent: "The message is a self-contained work item with its own background, and needs no answer. A status note, greeting, relay or summary is not this." }),
 		};
 		// A pruned candidate set can leave one route; asking would be a question with one answer.
 		const forced = Object.keys(criteria);
@@ -542,7 +577,8 @@ export class JudgeDecider {
 					scope,
 					{
 						focus: { node: this.deps.config.node.id, incoming: entryFacts(entry) },
-						needs_reply: needsReply,
+						needs_answer: needsAnswer,
+						plan: plan ?? null,
 						valid_contexts: valid.map(row => ({
 							alias: row.alias,
 							summary: row.summary,
@@ -573,7 +609,7 @@ export class JudgeDecider {
 		const chosen = choice(answers, "routing_target");
 		if (chosen === undefined) throw new OnlyneError("decision_unavailable", "The decision did not choose a routing target.");
 		if (chosen === "new_subagent") {
-			if (needsReply) return override(chosen, "a subagent cannot answer a message that needs a reply");
+			if (needsAnswer) return override(chosen, "a subagent cannot answer a message that needs a reply");
 			return { action: "new_subagent" };
 		}
 		if (chosen !== "main_agent") {
@@ -581,13 +617,77 @@ export class JudgeDecider {
 			if (row === undefined) return override(chosen, "the decision named a context the prefilter did not offer");
 			return { action: "context", context: chosen };
 		}
-		const insertion = await this.#insertionMode(scope, entry, needsReply);
+		const insertion = await this.#insertionMode(scope, entry, needsAnswer);
 		if (insertion === "fragment") return { action: "fragment" };
 		return { action: "wake", insertion };
 	}
 
+	/**
+	 * Node I-0: whether this node owes the sender an answer. Routing used to infer it from
+	 * wording, so a completed reply read as a question and a greeting read as work; the
+	 * obligation is a semantic question now, and a failed judge is a failure, never a guess.
+	 */
+	async #needsAnswer(scope: ExtensionContext, entry: Entry, plan?: DeliveryPlan): Promise<boolean> {
+		const started = Date.now();
+		const answers = await this.#judge(
+			scope,
+			{
+				focus: { node: this.deps.config.node.id, incoming: entryFacts(entry) },
+				plan: plan ?? null,
+				relation: entry.message.meta?.relation ?? null,
+				in_reply_to: entry.message.meta?.in_reply_to ?? null,
+				// Wording is evidence, not the decision: it names the cases a judge may weigh.
+				wording_hint: needsReplyOf(entry),
+				current_work: this.#trigger(scope),
+				thread_dialogue: await this.#threadEvidenceFor([entry.thread_ref]),
+			},
+			{
+				needs_answer: {
+					type: "choice",
+					instructions:
+						"Does the sender expect this node to answer? A reference to an earlier message does not by itself create that expectation.",
+					criteria: {
+						yes: "The sender asks a question, greets and waits for an answer, requests work whose result must be reported back, or otherwise needs a reply from this node. plan.response await or async is consistent with this.",
+						no: "The sender expects nothing back: it completes a reply this node asked for, reports status, records a fact, or says no answer is needed. plan.response none is consistent with this.",
+					},
+				},
+			},
+			scope.signal,
+		);
+		this.#record("inbound.i0", { delivery_kind: entry.message.delivery_kind, msg: entry.message.msg, meta: entry.message.meta }, answers, Date.now() - started);
+		const answer = choice(answers, "needs_answer");
+		if (answer !== "yes" && answer !== "no") {
+			throw new OnlyneError("decision_unavailable", "The decision did not say whether this message needs an answer.");
+		}
+		return answer === "yes";
+	}
+
+	/**
+	 * RFC 0005 §1: a plan that names a context is binding. A record that is missing, never
+	 * bound, or no longer bound is `context_lost`: the delivery neither opens a new context
+	 * nor reroutes, and the entry stays owed for an explicit new decision.
+	 */
+	async #boundContext(plan: DeliveryPlan | undefined): Promise<InboundDecision | undefined> {
+		const alias = plan?.context;
+		if (alias === undefined) return undefined;
+		let record: ContextRecord | undefined;
+		try {
+			record = await this.deps.contexts.find(alias);
+		} catch (error) {
+			throw new OnlyneError("unavailable", `The context registry could not be read: ${message(error)}`);
+		}
+		const dead = record === undefined || record.agent_id === undefined
+			|| record.state === "lost" || record.state === "unbound";
+		if (!dead) return { action: "context", context: alias };
+		// A record that once held a binding has lost it; one that never bound stays unbound.
+		if (record !== undefined && record.agent_id !== undefined && record.bound_at !== undefined && record.state !== "lost") {
+			await this.deps.contexts.updateState(alias, "lost").catch(() => undefined);
+		}
+		throw new OnlyneError("context_lost", `${alias} is no longer bound; it needs an explicit new decision`, { context: alias });
+	}
+
 	/** Node I-2: when a main-session delivery enters the agent's work. */
-	async #insertionMode(scope: ExtensionContext, entry: Entry, needsReply: boolean): Promise<"steer" | "follow_up" | "fragment"> {
+	async #insertionMode(scope: ExtensionContext, entry: Entry, needsAnswer: boolean): Promise<"steer" | "follow_up" | "fragment"> {
 		const body = entry.message.msg.toLowerCase();
 		const started = Date.now();
 		// `fragment` never starts a turn, so a message that needs an answer can never be one;
@@ -595,7 +695,7 @@ export class JudgeDecider {
 		const criteria: Record<string, string> = {
 			steer: "Inject immediately after the current tool call: an urgent correction the running work must follow before it continues.",
 			follow_up: "Add when the current turn finishes and start a new turn: the session is expected to act on it, answer it, or use its result.",
-			...(needsReply ? {} : { fragment: "Record without starting a turn and expect nothing back: status syncs, log asides, version records and environment facts that say no action is needed (状态同步、日志旁路、版本记录、暂时不用管)." }),
+			...(needsAnswer ? {} : { fragment: "Record without starting a turn and expect nothing back: status syncs, log asides, version records and environment facts that say no action is needed (状态同步、日志旁路、版本记录、暂时不用管)." }),
 		};
 		const answers = await this.#judge(
 			scope,
@@ -614,7 +714,7 @@ export class JudgeDecider {
 		);
 		this.#record("inbound.i2", { delivery_kind: entry.message.delivery_kind, msg: entry.message.msg, meta: entry.message.meta }, answers, Date.now() - started);
 		const mode = choice(answers, "insertion_mode");
-		if (mode === "fragment" && needsReply) {
+		if (mode === "fragment" && needsAnswer) {
 			this.deps.log?.("onlyne.judge.overridden", { direction: "inbound", chosen: "fragment", fallback: "follow_up", reason: "a silent fragment cannot answer a message that needs a reply" });
 			return "follow_up";
 		}
@@ -809,8 +909,11 @@ export class JudgeDecider {
 		}
 
 		const scopeName = stringField(meta, "scope");
-		if (scopeName !== undefined && isReadScope(scopeName)) {
-			return this.#read(scope, scopeName);
+		if (scopeName !== undefined) {
+			// `peers` is the name a model reaches for; the library's scope is `neighbors`, and
+			// the alias keeps one word from meaning two channels (dpdp report 4, navigation).
+			const name = scopeName === "peers" ? "neighbors" : scopeName;
+			if (isReadScope(name)) return this.#read(scope, name);
 		}
 
 		return undefined;
@@ -823,6 +926,7 @@ export class JudgeDecider {
 		const cursor = stringField(meta, "cursor");
 		const seq = stringField(meta, "seq");
 		if (name === "directory") return { kind: "read", scope: name };
+		if (name === "neighbors") return { kind: "read", scope: name };
 		if (name === "threads") return { kind: "read", scope: name };
 		if (name === "inbox") {
 			return {
@@ -847,11 +951,19 @@ export class JudgeDecider {
 				attention: attention(meta),
 			};
 		}
-		const message = await this.#messageRef(meta, thread);
-		if (message === undefined) {
+		const resolved = await this.#messageRef(meta, thread);
+		if (resolved === undefined) {
 			throw new OnlyneError("invalid_request", `read ${name} needs a message reference: meta.message {sender,id} or {thread,seq}.`);
 		}
-		return { kind: "read", scope: name, thread, message };
+		// The thread the message was read in travels with the action: a subagent's guard
+		// authorizes a thread slice, and `{thread,seq}` already names that slice.
+		const owner = resolved.thread ?? thread;
+		return {
+			kind: "read",
+			scope: name,
+			...(owner === undefined ? {} : { thread: owner }),
+			message: resolved.ref,
+		};
 	}
 
 	/** Node O-2B: which readable channel the message asks about; O-3B-Th joins when messages has no thread. */
@@ -880,12 +992,13 @@ export class JudgeDecider {
 		if (scopeName === undefined || scopeName === "none") {
 			throw new OnlyneError("decision_unavailable", "The decision named no read scope; the readable channels are peers, inbox, messages and evidence.");
 		}
-		// The design's names map onto the library's: `peers` is the directory listing. A caller
-		// that names a library channel explicitly in meta.scope still gets it verbatim.
+		// The design's `peers` is the library's `neighbors`: the nodes this one can address, the
+		// same rows onlyne://neighbors renders. A caller that names a library channel explicitly
+		// in meta.scope still gets it verbatim.
 		if (scopeName !== "peers" && scopeName !== "inbox" && scopeName !== "messages" && scopeName !== "evidence") {
 			throw new OnlyneError("decision_unavailable", `No readable channel exists for ${scopeName}; the readable channels are peers, inbox, messages and evidence.`);
 		}
-		const name: ActionReadScope = scopeName === "peers" ? "directory" : scopeName;
+		const name: ActionReadScope = scopeName === "peers" ? "neighbors" : scopeName;
 		const thread = await this.#thread(meta);
 		if (name === "messages") {
 			const chosen = thread ?? await this.#threadQuestion(scope, "outbound.o3b-th");
@@ -900,11 +1013,12 @@ export class JudgeDecider {
 			};
 		}
 		if (name === "evidence") {
-			const message = await this.#messageRef(meta, thread);
-			if (message === undefined) {
+			const resolved = await this.#messageRef(meta, thread);
+			if (resolved === undefined) {
 				throw new OnlyneError("invalid_request", `read ${name} needs a message reference: meta.message {sender,id} or {thread,seq}.`);
 			}
-			return { kind: "read", scope: name, ...(thread === undefined ? {} : { thread }), message };
+			const owner = resolved.thread ?? thread;
+			return { kind: "read", scope: name, ...(owner === undefined ? {} : { thread: owner }), message: resolved.ref };
 		}
 		return {
 			kind: "read",
@@ -1137,7 +1251,10 @@ export class JudgeDecider {
 		if (meta === undefined) return undefined;
 		const value = meta.to;
 		if (value === undefined) return undefined;
-		if (typeof value !== "string" || value.length === 0) throw new OnlyneError("invalid_request", "meta.to must be a non-empty string.");
+		if (typeof value !== "string") {
+			throw new OnlyneError("invalid_request", "meta.to names one target; pass an array to the tool for several, or send one call per peer.");
+		}
+		if (value.length === 0) throw new OnlyneError("invalid_request", "meta.to must be a non-empty string.");
 		return this.#peerId(value);
 	}
 
@@ -1216,25 +1333,39 @@ export class JudgeDecider {
 		};
 	}
 
-	async #messageRef(meta: Record<string, Json>, thread?: ThreadRef): Promise<MessageRef | undefined> {
+	/**
+	 * The message a read names, with the thread it was resolved in. `{sender,id}` carries no
+	 * thread here; `{thread,seq}` does, and an explicit meta.thread that contradicts the
+	 * reference is refused rather than silently winning.
+	 */
+	async #messageRef(meta: Record<string, Json>, thread?: ThreadRef): Promise<{ ref: MessageRef; thread?: ThreadRef } | undefined> {
 		const value = meta.message;
 		const record = value !== null && typeof value === "object" && !Array.isArray(value)
 			? (value as Record<string, Json>)
 			: undefined;
 		const sender = record === undefined ? undefined : stringField(record, "sender");
 		const id = record === undefined ? undefined : stringField(record, "id");
-		if (sender !== undefined && id !== undefined) return { sender, id };
+		if (sender !== undefined && id !== undefined) {
+			return { ref: { sender, id }, ...(thread === undefined ? {} : { thread }) };
+		}
 		// meta.message takes the same two shapes as meta.in_reply_to, including its own thread
 		// reference: `{thread, seq}` is the form a reader copies out of another reference, and
 		// refusing it while accepting `{sender, id}` made the same fact two spellings (caerulea 4).
 		const alias = record === undefined ? undefined : stringField(record, "thread");
-		const scope = thread ?? (alias === undefined ? undefined : await this.#threadByAlias(alias));
+		const embedded = alias === undefined ? undefined : await this.#threadByAlias(alias);
+		if (thread !== undefined && embedded !== undefined && threadKey(thread) !== threadKey(embedded)) {
+			throw new OnlyneError(
+				"invalid_request",
+				`meta.thread names ${threadKey(thread)} but meta.message names ${threadKey(embedded)}; a message read names one thread.`,
+			);
+		}
+		const scope = thread ?? embedded;
 		if (scope === undefined) return undefined;
 		const seq = (record === undefined ? undefined : seqField(record, "seq")) ?? seqField(meta, "seq");
 		if (seq === undefined) return undefined;
 		const entry = await this.#entryAt(scope, seq);
 		if (entry === undefined) throw new OnlyneError("not_found", `No message at ${scope.id}/${seq}.`);
-		return { sender: entry.message.sender, id: entry.message.id };
+		return { ref: { sender: entry.message.sender, id: entry.message.id }, thread: scope };
 	}
 
 	async #entryAt(thread: ThreadRef, seq: string): Promise<Entry | undefined> {
@@ -1261,7 +1392,7 @@ export class JudgeDecider {
 				"A subagent session reads Onlyne state, it does not write it. Read your own slice through onlyne://threads, onlyne://inbox and onlyne://contexts, then return the result so the main agent can send it.",
 			);
 		}
-		if (action.scope === "directory" || action.scope === "threads" || action.scope === "inbox") {
+		if (action.scope === "directory" || action.scope === "neighbors" || action.scope === "threads" || action.scope === "inbox") {
 			throw new OnlyneError(
 				"forbidden",
 				"A subagent reads its own slice through onlyne://threads and onlyne://inbox; the whole node listing belongs to the main session.",
@@ -1275,6 +1406,18 @@ export class JudgeDecider {
 			);
 			if (!tied) {
 				throw new OnlyneError("forbidden", "A subagent may read outbound evidence only for a message its own context received.");
+			}
+			return;
+		}
+		// `{sender,id}` names no thread, so the record that received that message is the
+		// authorization — the same tie evidence uses.
+		if (action.scope === "message" && action.thread === undefined && action.message !== undefined) {
+			const ref = action.message;
+			const tied = records.some(record =>
+				record.source !== undefined && record.source.sender === ref.sender && record.source.id === ref.id,
+			);
+			if (!tied) {
+				throw new OnlyneError("forbidden", "A subagent may read one message only when its own context received it.");
 			}
 			return;
 		}
@@ -1312,6 +1455,8 @@ export class JudgeDecider {
 					state: record.state,
 					kind: isMain ? "main" : "subagent",
 					can_answer: isMain,
+					// A lost or never-bound record cannot receive: offering it guarantees a failure.
+					live: record.state !== "lost" && record.state !== "unbound",
 					agent_id: record.agent_id ?? null,
 					main_agent_id: record.main_agent_id,
 					node_id: record.node_id,
@@ -1531,8 +1676,9 @@ function threadKey(ref: ThreadRef): string {
 }
 
 /**
- * Whether the sender expects an answer (design §5.1): metadata says reply, or the body
- * greets or asks. A reply routed where no reply can be sent is the field reports' deadlock.
+ * A wording hint about whether the sender expects an answer: metadata says reply, or the body
+ * greets or asks. It is evidence for node I-0, never the decision — a completed reply also
+ * mentions a greeting, and a status note also asks nothing (dpdp report 4, host shape).
  */
 export function needsReplyOf(entry: Entry): boolean {
 	if (entry.message.meta?.in_reply_to !== undefined) return true;

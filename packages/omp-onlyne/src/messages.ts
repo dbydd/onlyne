@@ -1,7 +1,7 @@
-import { OnlyneError, type DeliveryPlan, type Entry, type NotifyEvent, type Runtime, type TraceEvent } from "@onlyne/lib";
+import { OnlyneError, type DeliveryPlan, type Entry, type Message, type NotifyEvent, type Runtime, type TraceEvent } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { renderMailMessage, type OnlyneMessageDetails } from "./ui/mail-message.ts";
+import { refreshMailCards, renderMailMessage, type OnlyneMessageDetails } from "./ui/mail-message.ts";
 import type { InboundDecision, JudgeDecider } from "./decider.ts";
 import type { ContextRegistry } from "./store.ts";
 import type { ContextRecord } from "./types.ts";
@@ -23,10 +23,12 @@ export interface BridgeDeps {
 /**
  * One inbound entry is judged once per process. A retry replays the recorded decision
  * and, at most, the delivery it names; asking the judge again would turn the
- * maintenance tick into a model poll (RFC 0005 §1: one message gets one action).
+ * maintenance tick into a model poll (RFC 0005 §1: one message gets one action). A
+ * failed judgment is recorded too: the entry stays owed, and the tick does not re-ask.
  */
 interface InboundAttempt {
-	decision: InboundDecision;
+	decision?: InboundDecision;
+	failure?: OnlyneError;
 	landed?: string;
 }
 const inboundAttempts = new Map<string, InboundAttempt>();
@@ -39,9 +41,15 @@ const TRACE_DEBUG = new Set(["inbound.inject", "inbound.duplicate"]);
 
 export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 	return {
-		async supports(plan: DeliveryPlan): Promise<boolean> {
-			if (plan.execution !== "new") return true;
-			return taskTool(deps.main) !== undefined;
+		/**
+		 * Admission is the last cheap place to refuse a plan this host cannot honor (RFC 0005
+		 * §1): a `new` context needs the task tool. It runs inside the library's admission
+		 * transaction, so it may not read the context registry — that opens a second transaction
+		 * on the same store and waits on itself. A plan that names a lost context is refused by
+		 * `decideInbound` instead, which runs outside any transaction.
+		 */
+		async supports(plan: DeliveryPlan, _message?: Message): Promise<boolean> {
+			return plan.execution !== "new" || taskTool(deps.main) !== undefined;
 		},
 		trace: (event: TraceEvent) => {
 			const fields = { ...event } as Record<string, unknown>;
@@ -53,19 +61,22 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 			else deps.pi.logger.info(`onlyne.${name}`, fields);
 		},
 		async inject(entry: Entry, context?: string, plan?: DeliveryPlan) {
-			if (plan?.execution === "new") return { context: await startSubagent(deps, entry), consumed: true, outcome: "consumed" as const };
 			const key = inboundKey(entry);
 			let attempt = inboundAttempts.get(key);
 			if (attempt === undefined) {
 				const started = Date.now();
 				let decision: InboundDecision;
 				try {
-					decision = await deps.decider.decideInbound(deps.main, entry);
+					decision = await deps.decider.decideInbound(deps.main, entry, plan);
 				} catch (error) {
+					const failure = error instanceof OnlyneError
+						? error
+						: new OnlyneError("decision_unavailable", error instanceof Error ? error.message : String(error));
 					deps.pi.logger.warn("onlyne.judge.failed", {
-						entry: key, ms: Date.now() - started, error: error instanceof Error ? error.message : String(error),
+						entry: key, ms: Date.now() - started, error: failure.message,
 					});
-					throw error;
+					inboundAttempts.set(key, { failure });
+					throw failure;
 				}
 				attempt = { decision };
 				inboundAttempts.set(key, attempt);
@@ -74,10 +85,17 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 					...(decision.context === undefined ? {} : { context: decision.context }),
 				});
 			}
-			const { decision } = attempt;
+			if (attempt.failure !== undefined) {
+				deps.pi.logger.debug("onlyne.delivery.held", { entry: key, reason: "judge-failed", error: attempt.failure.message });
+				throw attempt.failure;
+			}
+			const decision = attempt.decision;
+			if (decision === undefined) throw new OnlyneError("decision_unavailable", "The inbound entry has no decision.");
 			if (decision.action === "new_subagent") {
 				attempt.landed ??= await startSubagent(deps, entry);
-				return { context: attempt.landed, consumed: true, outcome: "consumed" as const };
+				// A spawn is a submission, not a read: the child's prompt carries the token and its
+				// first provider request is the proof, so nothing is consumed here.
+				return { context: attempt.landed, consumed: false, outcome: "delivered" as const };
 			}
 			// The body is already where the decision put it; re-sending it would append a
 			// second copy that the cursor can only confirm once.
@@ -89,15 +107,19 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				const alias = decision.context;
 				if (alias === undefined) throw new OnlyneError("decision_unavailable", "The inbound decision named no context.");
 				const record = await deps.contexts.find(alias);
-				if (record?.agent_id === undefined) throw new OnlyneError("not_found", `No live context is registered as ${alias}.`);
+				if (record?.agent_id === undefined || record.state === "lost" || record.state === "unbound") {
+					// The binding went away between the decision and the delivery: the entry stays
+					// owed, and an explicit new decision is the only way to land it (RFC 0005 §1).
+					throw new OnlyneError("context_lost", `${alias} is no longer bound; it needs an explicit new decision`, { context: alias });
+				}
 				const token = registerPending(entry, record.agent_id, "fragment");
 				try {
 					await deliverToContext(record.agent_id, payload(entry, SUPPLEMENT, token), record.state === "running");
 				} catch (error) {
-					// The session behind this context is gone. Mark it unbound so the judge stops
-					// offering it, and keep the entry owed: a silent delivery into a disposed
+					// The session behind this context is gone. Mark the binding lost so no decision
+					// offers it again, and keep the entry owed: a silent delivery into a disposed
 					// session is how a reply disappears (caerulea report 3, problem 1).
-					await deps.contexts.updateState(alias, "unbound").catch(() => undefined);
+					await deps.contexts.updateState(alias, "lost").catch(() => undefined);
 					throw error;
 				}
 				attempt.landed = record.agent_id;
@@ -130,6 +152,8 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				decideTodo: (incoming, current) => deps.decider.decideTodo(deps.main, incoming, current),
 			};
 			await applyMessageTodo(entry, context, planner);
+			// The card reports the consumption this hook just served.
+			refreshMailCards();
 		},
 		notify: (event: NotifyEvent) => {
 			getRuntime()?.notify(event);
@@ -182,6 +206,8 @@ export function registerProviderBoundary(pi: ExtensionAPI): void {
 			if (!record) continue;
 			try {
 				await runtime.node.client.confirmConsumption(record.entry, record.context, record.kind);
+				// A confirmed consumption changes what the delivery card reports.
+				refreshMailCards();
 				if (record.kind === "tool_result") pi.appendEntry(AWAIT_CONSUMED, {
 					tool_call_id: token.slice("tool:".length), context: record.context,
 					ref: { sender: record.entry.message.sender, id: record.entry.message.id },
@@ -209,8 +235,9 @@ async function deliverToContext(agentId: string, payload: MessagePayload, runnin
  * One source message owns one context, for the process lifetime: a replay of the same
  * inbox record (the maintain loop's every-2s pass) must never spawn a second task. A
  * record bound to a live agent is returned as is; an unbound one from a failed earlier
- * spawn is reused under its own alias. The task text is the child's first prompt, so a
- * finished spawn has already consumed the message — the caller reports it as consumed.
+ * spawn is reused under its own alias. The task text is the child's first prompt and it
+ * carries the consumption token, so the child's first provider request is what proves the
+ * model read the delivery; the spawn itself consumes nothing.
  */
 async function startSubagent(deps: BridgeDeps, entry: Entry): Promise<string> {
 	const existing = await findContextBySource(deps.contexts, entry);
@@ -223,10 +250,20 @@ async function startSubagent(deps: BridgeDeps, entry: Entry): Promise<string> {
 	const references = `message ${entry.message.id}, thread ${entry.thread_ref.owner}/${entry.thread_ref.id} seq ${entry.seq}`;
 	const record = existing ?? await deps.contexts.allocate(entry.thread_ref, `onlyne ${source}`, entry.message);
 	const name = `onlyne-${record.alias}`;
+	const token = `onlyne-${crypto.randomUUID()}`;
 	const result = await tool.execute(`onlyne-${crypto.randomUUID()}`, {
-		// The child cannot send: its task text says so, because a session told to "handle" a
-		// delivery with no send right reads the refusal as its own failure (dpdp report 4).
-		task: `Read this onlyne delivery from ${entry.authenticated_author} (${references}) and return what the main session should send back; this session cannot send.\n\n${entry.message.msg}`,
+		// The child cannot send: its task text says so and names the one structured return that
+		// does work, because a session told to "handle" a delivery with no send right reads the
+		// refusal as its own failure (dpdp report 4).
+		task: [
+			`Read this onlyne delivery from ${entry.authenticated_author} (${references}).`,
+			`This session cannot send a message. When you have an answer, call the msg tool once to draft it and report the draft id back:`,
+			`msg({ delivery_kind: "draft the reply", msg: <your reply body>, meta: { op: "draft", to: ${JSON.stringify(entry.reply_authority)}, relation: "reply", in_reply_to: { sender: ${JSON.stringify(entry.message.sender)}, id: ${JSON.stringify(entry.message.id)} } } })`,
+			`That call stores a draft and sends nothing; the main session sends it. Do not retry a refused send and do not poll for the outcome.`,
+			`[[${token}]]`,
+			"",
+			entry.message.msg,
+		].join("\n"),
 		solutionSpace: "The delivery decides the work; use the message as the task.",
 		name,
 	});
@@ -235,6 +272,9 @@ async function startSubagent(deps: BridgeDeps, entry: Entry): Promise<string> {
 	if (child === undefined) throw new OnlyneError("unavailable", "The native task tool returned no child identity.");
 	const parentId = AgentRegistry.global().get(child)?.parentId;
 	await deps.contexts.bind(record.alias, { agent_id: child, ...(parentId === undefined ? {} : { parent_id: parentId }) });
+	// The token is already in the child's prompt, so it can only be registered once the child's
+	// identity is known; until then there is no provider boundary to observe it at.
+	registerPending(entry, child, "fragment");
 	return child;
 }
 async function findContextBySource(contexts: ContextRegistry, entry: Entry): Promise<ContextRecord | undefined> {
@@ -257,7 +297,10 @@ function payload(entry: Entry, customType: string, token: string): MessagePayloa
 	return { customType, content: `${renderEntry(entry, customType)}\n\n[[${token}]]`, display: true, attribution: "agent" as const,
 		details: {
 			thread_ref: entry.thread_ref, seq: entry.seq,
-			message_ref: { sender: entry.message.sender, id: entry.message.id }, consumption: "pending",
+			message_ref: { sender: entry.message.sender, id: entry.message.id },
+			// This card exists because the entry reached this node's inbox; whether the model has
+			// consumed it is read from history, never assumed here.
+			delivery: "received", consumption: "pending",
 			mail: {
 				from: entry.authenticated_author, at: entry.at, subject: entry.message.delivery_kind, body: entry.message.msg,
 				...(entry.message.meta?.relation === undefined ? {} : { relation: entry.message.meta.relation }),
