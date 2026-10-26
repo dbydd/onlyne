@@ -275,6 +275,18 @@ async function phaseLocal(): Promise<void> {
   check('thread.permit', permit.remaining === 1 ? '' : 'the reply permit was not stored');
 
   check('owner.guard', await refusal('forbidden', () => lazuli.node.threads.close(dpdpAuth, thread.thread_ref, mut())));
+
+  // RFC 0003 §6: a reply that names no thread lands in the thread holding the original
+  // message. Every reply used to open a new first-contact thread, so two nodes could not
+  // read one exchange back from a single thread (dpdp report 4, problem 1). Last, because it
+  // adds an obligation to the thread the earlier checks count.
+  const implicit = await lazuli.node.messages.admit(lazuliAuth, {
+    idempotency_key: crypto.randomUUID(), retry_until: future(),
+    message: { id: 'msg-02b', sender: lazuliNode, delivery_kind: '补充说明', msg: '这条回复不指定 thread。', meta: { in_reply_to: { sender: send.message.sender, id: send.message.id }, relation: 'followup' } },
+    target_endpoint: lazuliNode, plan,
+  });
+  check('messages.reply.landing', implicit.thread_ref.id === thread.thread_ref.id && implicit.seq === '3'
+    ? '' : `the unnamed reply landed in ${implicit.thread_ref.owner}/${implicit.thread_ref.id} seq ${implicit.seq}`);
 }
 
 // =============================================================================

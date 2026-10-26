@@ -62,6 +62,10 @@ separate security proposal; leave both at their defaults for the first E2E.
   `onlyne://contexts`, `onlyne://inbox`, `onlyne://outbox` — read-only views.
 - Inbound messages arrive as `onlyne.inbound` custom messages. A supplement for
   an existing context uses `onlyne.supplement` and `sendCustomMessage`.
+- Tern renders these messages as mailing-list letters: an `[onlyne]` subject,
+  sender, date, thread and reply headers, Markdown body, and a link to the
+  original entry. Other terminals show the same fields as text. Consumption
+  markers stay in the model payload and are hidden from the letter.
 - Consumption is confirmed only after the host observes the entry in an actual
   provider request; submitting a custom message or tool result does not advance
   the record.

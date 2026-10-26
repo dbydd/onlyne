@@ -5,6 +5,10 @@ import { canRead, getThread } from './threads.js';
 type Remembered = { digest: string; receipt?: Receipt; error?: Failure; retry_until: string };
 type Binding = { digest: string; identity: string };
 type Outcome = { receipt: Receipt } | { error: Failure };
+/** The sender's own record of a message it sent; the chain walk reads the reference it carries. */
+type SentRecord = { request: { message: { meta?: { in_reply_to?: MessageRef } } } };
+/** A reply chain is a conversation, not a log: a few hops reach the incoming message. */
+const MAX_REPLY_CHAIN = 8;
 
 /** Refusals this receiver records durably; retryable, internal and capacity failures roll back instead. */
 const RECORDED_REFUSALS: Record<string, true> = {
@@ -81,6 +85,10 @@ export class MessageService {
     let permit: ReplyPermit | undefined;
     if (original !== undefined) {
       permit = await tx.get<ReplyPermit>(key('permit', original.sender, original.id, message.sender));
+      // RFC 0003 §6: a reply lands in the thread that holds the original message. A closed
+      // thread falls through to the narrow permit, and silence on both sides is the
+      // first-contact path below.
+      if (threadRef === undefined) threadRef = await this.chainLanding(tx, original);
       if (threadRef === undefined && permit && !permit.revoked && permit.remaining > 0 && Date.parse(permit.expires_at) > this.ctx.now()
         && (message.meta?.relation !== 'followup' || permit.followup) && this.ctx.node === permit.landing.owner) threadRef = permit.landing;
     }
@@ -187,6 +195,28 @@ export class MessageService {
     const event: Event = { id: thread.event_seq, type: 'message', thread_ref: threadRef, message_ref: receipt.message_ref, data: { seq } };
     await tx.put(key('event', threadRef.owner, threadRef.id, event.id), event);
     return { receipt };
+  }
+
+  /**
+   * The thread a reply belongs to, read from this node's own records. When the original message
+   * was delivered here, its entry names the thread. When this node sent it, there is no entry —
+   * the conversation lives in the nearest incoming message the chain reaches, which is what both
+   * nodes can read. Every hop is local; the walk stops at the first missing record.
+   */
+  private async chainLanding(tx: Transaction, original: MessageRef): Promise<ThreadRef | undefined> {
+    let ref: MessageRef | undefined = original;
+    for (let hop = 0; hop < MAX_REPLY_CHAIN && ref !== undefined; hop++) {
+      const entry = await tx.get<Entry>(key('entry-ref', ref.sender, ref.id));
+      if (entry !== undefined) {
+        const landing = entry.thread_ref;
+        if (landing.owner !== this.ctx.node) return undefined;
+        const thread = await tx.get<Thread>(key('thread', landing.owner, landing.id));
+        return thread !== undefined && thread.state !== 'closed' ? landing : undefined;
+      }
+      const sent: SentRecord | undefined = await tx.get<SentRecord>(key('outbound', ref.sender, ref.id));
+      ref = sent?.request.message.meta?.in_reply_to;
+    }
+    return undefined;
   }
 
   /** Terminal refusals are the receiver's record too: written through the admission transaction. */

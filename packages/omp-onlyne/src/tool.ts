@@ -24,7 +24,13 @@ A send is one call. The result is the delivery fact: admission "accepted" means 
 
 A reply arrives by itself. The plugin injects it as an onlyne.inbound message and starts a turn; you do not need to check. Do not poll after a send: no inbox scans, thread reads, evidence queries, log greps or SQLite lookups. Read state only when the user asks about history, or when a specific fact is missing from the result in hand.
 
-The judge role chooses the action and plan from your intent, so never invent message ids, idempotency keys or revisions. A reply or followup states its relation; omitting it is rejected rather than assumed. A reply targets the original reply authority, so a conflicting to is rejected. Subagent sessions read their slice but cannot send; return the result so the main agent can send it.`;
+State reads: read the root \`onlyne://\` for the views this node publishes — neighbors, threads, inbox, contexts, outbound — instead of guessing a route, and read one entry at \`onlyne://threads/<thread-id>/messages/<seq>\`. A thread's list carries the incoming side; your own sends are in \`onlyne://outbound\`, where each record names the landing the receiver reported.
+
+A delivery lands in a thread the receiver owns, and a reply lands in the thread that holds the original message; the receipt reports that landing as thread <id> seq <n>. Naming one of your own threads as the landing is refused, not silently redirected, so leave meta.thread out of a reply.
+
+meta.to names exactly one node. Sending to several peers is one call per peer, and each call returns its own receipt; report them separately rather than expecting one result for a set.
+
+The judge role chooses the action and plan from your intent, so never invent message ids, idempotency keys or revisions. A reply or followup states its relation; omitting it is rejected rather than assumed. A reply targets the original reply authority, so a conflicting to is rejected. A subagent session reads its own slice (onlyne://threads, onlyne://inbox, onlyne://contexts) and returns the result to the main session, which does the sending.`;
 
 export function registerMsgTool(pi: ExtensionAPI): void {
 	pi.registerTool({
@@ -100,8 +106,14 @@ export function summary(result: unknown): string {
 	const handle = outcome.receipt === undefined ? undefined : ` · 读回: onlyne://outbound/${outcome.receipt.message_ref.id}`;
 	if (outcome.admission !== undefined) {
 		if (outcome.admission !== "accepted") {
-			const failure = outcome.error === undefined ? outcome.admission : `${outcome.error.code}: ${outcome.error.message}`;
-			return `Not confirmed: ${failure}. The record stays open for recovery; do not re-send the same intent.`;
+			const error = outcome.error;
+			const failure = error === undefined ? outcome.admission : `${error.code}: ${error.message}`;
+			// `retryable` belongs to the runtime, not to the caller: the record stays open and the
+			// runtime drives it again, while a second send commits a second intent.
+			const next = error?.retryable === true
+				? "The record stays open and the runtime retries it; sending again would commit a second intent."
+				: "The record stays open for recovery; do not re-send the same intent.";
+			return `Not confirmed: ${failure}. ${next}`;
 		}
 		const trail = handle ?? "";
 		if (outcome.wait === "answered" && outcome.reply !== undefined) {

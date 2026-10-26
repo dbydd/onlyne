@@ -1,8 +1,7 @@
 import { OnlyneError, type DeliveryPlan, type Entry, type NotifyEvent, type Runtime, type TraceEvent } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { Text } from "@oh-my-pi/pi-tui";
+import { renderMailMessage, type OnlyneMessageDetails } from "./ui/mail-message.ts";
 import type { InboundDecision, JudgeDecider } from "./decider.ts";
 import type { ContextRegistry } from "./store.ts";
 import type { ContextRecord } from "./types.ts";
@@ -76,10 +75,6 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				});
 			}
 			const { decision } = attempt;
-			if (decision.action === "queue") {
-				deps.pi.logger.debug("onlyne.delivery.held", { entry: key, reason: "queue" });
-				return { context: context ?? deps.main.agent.id, consumed: false, outcome: "queued" as const };
-			}
 			if (decision.action === "new_subagent") {
 				attempt.landed ??= await startSubagent(deps, entry);
 				return { context: attempt.landed, consumed: true, outcome: "consumed" as const };
@@ -96,16 +91,37 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				const record = await deps.contexts.find(alias);
 				if (record?.agent_id === undefined) throw new OnlyneError("not_found", `No live context is registered as ${alias}.`);
 				const token = registerPending(entry, record.agent_id, "fragment");
-				await deliverToContext(record.agent_id, payload(entry, SUPPLEMENT, token), record.state === "running");
+				try {
+					await deliverToContext(record.agent_id, payload(entry, SUPPLEMENT, token), record.state === "running");
+				} catch (error) {
+					// The session behind this context is gone. Mark it unbound so the judge stops
+					// offering it, and keep the entry owed: a silent delivery into a disposed
+					// session is how a reply disappears (caerulea report 3, problem 1).
+					await deps.contexts.updateState(alias, "unbound").catch(() => undefined);
+					throw error;
+				}
 				attempt.landed = record.agent_id;
 				deps.pi.logger.info("onlyne.delivery.sent", { entry: key, action: "context", target: record.agent_id, running: record.state === "running" });
 				return { context: record.agent_id, consumed: false, outcome: "delivered" as const };
 			}
 			const token = registerPending(entry, deps.main.agent.id, "fragment");
-			if (decision.action === "wake") deps.pi.sendMessage(payload(entry, INBOUND, token), { triggerTurn: true });
-			else deps.pi.sendMessage(payload(entry, INBOUND, token), { deliverAs: "nextTurn" });
+			if (decision.action === "wake") {
+				// An explicit deliverAs never starts a turn on an idle session, so an idle main
+				// session gets a plain trigger whatever the insertion mode says.
+				const idle = deps.main.isIdle();
+				const mode = idle ? undefined : decision.insertion;
+				deps.pi.sendMessage(
+					payload(entry, INBOUND, token),
+					mode === undefined ? { triggerTurn: true } : { deliverAs: mode === "steer" ? "steer" : "followUp" },
+				);
+			} else {
+				deps.pi.sendMessage(payload(entry, INBOUND, token), { deliverAs: "nextTurn" });
+			}
 			attempt.landed = deps.main.agent.id;
-			deps.pi.logger.info("onlyne.delivery.sent", { entry: key, action: decision.action, target: deps.main.agent.id, turn: decision.action === "wake" });
+			deps.pi.logger.info("onlyne.delivery.sent", {
+				entry: key, action: decision.action, target: deps.main.agent.id, turn: decision.action === "wake",
+				...(decision.insertion === undefined ? {} : { insertion: decision.insertion }),
+			});
 			return { context: deps.main.agent.id, consumed: false, outcome: "delivered" as const };
 		},
 		todo: async (entry, context) => {
@@ -116,11 +132,6 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 			await applyMessageTodo(entry, context, planner);
 		},
 		notify: (event: NotifyEvent) => {
-			// New durable work is what lets a queued entry be judged again; a trust or inbound
-			// notification carries no such evidence.
-			if (event.event === "work-pending") {
-				for (const [key, attempt] of inboundAttempts) if (attempt.decision.action === "queue") inboundAttempts.delete(key);
-			}
 			getRuntime()?.notify(event);
 		},
 	};
@@ -188,8 +199,10 @@ export function registerProviderBoundary(pi: ExtensionAPI): void {
 }
 
 async function deliverToContext(agentId: string, payload: MessagePayload, running: boolean): Promise<void> {
-	const ref = AgentRegistry.global().get(agentId);
-	const session = ref?.session ?? (await AgentLifecycleManager.global().ensureLive(agentId));
+	// Never revive a session for an inbound delivery: a disposed subagent accepts the message
+	// where nobody reads it, and the library records the injection as delivered.
+	const session = AgentRegistry.global().get(agentId)?.session ?? undefined;
+	if (session === undefined) throw new OnlyneError("not_found", `The execution context ${agentId} has no live session; it must be bound again before it can receive messages.`);
 	await session.sendCustomMessage(payload, running ? { deliverAs: "steer" } : { triggerTurn: true });
 }
 /**
@@ -204,11 +217,16 @@ async function startSubagent(deps: BridgeDeps, entry: Entry): Promise<string> {
 	if (existing?.agent_id !== undefined) return existing.agent_id;
 	const tool = taskTool(deps.main);
 	if (!tool) throw new OnlyneError("unsupported_delivery", "This OMP session has no native task tool.");
-	const source = entry.thread_ref.id + "/" + entry.seq;
+	// Both references the child can actually use: the message id for `{sender,id}` replies and
+	// the thread/seq pair for reads. A bare `thread/seq` string fits neither (cyanea report 1).
+	const source = `${entry.thread_ref.owner}/${entry.thread_ref.id}/${entry.seq}`;
+	const references = `message ${entry.message.id}, thread ${entry.thread_ref.owner}/${entry.thread_ref.id} seq ${entry.seq}`;
 	const record = existing ?? await deps.contexts.allocate(entry.thread_ref, `onlyne ${source}`, entry.message);
 	const name = `onlyne-${record.alias}`;
 	const result = await tool.execute(`onlyne-${crypto.randomUUID()}`, {
-		task: `Handle this onlyne delivery from ${entry.authenticated_author} (${source}).\n\n${entry.message.msg}`,
+		// The child cannot send: its task text says so, because a session told to "handle" a
+		// delivery with no send right reads the refusal as its own failure (dpdp report 4).
+		task: `Read this onlyne delivery from ${entry.authenticated_author} (${references}) and return what the main session should send back; this session cannot send.\n\n${entry.message.msg}`,
 		solutionSpace: "The delivery decides the work; use the message as the task.",
 		name,
 	});
@@ -233,27 +251,25 @@ interface MessagePayload {
 	content: string;
 	display: true;
 	attribution: "agent";
-	details: { thread_ref: Entry["thread_ref"]; seq: string; message_ref: { sender: string; id: string }; consumption: string };
+	details: OnlyneMessageDetails;
 }
 function payload(entry: Entry, customType: string, token: string): MessagePayload {
 	return { customType, content: `${renderEntry(entry, customType)}\n\n[[${token}]]`, display: true, attribution: "agent" as const,
-		details: { thread_ref: entry.thread_ref, seq: entry.seq, message_ref: { sender: entry.message.sender, id: entry.message.id }, consumption: "pending" } };
+		details: {
+			thread_ref: entry.thread_ref, seq: entry.seq,
+			message_ref: { sender: entry.message.sender, id: entry.message.id }, consumption: "pending",
+			mail: {
+				from: entry.authenticated_author, at: entry.at, subject: entry.message.delivery_kind, body: entry.message.msg,
+				...(entry.message.meta?.relation === undefined ? {} : { relation: entry.message.meta.relation }),
+				...(entry.message.meta?.in_reply_to === undefined ? {} : { in_reply_to: entry.message.meta.in_reply_to }),
+			},
+		} };
 }
 export function registerMessageRenderers(pi: ExtensionAPI): void {
-	for (const type of [INBOUND, ROUTING, SUPPLEMENT]) pi.registerMessageRenderer(type, message => new Text(renderCustomMessage(message), 1, 1));
-}
-function renderCustomMessage(message: unknown): string {
-	const record = message as { content?: unknown };
-	return typeof record.content === "string" ? record.content : textOf(record.content) ?? "";
+	for (const type of [INBOUND, ROUTING, SUPPLEMENT]) pi.registerMessageRenderer(type, renderMailMessage);
 }
 function renderEntry(entry: Entry, customType: string): string {
 	const label = customType === SUPPLEMENT ? "supplement" : "inbound";
 	const relation = entry.message.meta?.relation === undefined ? "" : ` · ${entry.message.meta.relation}`;
 	return `${entry.thread_ref.id}/${entry.seq} · ${label} · ${entry.authenticated_author}${relation}\n${entry.message.msg.split(/\r?\n/).map(line => `  > ${line}`).join("\n")}`;
-}
-function textOf(value: unknown): string | undefined {
-	if (typeof value === "string") return value;
-	if (Array.isArray(value)) return value.map(part => typeof part === "string" ? part : part && typeof part === "object" && "text" in part && typeof part.text === "string" ? part.text : "").join("") || undefined;
-	if (value && typeof value === "object" && "text" in value && typeof value.text === "string") return value.text;
-	return undefined;
 }

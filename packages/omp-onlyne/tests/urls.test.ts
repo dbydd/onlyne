@@ -80,14 +80,19 @@ interface Exchange {
 	b: PluginRuntime;
 	helloId: string;
 	replyId: string;
+	thirdId: string;
 	aThreadId: string;
 	bThreadId: string;
 }
 
-/** a greets b, b replies: a holds the outbound whose landing thread b owns, and the landing of b's reply. */
+/** a greets b, b replies, a answers: three hops over two nodes, with no thread named by hand. */
 async function exchange(): Promise<Exchange> {
-	const a = serve("urn:onlyne:agent:a", async () => ({ kind: "send", to: "urn:onlyne:agent:b", response: "async", execution: "new" }));
+	let hop = 0;
 	let helloId = "";
+	let replyId = "";
+	const a = serve("urn:onlyne:agent:a", async () => hop++ === 0
+		? { kind: "send", to: "urn:onlyne:agent:b", response: "async", execution: "new" }
+		: { kind: "send", to: "urn:onlyne:agent:b", response: "async", execution: "new", in_reply_to: { sender: "urn:onlyne:agent:b", id: replyId }, relation: "reply" });
 	const b = serve("urn:onlyne:agent:b", async () => ({
 		kind: "send", to: "urn:onlyne:agent:a", response: "none", execution: "new",
 		in_reply_to: { sender: "urn:onlyne:agent:a", id: helloId }, relation: "reply",
@@ -101,6 +106,11 @@ async function exchange(): Promise<Exchange> {
 	await b.node.client.msg({ delivery_kind: "reply to a", msg: "got it" });
 	const reply = (await b.storage.transaction(tx => tx.scan<Outbound>("outbound/")))[0]?.value;
 	if (reply === undefined) throw new Error("the reply left no outbound record");
+	replyId = reply.request.message.id;
+	await a.node.client.msg({ delivery_kind: "answer b", msg: "thanks" });
+	const third = (await a.storage.transaction(tx => tx.scan<Outbound>("outbound/")))
+		.map(row => row.value).find(row => row.request.message.id !== helloId);
+	if (third === undefined) throw new Error("the third hop left no outbound record");
 	const bThread = (await b.node.threads.list(b.node.auth, { page_size: 10 })).items[0];
 	const aThread = (await a.node.threads.list(a.node.auth, { page_size: 10 })).items[0];
 	if (bThread === undefined || aThread === undefined) throw new Error("the exchange minted no thread");
@@ -108,7 +118,8 @@ async function exchange(): Promise<Exchange> {
 		a: pluginFor(a, "urn:onlyne:agent:a"),
 		b: pluginFor(b, "urn:onlyne:agent:b"),
 		helloId,
-		replyId: reply.request.message.id,
+		replyId,
+		thirdId: third.request.message.id,
 		aThreadId: aThread.thread_ref.id,
 		bThreadId: bThread.thread_ref.id,
 	};
@@ -131,6 +142,14 @@ describe("onlyne:// outbound", () => {
 		const detail = JSON.parse(await readView(`onlyne://outbound/${x.replyId}`)) as OutboundDetail;
 		expect(detail.in_reply_to).toEqual({ sender: "urn:onlyne:agent:a", id: x.helloId });
 		expect(detail.entry).toBe(`onlyne://threads/${x.aThreadId}/messages/1`);
+	});
+
+	test("a reply that names no thread lands where the original is", async () => {
+		const x = await exchange();
+		setRuntime(x.a);
+		const detail = JSON.parse(await readView(`onlyne://outbound/${x.thirdId}`)) as OutboundDetail;
+		expect(detail.landed).toEqual({ thread: `urn:onlyne:agent:b/${x.bThreadId}`, seq: "2", guarantee: "binding-defined" });
+		expect(detail.in_reply_to).toEqual({ sender: "urn:onlyne:agent:b", id: x.replyId });
 	});
 });
 

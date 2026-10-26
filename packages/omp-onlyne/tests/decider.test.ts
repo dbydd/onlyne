@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Entry, Page, Thread, ThreadRef } from "@onlyne/lib";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { fitState, JudgeDecider, type DecisionScope, type PeerRecord } from "../src/decider.ts";
+import { fitState, needsReplyOf, JudgeDecider, type DecisionScope, type PeerRecord } from "../src/decider.ts";
 import type { ContextRegistry } from "../src/store.ts";
 import type { ContextRecord, OnlyneConfig } from "../src/types.ts";
 
@@ -73,6 +73,9 @@ function scope(meta: Record<string, unknown>, readOnly = false): DecisionScope {
 	return {
 		ctx: {
 			agent: { kind: readOnly ? "sub" : "main", id: readOnly ? "Sub" : "Main", name: "main", depth: 0 },
+			sessionManager: { getBranch: () => [], getSessionId: () => "test-session" },
+			isIdle: () => true,
+			hasPendingMessages: () => false,
 		} as unknown as ExtensionContext,
 		input: { delivery_kind: "explicit", msg: "body", meta: meta as never },
 		...(readOnly ? { readOnly: true } : {}),
@@ -165,7 +168,7 @@ describe("subagent slices", () => {
 
 	test("a subagent cannot change threads", async () => {
 		await expect(decider().decide(scope({ op: "create", title: "Research" }, true))).rejects.toThrow(
-			"may only read",
+			"A subagent session reads Onlyne state, it does not write it",
 		);
 	});
 });
@@ -210,5 +213,36 @@ describe("judge state budget", () => {
 		const { fitted, dropped } = fitState({ history: [], request, node });
 		expect(dropped).toEqual([]);
 		expect(fitted).toEqual({ history: [], request, node });
+	});
+});
+
+describe("reply references from the field reports", () => {
+	// cyanea report 1, problem 1: a raw authority string compared against a resolved id read as
+	// two contradictory errors. After the fix both spellings name the same node, so the failure
+	// shape changes from "wrong target" to a judge-unavailable error from the sandboxed test.
+	test("a short-name sender is not reported as a conflicting authority", async () => {
+		const des = decider();
+		const messages: string[] = [];
+		for (const sender of [other, "b"]) {
+			messages.push(await des.decide(scope({ to: other, in_reply_to: { sender, id: "m-1" }, relation: "reply" }))
+				.then(() => "", (error: Error) => error.message));
+		}
+		expect(messages[0]).not.toContain("original reply authority");
+		expect(messages[1]).not.toContain("original reply authority");
+		expect(messages[0]).not.toContain("belongs to its original");
+		expect(messages[1]).not.toContain("belongs to its original");
+	});
+});
+
+describe("hierarchical decision nodes", () => {
+	/** A message whose body greets and asks, so the reply heuristic applies. */
+	const inbound: Entry = {
+		...entry,
+		message: { id: "m-9", sender: other, delivery_kind: "ask", msg: "你好，在吗？请确认进度。" },
+	};
+
+	test("needs_reply is derived from the body heuristic, not only from meta", () => {
+		expect(needsReplyOf(inbound)).toBe(true);
+		expect(needsReplyOf(entry)).toBe(false);
 	});
 });

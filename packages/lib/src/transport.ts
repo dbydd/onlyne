@@ -49,18 +49,18 @@ function missingTrust(self: NodeId | null, target: NodeId, peer: TrustEntry | un
   const details = { self, peer: target };
   if (peer === undefined) {
     return new OnlyneError('unavailable',
-      `${here} holds no trust record for ${target}, so this request cannot be signed. This agent cannot grant trust; the holder of ${here} completes the pairing through this node's Onlyne surface (omp: /onlyne). ${retry}`,
+      `${here} holds no trust record for ${target}, so this request cannot be signed. This agent cannot grant trust; the holder of ${here} completes the pairing through this node's Onlyne surface. ${retry}`,
       { ...details, reason: 'no_record' });
   }
   if (peer.state === 'revoked') {
     return new OnlyneError('unavailable',
-      `${here} revoked ${target}, so this request cannot be signed. This agent cannot restore trust; the holder of ${here} pairs the two nodes again through this node's Onlyne surface (omp: /onlyne). ${retry}`,
+      `${here} revoked ${target}, so this request cannot be signed. This agent cannot restore trust; the holder of ${here} pairs the two nodes again through this node's Onlyne surface. ${retry}`,
       { ...details, reason: 'revoked' });
   }
   // A pending row says which holder still owes the act: ours when the peer asked, theirs when we did.
   const message = peer.local_approved
-    ? `${target} has not answered the exchange ${here} requested, so this request cannot be signed yet. This agent cannot complete the pairing; the holder of ${target} confirms it through that node's Onlyne surface (omp: /onlyne). ${retry}`
-    : `${target} requested an exchange with ${here} and this node has not approved it, so this request cannot be signed yet. This agent cannot approve it; the holder of ${here} confirms the fingerprint through this node's Onlyne surface (omp: /onlyne). ${retry}`;
+    ? `${target} has not answered the exchange ${here} requested, so this request cannot be signed yet. This agent cannot complete the pairing; the holder of ${target} confirms it through that node's Onlyne surface. ${retry}`
+    : `${target} requested an exchange with ${here} and this node has not approved it, so this request cannot be signed yet. This agent cannot approve it; the holder of ${here} confirms the fingerprint through this node's Onlyne surface. ${retry}`;
   return new OnlyneError('unavailable', message, { ...details, reason: 'pending' });
 }
 

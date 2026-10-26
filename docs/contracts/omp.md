@@ -147,6 +147,8 @@
 - OMP-5.11 工具 schema 暴露的每个可填字段 MUST 对应一条 SystemOne 判据，或一条确定的机械解析路径。没有判据、只能靠模型猜的字段 MUST NOT 出现在 schema 里。字段语义与判据不一致时 MUST 修 schema 或判据，MUST NOT 用提示词补丁掩盖。
 - OMP-5.12 分页用不透明 cursor；每页最多 100 条，默认 50，页面大小由 `meta.page_size` 指定。读取权限 MUST 在每次读取时检查。
 - OMP-5.13 交接结果为 `pending` 时 MUST 显示“交接待决”；只有资源 owner 返回 `committed` 和新绑定，工具才显示“交接已生效”。平台凭据 MUST 留在资源 endpoint。
+- OMP-5.14 投递时命名的 thread MUST 解析为目标节点拥有的 ThreadRef。模型命名本节点拥有的线程时，接入 MUST 返回 `invalid_request` 并说明落点由接收方按原消息所在线程决定，MUST NOT 静默改投默认位置或首触线程。回复省略 `thread` 时，落点 MUST 是保存原消息的线程。
+- OMP-5.15 发送回执给出的读回地址 MUST 在当前节点可读，并显示落点、投递状态与关联引用。落点线程属于对端时，读取 MUST 报出该 owner 与可执行的读路径，MUST NOT 把本地 owner 守卫的拒绝原样交给读者。
 
 ## 6. 消息列表与渲染
 
@@ -218,6 +220,7 @@ im-sea-ice
 - OMP-7.3 合法 reply 经 `await` 工具结果进入某上下文，与经自动关注片段进入该上下文，MUST 共用 `(context, ThreadRef, seq)` 的消费记录与投送调度。消费边界已确认工具结果包含该 reply 时，按同一条目记录已消费，自动片段 MUST NOT 再次投送该正文；若该回复已由自动片段确认消费，后续解除等待的工具结果 MUST 只返回原消息引用与到达事实，不重复展开正文。
 - OMP-7.4 接入 MUST NOT 因 reply 已持久接收、waiter 已解除、工具结果已提交或宿主 API 调用成功就推进消费记录。消费确认前发生崩溃或未知时 MUST 保留未确认状态，重放时按未确认重投，MUST NOT 宣称恰好一次。
 - OMP-7.5 回执和 `followup` 只保留为事实，等待继续。迟到回复进入历史，是否再唤醒由运行时策略决定。
+- OMP-7.6 结果缺少 `wait` 字段，与 `plan.response` 为 `async` 或 `none` 是同一事实：这次调用没有等待答复。`wait` 只在 `plan.response` 为 `await` 时出现，取 `answered`、`timed_out` 或 `cancelled`。
 
 ## 8. 持续工作与 todo
 
@@ -256,16 +259,18 @@ Source: research/103 from dpdp
 |---|---|
 | `fragment` | 以 `onlyne.inbound` 自定义消息进入下一个上下文装配点，不主动开启回合 |
 | `context` | 投递到目录中的上下文别名，主会话不启动回合，thread 视图标注落点 |
-| `queue` | 持久保存并显示 queued，不启动回合 |
-| `wake` | 空闲时启动回合，忙时排到下一步边界 |
+| `wake`（`insertion: steer`） | 以 `onlyne.inbound` 注入，当前工具调用结束后立即插话；空闲会话没有可插话的回合，改为启动回合 |
+| `wake`（`insertion: follow_up`） | 忙时以 `followUp` 排队，本轮结束后追加并开启新回合；空闲时启动回合 |
+| `wake`（未给插入模式） | 空闲时启动回合，忙时排到下一步边界 |
 | `wait_result` | 由在途等待返回该回复 |
 
 - OMP-9.4 宿主状态决定执行方式，不改变判定：流式生成期间注入 MUST 排在下一步边界；plan 模式 MUST 只保存；用户中止 MUST 通过 AbortSignal 释放当前本地等待；恢复会话 MUST 按持久映射与注入游标补齐，并重新检查权限。
-- OMP-9.5 接入注入来信时 MUST 使用自定义消息类型，MUST NOT 调用 `sendUserMessage`。`onlyne.inbound` 承载来信，`onlyne.routing` 承载投递去向说明，两者 `attribution` 为 `agent`，在会话中记为 `custom_message`，在 TUI 中以独立样式显示。宿主把它们转换为 developer 角色的上下文，MUST NOT 冒充本地用户发言。排队条目 MUST 用 `appendEntry` 写入，不进入模型上下文。
+- OMP-9.5 接入注入来信时 MUST 使用自定义消息类型，MUST NOT 调用 `sendUserMessage`。`onlyne.inbound` 承载来信，`onlyne.routing` 承载投递去向说明，两者 `attribution` 为 `agent`，在会话中记为 `custom_message`，在 TUI 中以独立样式显示。宿主把它们转换为 developer 角色的上下文，MUST NOT 冒充本地用户发言。
 - OMP-9.6 `execution: new` 要求宿主能创建并驱动独立上下文。能力未接通时 MUST 返回 `unsupported_delivery`；MUST NOT 把消息发到任意现有会话代替新上下文。
 - OMP-9.7 新执行上下文由接收方分配并启动。发送方 MUST NOT 把本地 `c-N` 别名当作远端的新上下文，MUST NOT 要求自己的模型替接收方创建子代理。既有 context 别名 MUST 在目标 NodeId 的命名空间内解析。发送方 `await` 的消费身份与接收方执行身份 MUST 分别记录。
 - OMP-9.8 同一根消息的后续内容 MUST 进入该根消息已有的执行上下文；上下文存在且可用时 MUST NOT 创建第二个。判定指向已丢失的上下文时 MUST 返回 `context_lost`，MUST NOT 静默新建或改选；新事实可以触发下一次显式判定。
 - OMP-9.9 宿主状态本身 MUST 作为判定输入上交：用户最近的停止或改派、当前工作目标、模型已经发出的任务、thread 历史和资源关系都可以改变应选动作。
+- OMP-9.10 子会话 MUST 能读取自己的切片（`onlyne://threads`、`onlyne://inbox`、`onlyne://contexts`），写入 MUST 被拒绝。拒绝文案 MUST 说明这是写边界、给出读入口，并说明结果交回主会话发送，MUST NOT 让读者从“只能读”的措辞去猜设备是否可用。
 
 ## 10. 信息面
 
@@ -293,7 +298,7 @@ Source: research/103 from dpdp
 13. 宿主不能保持工具调用时，不发送 `await` 消息，并明确说明缺失能力（OMP-3.9）。
 14. `received`、已注入、已答复和 todo 完成各有自己的证据，互不推定（OMP-7.3、OMP-7.4、OMP-8.7）。
 15. 消息与 todo 的恢复关联不会重复创建执行上下文或待办（OMP-3.7、OMP-8.3、OMP-9.1）。
-16. plan 模式的新来信显示 queued，切回执行后按原引用处理（OMP-9.4）。
+16. plan 模式下的新来信只保存、不启动回合，切回执行后按原引用处理（OMP-9.4）。
 17. 交接只在资源 owner 提交后显示生效，旧发送者的权限按当前绑定校验（OMP-5.13）。
 18. 引导取消后没有配置文件、没有监听、没有 region 成员关系；四步中任一步失败时界面停在实际完成的位置（OMP-4.1、OMP-4.9）。
 19. 超出配置表范围的键出现在 `.onlyne/config.toml` 时，接入 MUST 不因为存在这些键就产生派发或调度行为（OMP-4.5、OMP-2.4）。
