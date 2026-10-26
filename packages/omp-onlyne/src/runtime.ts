@@ -1,5 +1,5 @@
 import { dirname, join } from "node:path";
-import { OnlyneError, trustPhase, type DiscoveryCandidate, type DiscoveryRecord, type KeyExchange, type MaintenanceClock, type NotifyEvent, type OnlyneNode, type Outbound, type Page } from "@onlyne/lib";
+import { OnlyneError, trustPhase, type DiscoveryCandidate, type DiscoveryRecord, type KeyExchange, type KeyHook, type MaintenanceClock, type NotifyEvent, type OnlyneNode, type Outbound, type Page } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { currentDecision, JudgeDecider } from "./decider.ts";
 import { loadConfig, saveConfig, shortNodeId } from "./config.ts";
@@ -36,16 +36,20 @@ export interface PluginRuntime {
 	close(): Promise<void>;
 }
 let active: PluginRuntime | undefined;
+export interface RuntimeHost {
+	config?: () => Promise<OnlyneConfig>;
+	keys?: KeyHook;
+}
 export function getRuntime(): PluginRuntime | undefined { return active; }
 export function setRuntime(runtime: PluginRuntime | undefined): void { active = runtime; }
-export async function startRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<PluginRuntime> {
-	const config = await loadConfig(ctx.cwd);
+export async function startRuntime(pi: ExtensionAPI, ctx: ExtensionContext, host: RuntimeHost = {}): Promise<PluginRuntime> {
+	const config = await (host.config === undefined ? loadConfig(ctx.cwd) : host.config());
 	if (active && active.config.path === config.path && JSON.stringify(active.config) === JSON.stringify(config)) return active;
-	return restartRuntime(config, pi, ctx);
+	return restartRuntime(config, pi, ctx, host);
 }
-export async function restartRuntime(config: OnlyneConfig, pi: ExtensionAPI, ctx: ExtensionContext): Promise<PluginRuntime> {
+export async function restartRuntime(config: OnlyneConfig, pi: ExtensionAPI, ctx: ExtensionContext, host: RuntimeHost = {}): Promise<PluginRuntime> {
 	await active?.close();
-	const runtime = new OmpRuntime(config, pi, ctx);
+	const runtime = new OmpRuntime(config, pi, ctx, host);
 	try { await runtime.start(); } catch (error) { await runtime.close(); throw error; }
 	active = runtime;
 	return runtime;
@@ -73,7 +77,7 @@ class OmpRuntime implements PluginRuntime {
 	private controller = new AbortController();
 	private listeners = new Set<() => void>();
 	private closed = false;
-	constructor(readonly config: OnlyneConfig, readonly pi: ExtensionAPI, readonly main: ExtensionContext) {
+	constructor(readonly config: OnlyneConfig, readonly pi: ExtensionAPI, readonly main: ExtensionContext, readonly host: RuntimeHost = {}) {
 		this.mainAgentId = main.agent.id;
 		this.storage = new SqliteStorage(join(dirname(config.path), "omp.db"));
 		this.contexts = new ContextRegistry(this.storage, config.node.id, main.agent.id);
@@ -114,7 +118,7 @@ class OmpRuntime implements PluginRuntime {
 		// store stays in effect; `none` runs the keyless loopback development binding. A
 		// refused project directory (git work tree without an ignore rule) fails the start.
 		const keyScope = this.config.node.key_scope ?? "global";
-		const keyDir = keyScope === "none" ? undefined : await ensureKeyDir(projectRoot, this.config.node.id, keyScope);
+		const keyDir = this.host.keys !== undefined || keyScope === "none" ? undefined : await ensureKeyDir(projectRoot, this.config.node.id, keyScope);
 		this.keyDir = keyDir;
 		// The library owns the maintenance cadence; the host only lends it one-shot session
 		// timers. The loop re-arms after every pass, so a repeating timer would double it.
@@ -124,6 +128,7 @@ class OmpRuntime implements PluginRuntime {
 		};
 		this.node = createOnlyneNode({ config: this.config, endpoint: this.endpoint, instanceId, storage: this.storage, contexts: this.contexts, runtime: bridge, clock,
 			...(keyDir === undefined ? {} : { keyDir }),
+			...(this.host.keys === undefined ? {} : { keys: this.host.keys }),
 			decide: input => {
 				const scope = currentDecision();
 				if (!scope) throw new OnlyneError("decision_unavailable", "No OMP session is bound to this decision.");
@@ -332,7 +337,7 @@ class OmpRuntime implements PluginRuntime {
 			...(identity === undefined ? {} : { identity: { public_key: identity.public_key, fingerprint: identity.fingerprint } }),
 			...(this.discoveryError === undefined ? {} : { discovery_error: this.discoveryError }) };
 	}
-	async updateConfig(next: OnlyneConfig): Promise<void> { await saveConfig(next); await restartRuntime(next, this.pi, this.main); }
+	async updateConfig(next: OnlyneConfig): Promise<void> { await saveConfig(next); await restartRuntime(next, this.pi, this.main, this.host); }
 	async close(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true;

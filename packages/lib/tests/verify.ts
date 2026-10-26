@@ -586,7 +586,8 @@ async function phaseResources(): Promise<void> {
   const authD: Auth = { actor: dpdpNode };
 
   const resource: Resource = {
-    resource_ref: { owner: keeperNode, id: 'chat-01' }, kind: 'im_conversation', operations: ['read', 'send', 'handover'],
+    resource_ref: { owner: keeperNode, id: 'chat-01' }, kind: 'im_conversation',
+    operations: ['read', 'send', 'list_events', 'describe', 'handover'],
     assignee: keeperNode, readers: [keeperNode, dpdpNode], controllers: [keeperNode],
     event_recipients: [keeperNode], result_recipients: [keeperNode],
     event_seq: '0', revision: 'rev-a', retention_ms: 60_000,
@@ -599,6 +600,33 @@ async function phaseResources(): Promise<void> {
   const firstEventId = event.event_id;
   check('resources.receive', firstEventId === '1' && event.recipients[0] === keeperNode
     ? '' : `unexpected event id ${firstEventId} for a fresh resource`);
+
+  // RFC 0006 §1: the query operations answer from the endpoint's own state, never the driver.
+  const queryRead = await node.resources.operate(authK, ref, {
+    ...mut(), operation_id: crypto.randomUUID(), operation: 'read', data: { event_id: firstEventId },
+  });
+  check('resources.query.read', queryRead.state === 'committed'
+    && (queryRead.data as { event_id?: string }).event_id === firstEventId
+    ? '' : `read answered ${JSON.stringify(queryRead)}`);
+  const queryList = await node.resources.operate(authK, ref, {
+    ...mut(), operation_id: crypto.randomUUID(), operation: 'list_events', data: { page_size: 10 },
+  });
+  const listed = (queryList.data as { items?: unknown[] } | undefined)?.items;
+  check('resources.query.list_events', queryList.state === 'committed'
+    && Array.isArray(listed) && listed.length === 1
+    ? '' : `list_events answered ${JSON.stringify(queryList)}`);
+  const queryDescribe = await node.resources.operate(authK, ref, {
+    ...mut(), operation_id: crypto.randomUUID(), operation: 'describe',
+  });
+  check('resources.query.describe', queryDescribe.state === 'committed'
+    && (queryDescribe.data as { revision?: string }).revision === 'rev-a'
+    ? '' : `describe answered ${JSON.stringify(queryDescribe)}`);
+  const queryRecord = await node.resources.operation(authK, ref, queryRead.operation_id)
+    .then(() => 'recorded', () => 'absent');
+  check('resources.query.no_record', queryRecord === 'absent' ? '' : 'a query wrote an operation record');
+  check('resources.query.bad_read', await refusal('invalid_request', () => node.resources.operate(authK, ref, {
+    ...mut(), operation_id: crypto.randomUUID(), operation: 'read',
+  })));
 
   const handover = await node.resources.operate(authK, ref, {
     ...mut(), operation_id: crypto.randomUUID(),
@@ -677,7 +705,7 @@ async function phaseResources(): Promise<void> {
       ? '' : `a repeated ack recorded the receipt twice: ${JSON.stringify(repeat.acknowledged)}`);
 
   // One operation id executes once; the replay reads back the recorded result.
-  const request = { ...mut(), operation_id: crypto.randomUUID(), operation: 'read' };
+  const request = { ...mut(), operation_id: crypto.randomUUID(), operation: 'send' };
   const first = await node.resources.operate(authK, ref, request);
   const second = await node.resources.operate(authK, ref, request);
   const runs = executions.get(request.operation_id) ?? 0;
@@ -689,7 +717,7 @@ async function phaseResources(): Promise<void> {
     ? '' : `the operation record reported ${record.result.state}`);
 
   // Two callers race on one operation id: at most one external effect, no third state.
-  const raced = { ...mut(), operation_id: crypto.randomUUID(), operation: 'read' };
+  const raced = { ...mut(), operation_id: crypto.randomUUID(), operation: 'send' };
   const [left, right] = await Promise.all([
     node.resources.operate(authK, ref, raced),
     node.resources.operate(authK, ref, raced),

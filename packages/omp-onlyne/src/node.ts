@@ -16,6 +16,7 @@ export interface NodeDeps {
 	clock: MaintenanceClock;
 	/** The directory the host resolved for this node's identity key; absent keeps the loopback development binding. */
 	keyDir?: string;
+	keys?: KeyHook;
 }
 
 export function advertisedHost(bind: string): string {
@@ -30,9 +31,9 @@ export function advertisedHost(bind: string): string {
 
 export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 	const { config } = deps;
-	if (config.node.key_ref) throw new OnlyneError("unsupported_delivery", "External credential references are not implemented; use the managed node key.");
+	if (config.node.key_ref && deps.keys === undefined) throw new OnlyneError("unsupported_delivery", "External credential references need a host key provider.");
 	// Without a key directory the node keeps the loopback development binding (RFC 0001 §1).
-	if (deps.keyDir === undefined && !["127.0.0.1", "::1", "localhost"].includes(config.server.bind)) {
+	if (deps.keys === undefined && deps.keyDir === undefined && !["127.0.0.1", "::1", "localhost"].includes(config.server.bind)) {
 		throw new OnlyneError("unsupported_delivery", "The unauthenticated development binding requires a loopback bind host. Create a node key to serve a remote address.");
 	}
 	let node: OnlyneNode;
@@ -53,10 +54,10 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 		return node.discovery.known(id);
 	};
 	const keyDir = deps.keyDir;
-	const keys: KeyHook | undefined = keyDir === undefined ? undefined : Object.assign(
+	const keys: KeyHook | undefined = deps.keys ?? (keyDir === undefined ? undefined : Object.assign(
 		() => loadOrCreateKey(keyDir, config.node.id),
 		{ replace: (material: KeyMaterial) => writeKeyMaterial(keyDir, material, { replace: true }) },
-	);
+	));
 	// The library's own signing transport, built here for one reason: a missing trust row has to
 	// end at this host's menu. Signing still happens only for a keyed node, and the trust reads
 	// resolve lazily because the service exists only once the node is built.

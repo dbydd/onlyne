@@ -32,6 +32,11 @@ type Scope = keyof typeof SCOPES;
 const ALL_SCOPES: Scope[] = ['events', 'results', 'control'];
 /** `handover` is the protocol's own operation: it runs through `decideHandover`, never through the driver. */
 const RESERVED: Record<string, true> = { handover: true };
+/**
+ * RFC 0006 §1: `read`, `describe` and `list_events` are read-only queries. The endpoint answers
+ * them from its own state, so they never reach the driver and never claim an operation id.
+ */
+const QUERY: Record<string, true> = { read: true, describe: true, list_events: true };
 /** How long one caller waits on the driver before answering `unknown`; the external call keeps running. */
 const DRIVER_WAIT_MS = 30_000;
 
@@ -364,6 +369,50 @@ export function createResourceService(ctx: Context): ResourceService {
       .filter(invitation => invitation.resource_ref.owner === ctx.node && invitation.state === 'pending');
   }
 
+  /** One event, filtered by the caller's rights (RFC 0006 §1 query semantics). */
+  async function readEvent(auth: Auth, ref: ResourceRef, id: string): Promise<ResourceEvent> {
+    ctx.owner(ref.owner);
+    const resource = await live(ref);
+    const event = requireValue(await ctx.storage.transaction(async tx => tx.get<ResourceEvent>(eventKey(ref, id))));
+    if (!event.recipients.includes(auth.actor) && !mayRead(resource, auth.actor)) fail('not_found', 'The requested event is unavailable.');
+    return event;
+  }
+
+  /** The resource's event stream, filtered by the caller's rights. */
+  async function listEvents(auth: Auth, ref: ResourceRef, options?: PageOptions): Promise<Page<ResourceEvent>> {
+    ctx.owner(ref.owner);
+    const resource = await live(ref);
+    const events = (await ctx.storage.transaction(async tx => tx.scan<ResourceEvent>(eventsPrefix(ref))))
+      .map(entry => entry.value)
+      .filter(event => event.recipients.includes(auth.actor) || mayRead(resource, auth.actor));
+    // A previous handler keeps exactly the events it was first assigned, even after the binding moved (0006 §6).
+    if (!mayRead(resource, auth.actor) && events.length === 0) fail('not_found', 'The requested resource is unavailable.');
+    events.sort((a, b) => bySequence(a.event_id, b.event_id));
+    return page(events, options ?? {}, { kind: 'events', owner: ref.owner, id: ref.id, actor: auth.actor }, event => event.event_id, bySequence);
+  }
+
+  /**
+   * A query operation answers from this endpoint's own state. It records no operation: a read
+   * that fails must not consume an idempotency slot, and RFC 0006 §1 keeps queries out of the
+   * effect path entirely.
+   */
+  async function query(auth: Auth, ref: ResourceRef, resource: Resource, request: OperationRequest): Promise<OperationResult> {
+    const id = request.operation_id;
+    // A query result travels as wire JSON: the caller reads the same bytes an HTTP response carries.
+    const wire = (value: unknown): Json => JSON.parse(JSON.stringify(value)) as Json;
+    if (request.operation === 'describe') return { operation_id: id, state: 'committed', data: wire(resource) };
+    const data = (request.data ?? {}) as Record<string, unknown>;
+    if (request.operation === 'read') {
+      const eventId = data.event_id;
+      if (typeof eventId !== 'string' || eventId.length === 0) fail('invalid_request', 'read names the event_id to return.');
+      return { operation_id: id, state: 'committed', data: wire(await readEvent(auth, ref, eventId)) };
+    }
+    const options: PageOptions = {};
+    if (typeof data.cursor === 'string') options.cursor = data.cursor;
+    if (typeof data.page_size === 'number') options.page_size = data.page_size;
+    return { operation_id: id, state: 'committed', data: wire(await listEvents(auth, ref, options)) };
+  }
+
   return {
     /**
      * The endpoint declares the resources it serves, so registration is its own action: the caller is this node and the
@@ -416,6 +465,7 @@ export function createResourceService(ctx: Context): ResourceService {
         throw new OnlyneError('revision_conflict', 'The resource binding changed.', { current_revision: resource.revision });
       }
       if (RESERVED[request.operation]) return initiate(auth, ref, resource, request);
+      if (QUERY[request.operation]) return query(auth, ref, resource, request);
       if (drivers === undefined) fail('unsupported_delivery', 'This node declares no resource driver, so it cannot validate or execute the operation.');
       // Local validation runs before the claim: a request the driver rejects must not hold an operation ID.
       await drivers.validate(resource, request.operation, request.data);
@@ -477,23 +527,11 @@ export function createResourceService(ctx: Context): ResourceService {
     },
 
     async events(auth, ref, options) {
-      ctx.owner(ref.owner);
-      const resource = await live(ref);
-      const events = (await ctx.storage.transaction(async tx => tx.scan<ResourceEvent>(eventsPrefix(ref))))
-        .map(entry => entry.value)
-        .filter(event => event.recipients.includes(auth.actor) || mayRead(resource, auth.actor));
-      // A previous handler keeps exactly the events it was first assigned, even after the binding moved (0006 §6).
-      if (!mayRead(resource, auth.actor) && events.length === 0) fail('not_found', 'The requested resource is unavailable.');
-      events.sort((a, b) => bySequence(a.event_id, b.event_id));
-      return page(events, options ?? {}, { kind: 'events', owner: ref.owner, id: ref.id, actor: auth.actor }, event => event.event_id, bySequence);
+      return listEvents(auth, ref, options);
     },
 
     async event(auth, ref, id) {
-      ctx.owner(ref.owner);
-      const resource = await live(ref);
-      const event = requireValue(await ctx.storage.transaction(async tx => tx.get<ResourceEvent>(eventKey(ref, id))));
-      if (!event.recipients.includes(auth.actor) && !mayRead(resource, auth.actor)) fail('not_found', 'The requested event is unavailable.');
-      return event;
+      return readEvent(auth, ref, id);
     },
 
     async ack(auth, ref, id, mutation) {

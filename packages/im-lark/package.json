@@ -1,0 +1,23 @@
+{
+  "name": "@onlyne/im-lark",
+  "version": "3.0.0",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src", "README.md", "LICENSE"],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun tests/normalize.ts && bun tests/send.ts && bun tests/verify.ts"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.76.0",
+    "@onlyne/im-core": "workspace:*",
+    "@onlyne/lib": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}

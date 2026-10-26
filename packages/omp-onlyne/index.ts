@@ -3,7 +3,7 @@ import { registerContextBinding } from "./src/binding.ts";
 import { ConfigError } from "./src/config.ts";
 import { registerMessageRenderers, registerProviderBoundary } from "./src/messages.ts";
 import { registerTodoRecovery } from "./src/todo.ts";
-import { startRuntime, stopRuntime } from "./src/runtime.ts";
+import { startRuntime, stopRuntime, type RuntimeHost } from "./src/runtime.ts";
 import { registerMsgTool } from "./src/tool.ts";
 import { registerOnlyneUrls } from "./src/urls.ts";
 import { attachStatus, registerUi } from "./src/ui/index.ts";
@@ -13,7 +13,7 @@ import { attachStatus, registerUi } from "./src/ui/index.ts";
  * the network node belongs to the main session only. State recovery and the
  * listener start on `session_start`, never during factory execution.
  */
-export default function ompOnlyne(pi: ExtensionAPI): void {
+export default function ompOnlyne(pi: ExtensionAPI, host: RuntimeHost = {}): void {
 	registerOnlyneUrls();
 	registerMessageRenderers(pi);
 	registerProviderBoundary(pi);
@@ -36,7 +36,7 @@ export default function ompOnlyne(pi: ExtensionAPI): void {
 			}
 		}
 		try {
-			await startRuntime(pi, ctx);
+			await startRuntime(pi, ctx, host);
 		} catch (error) {
 			// A project without a saved config is the normal first-run state; /onlyne init creates it.
 			if (error instanceof ConfigError && error.code === "missing") return;

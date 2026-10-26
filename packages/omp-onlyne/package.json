@@ -21,7 +21,10 @@
 		]
 	},
 	"exports": {
-		".": "./index.ts"
+		".": "./index.ts",
+		"./runtime": "./src/runtime.ts",
+		"./config": "./src/config.ts",
+		"./types": "./src/types.ts"
 	},
 	"scripts": {
 		"check": "tsc --noEmit",

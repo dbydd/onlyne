@@ -1,0 +1,25 @@
+{
+  "name": "@onlyne/im-gateway",
+  "version": "3.0.0",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": "./src/main.ts",
+  "files": ["src", "README.md", "LICENSE"],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun tests/verify.ts"
+  },
+  "dependencies": {
+    "@onlyne/im-core": "workspace:*",
+    "@onlyne/im-fake": "workspace:*",
+    "@onlyne/lib": "workspace:*"
+  },
+  "devDependencies": {
+    "@onlyne/im-lark": "workspace:*",
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}

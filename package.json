@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "check": "bun run --filter '@onlyne/lib' check && bun run --filter omp-onlyne check",
-    "test": "bun run --filter '@onlyne/lib' test && bun run --filter omp-onlyne test"
+    "check": "bun run --filter '@onlyne/lib' check && bun run --filter omp-onlyne check && bun run --filter '@onlyne/im-core' check && bun run --filter '@onlyne/im-fake' check && bun run --filter '@onlyne/im-lark' check && bun run --filter '@onlyne/im-gateway' check",
+    "test": "bun run --filter '@onlyne/lib' test && bun run --filter omp-onlyne test && bun run --filter '@onlyne/im-core' test && bun run --filter '@onlyne/im-fake' test && bun run --filter '@onlyne/im-lark' test && bun run --filter '@onlyne/im-gateway' test"
   }
 }
