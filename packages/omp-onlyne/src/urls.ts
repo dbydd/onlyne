@@ -52,7 +52,7 @@ const handler: ProtocolHandler = {
 			const thread = await findThread(runtime, caller, threadAlias(view.parts));
 			const entries = await allMessages(runtime, thread.thread_ref);
 			return entries.map(entry => ({
-				url: `onlyne://threads/${encodeURIComponent(thread.thread_ref.id)}/messages/${entry.seq}`,
+				url: entryPath(thread.thread_ref, entry.seq),
 				content: JSON.stringify(entry, null, 2),
 			}));
 		}
@@ -113,7 +113,7 @@ async function render(runtime: PluginRuntime, caller: Caller, view: View): Promi
 	if (view.host === "") {
 		return { content: await renderRoot(runtime, caller), contentType: "text/markdown" };
 	}
-	throw new Error(`Unknown onlyne:// route ${view.host}.`);
+	throw new Error(`Unknown onlyne:// route ${view.host}. onlyne:// lists the available views.`);
 }
 
 function requireSession(caller: Caller, view: string): void {
@@ -331,9 +331,13 @@ async function renderOutbound(runtime: PluginRuntime, caller: Caller, parts: str
 async function readableOutbound(runtime: PluginRuntime, outbound: Outbound): Promise<Record<string, unknown>> {
 	const message = outbound.request.message;
 	const receipt = outbound.receipt;
-	let reply: Entry | undefined;
 	const related = message.meta?.in_reply_to;
-	if (related === undefined && receipt !== undefined) {
+	// The landing thread belongs to the receiver, and the library's owner guard refuses a
+	// message read against another node's thread, so only a local landing is readable here.
+	const landingOwner = receipt?.thread_ref.owner;
+	const landingReadable = landingOwner === undefined || landingOwner === runtime.config.node.id;
+	let reply: Entry | undefined;
+	if (related === undefined && receipt !== undefined && landingReadable) {
 		const entries = await allMessages(runtime, receipt.thread_ref);
 		reply = entries.find(entry => entry.message.meta?.in_reply_to !== undefined
 			&& entry.message.meta.in_reply_to.sender === message.sender
@@ -345,6 +349,8 @@ async function readableOutbound(runtime: PluginRuntime, outbound: Outbound): Pro
 		body: message.msg,
 		state: outbound.state,
 		error: outbound.error === undefined ? undefined : outbound.error.code,
+		in_reply_to: related === undefined ? undefined : { sender: related.sender, id: related.id },
+		entry: receipt === undefined ? undefined : entryPath(receipt.thread_ref, receipt.seq),
 		landed: receipt === undefined ? undefined : {
 			thread: `${receipt.thread_ref.owner}/${receipt.thread_ref.id}`,
 			seq: receipt.seq,
@@ -356,6 +362,9 @@ async function readableOutbound(runtime: PluginRuntime, outbound: Outbound): Pro
 			message_id: reply.message.id,
 			body: reply.message.msg,
 		},
+		reply_unavailable: receipt === undefined || landingReadable
+			? undefined
+			: `Thread ${receipt.thread_ref.id} is owned by ${landingOwner}; only that node lists its messages.`,
 		retry_until: outbound.request.retry_until,
 	};
 }
@@ -392,7 +401,7 @@ async function inboxLeaves(runtime: PluginRuntime, caller: Caller): Promise<Arra
 		for (const entry of entries) {
 			if (!group.seqs.has(entry.seq)) continue;
 			leaves.push({
-				url: `onlyne://threads/${encodeURIComponent(group.ref.id)}/messages/${entry.seq}`,
+				url: entryPath(group.ref, entry.seq),
 				content: `${JSON.stringify(entry, null, 2)}\n`,
 			});
 		}
@@ -493,14 +502,22 @@ async function collect<T>(fetch: (cursor?: string) => Promise<Page<T>>): Promise
 	throw new Error("onlyne:// pagination did not terminate within the page cap.");
 }
 
+function entryPath(ref: ThreadRef, seq: string): string {
+	return `onlyne://threads/${encodeURIComponent(ref.id)}/messages/${seq}`;
+}
+
 function renderEntryLine(entry: Entry, nodeId: string): string {
 	const direction = entry.message.sender === nodeId ? "out" : "in";
 	const relation = entry.message.meta?.relation;
-	const meta = relation === undefined ? "" : ` · ${relation}`;
+	const related = entry.message.meta?.in_reply_to;
+	const meta = [
+		relation === undefined ? "" : ` · ${relation}`,
+		related === undefined ? "" : ` · → reply to ${related.sender}/${related.id}`,
+	].join("");
 	const body = entry.message.msg
 		.split(/\r?\n/)
 		.map(line => `  > ${line}`)
 		.join("\n");
-	return `[${entry.seq}] ${direction} · ${entry.authenticated_author} · ${entry.at}${meta}\n${body}`;
+	return `[${entry.seq}] ${direction} · ${entry.authenticated_author} · ${entry.at}${meta}\n  entry ${entryPath(entry.thread_ref, entry.seq)}\n${body}`;
 }
 
