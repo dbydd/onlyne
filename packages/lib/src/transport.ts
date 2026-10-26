@@ -2,9 +2,34 @@ import { OnlyneError } from './core.js';
 import type { ErrorCode, Failure, NodeId, Target, Transport, TrustEntry } from './types.js';
 import type { TrustService } from './keys.js';
 
+/** The trust reads and signing steps a transport performs; a host that builds its own node wraps the real service. */
+export type SigningTrust = Pick<TrustService, 'entry' | 'signRequest' | 'verifyResponse'>;
+
+/**
+ * RFC 0017 §3: the pairing act a missing-trust failure names, before any host surface is
+ * known. `responsible_node` is the holder who still owes the act — this node when it never
+ * asked or must approve, the peer when it owes the answer — and `required_action` is what
+ * that holder does. A transport that cannot name its own node leaves `self` and the local
+ * cases' `responsible_node` null rather than guessing an identity.
+ */
+export interface TrustFailure {
+  self: NodeId | null;
+  peer: NodeId;
+  reason: 'no_record' | 'pending' | 'revoked';
+  responsible_node: NodeId | null;
+  required_action: 'request_exchange' | 'confirm_exchange' | 'restore_trust';
+}
+
 /** RFC 0017 request signing: transcripts, response verification, trust-state gating. */
 export interface SigningTransportOptions {
-  trust: TrustService;
+  trust: SigningTrust;
+  /**
+   * Where this host's holder reaches the act a missing-trust failure names. The library knows
+   * which node owes the act and what it is; only the host knows its own menu, so the failure
+   * carries the host's path instead of one this file would have to invent. The path describes
+   * the responsible node's surface: the peer's own menu when that holder owes the answer.
+   */
+  guidance?(details: TrustFailure): { entry: string[] } | undefined;
 }
 
 // Loopback hosts may speak plain HTTP. Everything else reached by a resolver
@@ -42,26 +67,37 @@ function failureRecord(parsed: unknown): unknown {
  * about whether the peer runs. The agent cannot pair the nodes — only the node's holder can,
  * through the host surface — and the runtime re-sends the record that stays open, so the code
  * is `unavailable` and the message keeps that retry apart from an agent repeating the send.
+ * The failure names the responsible holder and the act; the host's `guidance` adds the menu
+ * entry, so every trust case ends at one concrete surface instead of a search.
  */
-function missingTrust(self: NodeId | null, target: NodeId, peer: TrustEntry | undefined): OnlyneError {
+function missingTrust(
+  self: NodeId | null, target: NodeId, peer: TrustEntry | undefined,
+  guidance: SigningTransportOptions['guidance'],
+): OnlyneError {
   const here = self ?? 'this node';
   const retry = 'The runtime re-sends the open record once the pairing exists; do not re-send it yourself.';
-  const details = { self, peer: target };
-  if (peer === undefined) {
-    return new OnlyneError('unavailable',
-      `${here} holds no trust record for ${target}, so this request cannot be signed. This agent cannot grant trust; the holder of ${here} completes the pairing through this node's Onlyne surface. ${retry}`,
-      { ...details, reason: 'no_record' });
-  }
-  if (peer.state === 'revoked') {
-    return new OnlyneError('unavailable',
-      `${here} revoked ${target}, so this request cannot be signed. This agent cannot restore trust; the holder of ${here} pairs the two nodes again through this node's Onlyne surface. ${retry}`,
-      { ...details, reason: 'revoked' });
-  }
+  const reason: TrustFailure['reason'] = peer === undefined ? 'no_record' : peer.state === 'revoked' ? 'revoked' : 'pending';
+  const required_action: TrustFailure['required_action'] = reason === 'pending' ? 'confirm_exchange' : reason === 'revoked' ? 'restore_trust' : 'request_exchange';
   // A pending row says which holder still owes the act: ours when the peer asked, theirs when we did.
-  const message = peer.local_approved
-    ? `${target} has not answered the exchange ${here} requested, so this request cannot be signed yet. This agent cannot complete the pairing; the holder of ${target} confirms it through that node's Onlyne surface. ${retry}`
-    : `${target} requested an exchange with ${here} and this node has not approved it, so this request cannot be signed yet. This agent cannot approve it; the holder of ${here} confirms the fingerprint through this node's Onlyne surface. ${retry}`;
-  return new OnlyneError('unavailable', message, { ...details, reason: 'pending' });
+  const responsible_node = reason === 'pending' && peer?.local_approved === true ? target : self;
+  const details = { self, peer: target, reason, responsible_node, required_action };
+  const guide = guidance?.(details);
+  const surface = guide === undefined ? '' : `: ${guide.entry.join(' → ')}`;
+  const failure = guide === undefined ? details : { ...details, entry: guide.entry };
+  if (reason === 'no_record') {
+    return new OnlyneError('unavailable',
+      `${here} holds no trust record for ${target}, so this request cannot be signed. This agent cannot grant trust; the holder of ${here} completes the pairing through this node's Onlyne surface${surface}. ${retry}`,
+      failure);
+  }
+  if (reason === 'revoked') {
+    return new OnlyneError('unavailable',
+      `${here} revoked ${target}, so this request cannot be signed. This agent cannot restore trust; the holder of ${here} pairs the two nodes again through this node's Onlyne surface${surface}. ${retry}`,
+      failure);
+  }
+  const message = peer!.local_approved
+    ? `${target} has not answered the exchange ${here} requested, so this request cannot be signed yet. This agent cannot complete the pairing; the holder of ${target} confirms it through that node's Onlyne surface${surface}. ${retry}`
+    : `${target} requested an exchange with ${here} and this node has not approved it, so this request cannot be signed yet. This agent cannot approve it; the holder of ${here} confirms the fingerprint through this node's Onlyne surface${surface}. ${retry}`;
+  return new OnlyneError('unavailable', message, failure);
 }
 
 export class FetchTransport implements Transport {
@@ -106,7 +142,7 @@ export class FetchTransport implements Transport {
       // node holder completes the pairing, instead of recording a permanent refusal. The
       // resolver supplies `Onlyne-Actor`, so the outbound request already names this node.
       if (peer?.state !== 'trusted') {
-        throw missingTrust(headers.get('Onlyne-Actor'), target, peer);
+        throw missingTrust(headers.get('Onlyne-Actor'), target, peer, this.signing.guidance);
       }
       {
         const signer = new Request(url.href, { method, headers });

@@ -1,5 +1,5 @@
 import { networkInterfaces } from "node:os";
-import { OnlyneError, OnlyneNode, type Action, type Auth, type Json, type KeyHook, type KeyMaterial, type MaintenanceClock, type MsgInput, type Runtime, type Storage, type Target } from "@onlyne/lib";
+import { FetchTransport, OnlyneError, OnlyneNode, type Action, type Auth, type Json, type KeyHook, type KeyMaterial, type MaintenanceClock, type MsgInput, type Runtime, type SigningTransportOptions, type Storage, type Target } from "@onlyne/lib";
 import type { ContextRegistry } from "./store.ts";
 import type { OnlyneConfig } from "./types.ts";
 import { loadOrCreateKey, writeKeyMaterial } from "./keys.ts";
@@ -57,12 +57,28 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 		() => loadOrCreateKey(keyDir, config.node.id),
 		{ replace: (material: KeyMaterial) => writeKeyMaterial(keyDir, material, { replace: true }) },
 	);
+	// The library's own signing transport, built here for one reason: a missing trust row has to
+	// end at this host's menu. Signing still happens only for a keyed node, and the trust reads
+	// resolve lazily because the service exists only once the node is built.
+	const signing: SigningTransportOptions | undefined = keys === undefined ? undefined : {
+		trust: {
+			entry: id => node.trust.entry(id),
+			signRequest: (request, target, raw) => node.trust.signRequest(request, target, raw),
+			verifyResponse: (target, request, response, body) => node.trust.verifyResponse(target, request, response, body),
+		},
+		guidance: details => ({
+			entry: details.required_action === "confirm_exchange"
+				? ["/onlyne", "联系人", "待确认", "同意"]
+				: ["/onlyne", "发现", "请求交换密钥"],
+		}),
+	};
 	node = new OnlyneNode({
 		node_id: config.node.id, base_url: deps.endpoint, instance_id: deps.instanceId,
 		now: () => Date.now(), id: () => crypto.randomUUID(),
 		authentication: keys === undefined ? ["none"] : ["signature"], plugins: {
 			storage: deps.storage, authenticate, resolve, decide: deps.decide, runtime: deps.runtime, maintenanceClock: deps.clock,
 			...(keys === undefined ? {} : { keys }),
+			...(signing === undefined ? {} : { transport: new FetchTransport(resolve, fetch, signing) }),
 			...(config.trust === undefined ? {} : { trust_seeds: config.trust }),
 			domainCandidates: id => node.discovery.candidates(id),
 			// The keyless development binding checks no identity (RFC 0001 §1): every declared
