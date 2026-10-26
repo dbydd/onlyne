@@ -1,5 +1,5 @@
 import { OnlyneError } from './core.js';
-import type { ErrorCode, Failure, NodeId, Target, Transport } from './types.js';
+import type { ErrorCode, Failure, NodeId, Target, Transport, TrustEntry } from './types.js';
 import type { TrustService } from './keys.js';
 
 /** RFC 0017 request signing: transcripts, response verification, trust-state gating. */
@@ -34,6 +34,34 @@ function isFailure(value: unknown): value is Failure {
 // reached service code; a bare failure record is still preserved.
 function failureRecord(parsed: unknown): unknown {
   return typeof parsed === 'object' && parsed !== null && 'error' in parsed ? parsed.error : parsed;
+}
+
+/**
+ * RFC 0017 §3: what a signed request hits when this node holds no trusted key for the peer.
+ * Both node ids travel in the text and in `details`, because a missing key here says nothing
+ * about whether the peer runs. The agent cannot pair the nodes — only the node's holder can,
+ * through the host surface — and the runtime re-sends the record that stays open, so the code
+ * is `unavailable` and the message keeps that retry apart from an agent repeating the send.
+ */
+function missingTrust(self: NodeId | null, target: NodeId, peer: TrustEntry | undefined): OnlyneError {
+  const here = self ?? 'this node';
+  const retry = 'The runtime re-sends the open record once the pairing exists; do not re-send it yourself.';
+  const details = { self, peer: target };
+  if (peer === undefined) {
+    return new OnlyneError('unavailable',
+      `${here} holds no trust record for ${target}, so this request cannot be signed. This agent cannot grant trust; the holder of ${here} completes the pairing through this node's Onlyne surface (omp: /onlyne). ${retry}`,
+      { ...details, reason: 'no_record' });
+  }
+  if (peer.state === 'revoked') {
+    return new OnlyneError('unavailable',
+      `${here} revoked ${target}, so this request cannot be signed. This agent cannot restore trust; the holder of ${here} pairs the two nodes again through this node's Onlyne surface (omp: /onlyne). ${retry}`,
+      { ...details, reason: 'revoked' });
+  }
+  // A pending row says which holder still owes the act: ours when the peer asked, theirs when we did.
+  const message = peer.local_approved
+    ? `${target} has not answered the exchange ${here} requested, so this request cannot be signed yet. This agent cannot complete the pairing; the holder of ${target} confirms it through that node's Onlyne surface (omp: /onlyne). ${retry}`
+    : `${target} requested an exchange with ${here} and this node has not approved it, so this request cannot be signed yet. This agent cannot approve it; the holder of ${here} confirms the fingerprint through this node's Onlyne surface (omp: /onlyne). ${retry}`;
+  return new OnlyneError('unavailable', message, { ...details, reason: 'pending' });
 }
 
 export class FetchTransport implements Transport {
@@ -75,9 +103,10 @@ export class FetchTransport implements Transport {
       const peer = await this.signing.trust.entry(target);
       // No trusted key for this peer: the request cannot be signed, and sending it unsigned
       // would be refused anyway. Report a retryable outage so the record stays open while the
-      // user completes the exchange, instead of recording a permanent refusal.
+      // node holder completes the pairing, instead of recording a permanent refusal. The
+      // resolver supplies `Onlyne-Actor`, so the outbound request already names this node.
       if (peer?.state !== 'trusted') {
-        throw new OnlyneError('unavailable', `No trusted key for ${target}; complete the key exchange first.`);
+        throw missingTrust(headers.get('Onlyne-Actor'), target, peer);
       }
       {
         const signer = new Request(url.href, { method, headers });
