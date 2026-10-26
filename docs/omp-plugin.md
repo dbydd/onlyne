@@ -1,4 +1,8 @@
-# OMP 插件设计规范
+# OMP 插件设计规范（历史）
+
+> 状态：历史文档，保留作设计过程记录。当前规范性要求以
+> [OMP 宿主契约](contracts/omp.md) 为准；模块划分、存储与界面实现见
+> [OMP 接入设计](design/omp/)。本文与契约冲突时，以契约为准。
 
 本文档定义 Onlyne v3 面向 OMP（`@oh-my-pi/pi-coding-agent`）运行时的扩展插件设计。插件承担 Onlyne 客户端在 OMP 环境下的完整接入，连接 `@onlyne/lib` 与 OMP 的扩展系统。
 

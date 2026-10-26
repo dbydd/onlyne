@@ -10,10 +10,12 @@ import { OnlyneClient } from './client.js';
 import { KeyService, TrustService } from './keys.js';
 import { FetchTransport } from './transport.js';
 import { createHttpHandler } from './http.js';
+import { HistoryService } from './history.js';
 
 export class OnlyneNode {
   readonly threads: ThreadService;
   readonly messages: MessageService;
+  readonly history: HistoryService;
   readonly resources: ResourceService;
   readonly domains: DomainService;
   readonly discovery: DiscoveryService;
@@ -30,6 +32,7 @@ export class OnlyneNode {
     this.auth = { actor: options.node_id };
     this.threads = new ThreadService(ctx);
     this.messages = new MessageService(ctx);
+    this.history = new HistoryService(ctx);
     this.resources = createResourceService(ctx);
     this.keys = new KeyService(ctx);
     this.trust = new TrustService(ctx, this.keys);

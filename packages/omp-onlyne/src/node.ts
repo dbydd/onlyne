@@ -1,5 +1,5 @@
 import { networkInterfaces } from "node:os";
-import { FetchTransport, OnlyneError, OnlyneNode, type Action, type Auth, type Json, type KeyHook, type KeyMaterial, type MaintenanceClock, type MsgInput, type Runtime, type SigningTransportOptions, type Storage, type Target } from "@onlyne/lib";
+import { FetchTransport, OnlyneError, OnlyneNode, trustPhase, type Action, type Auth, type Json, type KeyHook, type KeyMaterial, type MaintenanceClock, type MsgInput, type Runtime, type SigningTransportOptions, type Storage, type Target } from "@onlyne/lib";
 import type { ContextRegistry } from "./store.ts";
 import type { OnlyneConfig } from "./types.ts";
 import { loadOrCreateKey, writeKeyMaterial } from "./keys.ts";
@@ -95,6 +95,22 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 				return ids[0]!;
 			},
 			directory: async () => ({ node: config.node.id, region: config.region, endpoint: deps.endpoint, peers: await node.discovery.listRecords(), contexts: await deps.contexts.list() }) as unknown as Json,
+			// The same rows onlyne://neighbors renders: every observed node with its trust state.
+			neighbors: async () => {
+				const records = await node.discovery.listRecords();
+				const trust = new Map((await node.trust.list(node.auth)).map(entry => [entry.node_id, entry]));
+				return records.map(record => {
+					const entry = trust.get(record.node_id);
+					return {
+						node_id: record.node_id, base_url: record.base_url,
+						...(record.membership?.domain_id === undefined ? {} : { region: record.membership.domain_id }),
+						...(record.last_seen === undefined ? {} : { last_seen: record.last_seen }),
+						verified: record.verified_at !== undefined && Date.parse(record.expires_at) > Date.now(),
+						phase: entry === undefined ? "no_exchange" : trustPhase(entry),
+						fingerprint: entry?.fingerprint ?? null,
+					};
+				});
+			},
 		},
 	});
 	return node;

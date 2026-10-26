@@ -3,7 +3,7 @@ import type { Auth, ErrorCode, Failure, Mutation, NodeOptions, Page, PageOptions
 const statuses: Record<ErrorCode, number> = {
   invalid_request: 400, unauthenticated: 401, forbidden: 403, not_a_member: 403,
   not_found: 404, id_conflict: 409, revision_conflict: 409, request_in_progress: 409,
-  conflict: 409, thread_closed: 410, retry_window_expired: 410, cursor_expired: 410,
+  conflict: 409, thread_closed: 410, context_lost: 410, retry_window_expired: 410, cursor_expired: 410,
   payload_too_large: 413, unsupported_media_type: 415, unsupported_delivery: 422,
   ambiguous_target: 422, ambiguous_resource: 422, capacity_exceeded: 429,
   internal: 500, unavailable: 503, decision_unavailable: 503,

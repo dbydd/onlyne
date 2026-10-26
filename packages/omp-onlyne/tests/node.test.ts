@@ -36,17 +36,20 @@ function serve(id: string, decide: () => Promise<Action>): { node: OnlyneNode; e
 }
 
 describe("two nodes", () => {
-	test("discovery resolves the sender and first contact opens a thread", async () => {
+	test("discovery resolves the sender and first contact opens a thread the sender owns", async () => {
 		const b = serve("urn:onlyne:agent:b", async () => ({ kind: "read", scope: "directory" }));
 		const a = serve("urn:onlyne:agent:a", async () => ({ kind: "send", to: "urn:onlyne:agent:b", response: "async", execution: "new" }));
 		await a.node.discovery.observe(b.endpoint, "test", "urn:onlyne:agent:b");
 		await b.node.discovery.observe(a.endpoint, "test", "urn:onlyne:agent:a");
 		const outcome = await a.node.client.msg({ delivery_kind: "ask", msg: "hello" });
 		expect(outcome).toMatchObject({ admission: "accepted" });
+		// The initiator owns the conversation; b is a member and pulls the entry from a.
+		expect((await a.node.threads.list(a.node.auth)).items).toHaveLength(1);
+		await b.node.client.reconcile();
 		const inbox = await b.node.messages.inbox(b.node.auth, { page_size: 10 });
 		expect(inbox.items).toHaveLength(1);
 		expect(inbox.items[0]?.attention.message_ref.sender).toBe("urn:onlyne:agent:a");
 		expect(inbox.items[0]?.attention.entry?.message.msg).toBe("hello");
-		expect((await b.node.threads.list(b.node.auth)).items).toHaveLength(1);
+		expect(inbox.items[0]?.attention.thread_ref.owner).toBe("urn:onlyne:agent:a");
 	});
 });

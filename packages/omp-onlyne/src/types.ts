@@ -1,4 +1,4 @@
-import type { NodeId, ThreadRef, TrustPhase, TrustSeed } from "@onlyne/lib";
+import type { MessageRef, NodeId, ThreadRef, TrustPhase, TrustSeed } from "@onlyne/lib";
 
 /**
  * Project-scoped configuration in `<project>/.onlyne/config.toml`.
@@ -59,6 +59,7 @@ export interface QueueItem {
 
 /** One message row in the viewer's chat page. */
 export interface ViewerMessage {
+	ref: MessageRef;
 	seq: string;
 	direction: "in" | "out";
 	author: string;
@@ -69,6 +70,7 @@ export interface ViewerMessage {
 
 /** One thread row in the viewer's chat page. */
 export interface ViewerThread {
+	ref: ThreadRef;
 	alias: string;
 	title: string;
 	state: "open" | "closed";

@@ -148,12 +148,9 @@ export class ThreadService {
       }
       const thread = freshThread(ref, mutation.title, at);
       await tx.put(key('thread', owner, ref.id), thread);
-      if (!existingDefault) {
-        // The landing slot is a place, not a copy: it carries no title of the thread that happened to be created first.
-        const slot = freshThread({ owner, id: DEFAULT_THREAD }, 'default', at);
-        await tx.put(key('thread', owner, DEFAULT_THREAD), slot);
-        await tx.put(key('default', owner), slot.thread_ref);
-      }
+      // An ordinary thread does not plant the landing slot: a default exists only when the
+      // owner asks for one, so opening a conversation never turns later first contacts into
+      // `not_a_member` refusals against a thread nobody joined.
       return thread;
     });
   }
@@ -262,14 +259,25 @@ export class ThreadService {
   }
 
   /**
-   * Recipient view: unacked notices addressed to auth.actor. A missed push fetches them
-   * via HTTP GET /grants and processes each with acceptGrant to store the owner+thread.
+   * Recipient view: the grants this node accepted from owners, until it confirms each one.
+   * A missed push is fetched over HTTP and processed with acceptGrant; this list is what
+   * the confirmation pass walks to close the owner's notice.
    */
   async grants(auth: Auth, options: PageOptions = {}): Promise<Page<Grant>> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
     return this.ctx.storage.transaction(async tx => {
-      const held = sortedBy((await tx.scan<Grant>(key('notice') + '/')).map(row => row.value).filter(grant => grant.recipient === auth.actor && !grant.acked), grant => grant.id);
+      const held = sortedBy((await tx.scan<Grant>(key('grant') + '/')).map(row => row.value).filter(grant => !grant.acked), grant => grant.id);
       return page(held, options, { kind: 'grants', recipient: auth.actor }, grant => grant.id);
+    });
+  }
+
+  /** Recipient side: records that the owner confirmed this grant, so it is not confirmed twice. */
+  async ackGrantLocally(auth: Auth, ref: ThreadRef, id: string): Promise<void> {
+    if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
+    await this.ctx.storage.transaction(async tx => {
+      const slot = key('grant', ref.owner, id);
+      const stored = await tx.get<Grant>(slot);
+      if (stored !== undefined && !stored.acked) await tx.put(slot, { ...stored, acked: true });
     });
   }
 

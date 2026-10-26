@@ -10,7 +10,6 @@ The repository holds the draft protocol specifications, the runtime packages, an
 |---|---|
 | [`packages/lib`](packages/lib/README.md) | `@onlyne/lib`: threads, durable message admission, attention obligations, reply correlation, ownerless domains, resources with explicit handover, the HTTP binding, and the plugin interfaces |
 | [`packages/omp-onlyne`](packages/omp-onlyne/README.md) | OMP integration: one `msg` tool, judge-selected delivery, and inbound injection |
-| [`packages/qoder-onlyne`](packages/qoder-onlyne/README.md) | Qoder CN plugin: one installation domain, workspace nodes, sessions as execution contexts, threads as channels or direct conversations |
 
 `packages/` holds publishable runtime code only. Further packages sit beside `lib` as they land.
 

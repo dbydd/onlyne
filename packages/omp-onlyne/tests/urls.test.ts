@@ -69,6 +69,9 @@ async function readView(url: string): Promise<string> {
 interface OutboundDetail {
 	message_id?: string;
 	entry?: string;
+	conversation?: string;
+	at?: string | null;
+	status?: string;
 	landed?: { thread: string; seq: string; guarantee: string };
 	reply?: { by: string; seq: string; message_id: string; body: string };
 	reply_unavailable?: string;
@@ -82,10 +85,12 @@ interface Exchange {
 	replyId: string;
 	thirdId: string;
 	aThreadId: string;
-	bThreadId: string;
 }
 
-/** a greets b, b replies, a answers: three hops over two nodes, with no thread named by hand. */
+/**
+ * a greets b, b replies, a answers: three hops over two nodes, with no thread named by hand.
+ * The greeting opens a thread a owns, so b learns it from the grant and pulls the entry.
+ */
 async function exchange(): Promise<Exchange> {
 	let hop = 0;
 	let helloId = "";
@@ -100,6 +105,7 @@ async function exchange(): Promise<Exchange> {
 	await a.node.discovery.observe(b.endpoint, "test", "urn:onlyne:agent:b");
 	await b.node.discovery.observe(a.endpoint, "test", "urn:onlyne:agent:a");
 	await a.node.client.msg({ delivery_kind: "greet b", msg: "hello" });
+	await b.node.client.reconcile();
 	const inbox = await b.node.messages.inbox(b.node.auth, { page_size: 10 });
 	helloId = inbox.items[0]?.attention.entry?.message.id ?? "";
 	expect(helloId).not.toBe("");
@@ -111,9 +117,8 @@ async function exchange(): Promise<Exchange> {
 	const third = (await a.storage.transaction(tx => tx.scan<Outbound>("outbound/")))
 		.map(row => row.value).find(row => row.request.message.id !== helloId);
 	if (third === undefined) throw new Error("the third hop left no outbound record");
-	const bThread = (await b.node.threads.list(b.node.auth, { page_size: 10 })).items[0];
 	const aThread = (await a.node.threads.list(a.node.auth, { page_size: 10 })).items[0];
-	if (bThread === undefined || aThread === undefined) throw new Error("the exchange minted no thread");
+	if (aThread === undefined) throw new Error("the exchange minted no thread");
 	return {
 		a: pluginFor(a, "urn:onlyne:agent:a"),
 		b: pluginFor(b, "urn:onlyne:agent:b"),
@@ -121,7 +126,6 @@ async function exchange(): Promise<Exchange> {
 		replyId,
 		thirdId: third.request.message.id,
 		aThreadId: aThread.thread_ref.id,
-		bThreadId: bThread.thread_ref.id,
 	};
 }
 
@@ -130,10 +134,12 @@ describe("onlyne:// outbound", () => {
 		const x = await exchange();
 		setRuntime(x.a);
 		const detail = JSON.parse(await readView(`onlyne://outbound/${x.helloId}`)) as OutboundDetail;
-		expect(detail.landed).toEqual({ thread: `urn:onlyne:agent:b/${x.bThreadId}`, seq: "1", guarantee: "binding-defined" });
-		expect(detail.reply).toBeUndefined();
-		expect(detail.reply_unavailable).toContain("urn:onlyne:agent:b");
-		expect(detail.entry).toBe(`onlyne://threads/${x.bThreadId}/messages/1`);
+		expect(detail.landed).toEqual({ thread: `urn:onlyne:agent:a/${x.aThreadId}`, seq: "1", guarantee: "binding-defined" });
+		// The reply is read from this node's own history, not from the peer's thread.
+		expect(detail.reply?.by).toBe("urn:onlyne:agent:b");
+		expect(detail.reply?.body).toBe("got it");
+		expect(detail.entry).toBe(`onlyne://messages/${encodeURIComponent("urn:onlyne:agent:a")}/${x.helloId}`);
+		expect(detail.conversation).toBe(`onlyne://conversations/${encodeURIComponent("urn:onlyne:agent:a")}/${x.helloId}`);
 	});
 
 	test("a detail carries the reference the list shows", async () => {
@@ -141,14 +147,16 @@ describe("onlyne:// outbound", () => {
 		setRuntime(x.b);
 		const detail = JSON.parse(await readView(`onlyne://outbound/${x.replyId}`)) as OutboundDetail;
 		expect(detail.in_reply_to).toEqual({ sender: "urn:onlyne:agent:a", id: x.helloId });
-		expect(detail.entry).toBe(`onlyne://threads/${x.aThreadId}/messages/1`);
+		expect(detail.entry).toBe(`onlyne://messages/${encodeURIComponent("urn:onlyne:agent:b")}/${x.replyId}`);
+		expect(detail.status).toBe("accepted");
 	});
 
 	test("a reply that names no thread lands where the original is", async () => {
 		const x = await exchange();
 		setRuntime(x.a);
 		const detail = JSON.parse(await readView(`onlyne://outbound/${x.thirdId}`)) as OutboundDetail;
-		expect(detail.landed).toEqual({ thread: `urn:onlyne:agent:b/${x.bThreadId}`, seq: "2", guarantee: "binding-defined" });
+		// All three hops share the thread a started: the greeting, b's reply, and a's answer.
+		expect(detail.landed).toEqual({ thread: `urn:onlyne:agent:a/${x.aThreadId}`, seq: "3", guarantee: "binding-defined" });
 		expect(detail.in_reply_to).toEqual({ sender: "urn:onlyne:agent:b", id: x.replyId });
 	});
 });

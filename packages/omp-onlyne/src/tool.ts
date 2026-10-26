@@ -2,6 +2,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type ExtensionAPI, type ExtensionContext, type SessionEntry, z } from "@oh-my-pi/pi-coding-agent";
 import type { Json, MsgInput, SendOutcome } from "@onlyne/lib";
 import { runDecision } from "./decider.ts";
+import { createDraft, sendDraft } from "./drafts.ts";
 import { observeToolResult } from "./messages.ts";
 import { getRuntime } from "./runtime.ts";
 
@@ -24,11 +25,22 @@ A send is one call. The result is the delivery fact: admission "accepted" means 
 
 A reply arrives by itself. The plugin injects it as an onlyne.inbound message and starts a turn; you do not need to check. Do not poll after a send: no inbox scans, thread reads, evidence queries, log greps or SQLite lookups. Read state only when the user asks about history, or when a specific fact is missing from the result in hand.
 
-State reads: read the root \`onlyne://\` for the views this node publishes — neighbors, threads, inbox, contexts, outbound — instead of guessing a route, and read one entry at \`onlyne://threads/<thread-id>/messages/<seq>\`. A thread's list carries the incoming side; your own sends are in \`onlyne://outbound\`, where each record names the landing the receiver reported.
+State reads: read the root \`onlyne://\` for the views this node publishes — neighbors, threads, conversations, inbox, contexts, outbound — instead of guessing a route. A conversation is one exchange with both directions: \`onlyne://conversations\` lists them with the latest message and time, \`onlyne://conversations/<sender>/<id>\` shows every message in it, and one message is at \`onlyne://messages/<sender>/<id>\`. Raw thread entries stay at \`onlyne://threads/<thread-id>/messages/<seq>\`.
 
 A delivery lands in a thread the receiver owns, and a reply lands in the thread that holds the original message; the receipt reports that landing as thread <id> seq <n>. Naming one of your own threads as the landing is refused, not silently redirected, so leave meta.thread out of a reply.
 
 meta.to names exactly one node. Sending to several peers is one call per peer, and each call returns its own receipt; report them separately rather than expecting one result for a set.
+
+Use cases, each a complete call:
+
+- Reply to a message you received. Do not name a thread; the receiver lands the reply where the original lives:
+  { delivery_kind: "answer dpdp's question", msg: "Yes, the second set is fine.", meta: { in_reply_to: { sender: "urn:onlyne:agent:dpdp", id: "<message id>" }, relation: "reply" } }
+- Send a fresh message to one peer: { delivery_kind: "greet lazuli", msg: "Hello from the workbench.", meta: { to: "lazuli" } }
+- Send the same note to two peers: { delivery_kind: "notify both", msg: "Report is up.", meta: { to: ["caerulea", "lazuli"] } } — you get one result per target, and a failure on one does not hide the other.
+- Read the whole exchange with one peer: read \`onlyne://conversations/<sender>/<id>\` from a list you got at \`onlyne://conversations\`. Read one message with \`onlyne://messages/<sender>/<id>\`.
+- Check what happened to a message you sent: read \`onlyne://outbound/<message-id>\`; it shows the landing the receiver reported, whether it is accepted, and the reply if one arrived.
+- In a subagent, answer without sending: { delivery_kind: "draft the reply", msg: "Here is the answer.", meta: { op: "draft", to: "dpdp", relation: "reply", in_reply_to: { sender: "urn:onlyne:agent:dpdp", id: "<message id>" } } } returns { draft_id }. The main session sends exactly that draft: { delivery_kind: "send the drafted reply", msg: "send draft", meta: { draft_id: "<draft id>" } }.
+- When a send fails with no trusted key, do not retry and do not try to pair: the error names both nodes, the responsible holder and the entry in the host surface. Report it and stop.
 
 The judge role chooses the action and plan from your intent, so never invent message ids, idempotency keys or revisions. A reply or followup states its relation; omitting it is rejected rather than assumed. A reply targets the original reply authority, so a conflicting to is rejected. A subagent session reads its own slice (onlyne://threads, onlyne://inbox, onlyne://contexts) and returns the result to the main session, which does the sending.`;
 
@@ -64,6 +76,38 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 			};
 			const started = Date.now();
 			try {
+				const op = parsed.data.meta?.op;
+				if (op === "draft") {
+					const result = await createDraft(runtime, ctx, input, signal);
+					pi.logger.info("onlyne.draft.created", { ms: Date.now() - started });
+					return { content: [{ type: "text", text: `Draft ${String((result as { draft_id: string }).draft_id)} is ready; the main session sends it with meta.draft_id.` }], details: { result } };
+				}
+				if (typeof parsed.data.meta?.draft_id === "string") {
+					const result = await sendDraft(runtime, ctx, parsed.data.meta.draft_id, signal);
+					recordAwaitResult(pi, toolCallId, result, ctx);
+					return { content: [{ type: "text", text: `${summary(result)}\n\n${JSON.stringify(visibleResult(result), null, 2)}` }], details: { result: visibleResult(result) } };
+				}
+				const targets = parsed.data.meta?.to;
+				if (Array.isArray(targets)) {
+					if (targets.length === 0) return failure("meta.to names no target. Name one peer, or send one call per peer.");
+					const rows: Array<{ to: unknown; outcome?: unknown; error?: string }> = [];
+					for (const target of targets) {
+						const one: MsgInput = { ...input, meta: { ...input.meta, to: target as Json } };
+						const oneScope = { ...scope, input: one };
+						try {
+							rows.push({ to: target, outcome: await runDecision(oneScope, () => runtime.node.client.msg(one, {
+								...(signal === undefined ? {} : { signal }), context: ctx.agent.id,
+							})) });
+						} catch (error) {
+							rows.push({ to: target, error: error instanceof Error ? error.message : String(error) });
+						}
+					}
+					const text = rows.map(row => row.error === undefined
+						? `→ ${String(row.to)}: ${summary(row.outcome)}`
+						: `→ ${String(row.to)}: not sent — ${row.error}`).join("\n");
+					pi.logger.info("onlyne.msg.multi", { targets: rows.length, failed: rows.filter(row => row.error !== undefined).length });
+					return { content: [{ type: "text", text: `${text}\n\n${JSON.stringify(rows, null, 2)}` }], details: { result: rows } };
+				}
 				const result = await runDecision(scope, () =>
 					runtime.node.client.msg(input, {
 						...(signal === undefined ? {} : { signal }),

@@ -11,8 +11,9 @@ Four real OMP sessions, modelled on the local regions and roles:
 
 Each role is one OMP process with its own Onlyne node. The role directories are
 empty: the first run creates the project config through `/onlyne init`. There is
-no central server and no fake peer. A thread is created by the first message;
-the example predefines none.
+no central server and no fake peer. The role that sends the first message starts
+the thread and owns it for the rest of the conversation; the other roles join as
+members and read it from that owner. The example predefines no thread.
 
 `AGENTS.md` in this directory is the contract every role session reads: `msg` is
 the only entry, a send's `admission` is the delivery fact, and a reply arrives on
@@ -72,17 +73,20 @@ a suggested region and a native rendering surface.
 ## What to look at
 
 1. In `dpdp`, ask the agent to send a review request to `lazuli` with the `msg`
-   tool. `lazuli` receives an attention row; its `/onlyne` queue page shows it,
-   and the first message creates the thread.
-2. `lazuli` receives an `onlyne.inbound` custom message and starts a turn. The
-   second `/onlyne` page shows the thread and the message stream.
-3. Reply from `lazuli` with `in_reply_to`; `dpdp` shows the reply in its thread.
+   tool. `dpdp` starts the thread and owns it; `lazuli` becomes a member and
+   receives an attention row.
+2. `lazuli` receives an `onlyne.inbound` custom message and starts a turn. Its
+   `/onlyne` menu lists the thread in the sidebar and shows the message flow in
+   the middle column.
+3. Reply from `lazuli` with `in_reply_to`. The reply is stored in `dpdp`'s
+   thread at the next seq, so both roles read one list from one owner.
 4. `/onlyne settings` edits that role's project config in place. Cancel writes
    nothing.
-5. `/onlyne` page 3 lists every discovered node with `[x]`/`[ ]`. Move with
-   `j`/`k` and press Space to request a connection; page 4 lists the reachable
-   contacts. Different regions still appear here; region membership only
-   affects domain-scoped routing.
+5. `/onlyne` shows four columns: the domain rail, the thread sidebar with the
+   pending key requests and the inbox, the conversation with its composer, and
+   the current domain's nodes with the selected node's detail. Each long panel
+   scrolls on its own. Different regions still appear in the rail; region
+   membership only affects domain-scoped routing.
 
 Each node stores protocol records in `.onlyne/omp.db` beside its config. That
 file is local test state and is ignored by git.

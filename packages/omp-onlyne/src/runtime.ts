@@ -96,7 +96,14 @@ class OmpRuntime implements PluginRuntime {
 			},
 			listPeers: async () => (await this.node.discovery.listRecords()).filter(record => record.verified_at !== undefined && Date.parse(record.expires_at) > Date.now()),
 			listReceiverContexts: async id => id === this.config.node.id
-				? [{ alias: "main", summary: "Main OMP session", state: this.main.isIdle() ? "idle" : "running" }, ...await this.contexts.list()]
+				? [
+						{ alias: "main", summary: "Main OMP session", state: this.main.isIdle() ? "idle" : "running" },
+						// A lost or never-bound record cannot receive a continuation; advertising it
+						// would invite the sender to pick a context that fails on arrival.
+						...await this.contexts.list().then(records => records
+							.filter(record => record.state !== "lost" && record.state !== "unbound")
+							.map(record => ({ alias: record.alias, summary: record.summary, state: record.state }))),
+					]
 				: transport!.request(id, "GET", "/contexts", undefined, this.controller.signal),
 			listThreads: () => allPages(cursor => this.node.threads.list(this.node.auth, { page_size: 100, cursor })),
 			listMessages: (thread, cursor) => this.node.messages.list(this.node.auth, thread, { attention: "thread", page_size: 100, cursor }),
@@ -250,9 +257,9 @@ class OmpRuntime implements PluginRuntime {
 			const ref = thread.thread_ref;
 			hosted.add(`${ref.owner}/${ref.id}`);
 			const entries = await allPages(cursor => this.node.messages.list(this.node.auth, ref, { attention: "thread", page_size: 100, cursor }));
-			views.push({ alias: ref.id, title: thread.title, state: thread.state,
+			views.push({ ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: thread.title, state: thread.state,
 				unread: inbox.filter(item => !item.injected && item.attention.thread_ref.owner === ref.owner && item.attention.thread_ref.id === ref.id).length,
-				last_seq: entries.at(-1)?.seq ?? "0", messages: entries.map(entry => ({ seq: entry.seq, direction: entry.message.sender === this.config.node.id ? "out" : "in", author: entry.authenticated_author, at: entry.at, text: entry.message.msg, relation: entry.message.meta?.relation })),
+				last_seq: entries.at(-1)?.seq ?? "0", messages: entries.map(entry => ({ ref: { sender: entry.message.sender, id: entry.message.id }, seq: entry.seq, direction: entry.message.sender === this.config.node.id ? "out" : "in", author: entry.authenticated_author, at: entry.at, text: entry.message.msg, relation: entry.message.meta?.relation })),
 			});
 		}
 		// A member's own message never comes back through its inbox, so the message that
@@ -265,12 +272,12 @@ class OmpRuntime implements PluginRuntime {
 			const ref = item.attention.thread_ref;
 			const key = `${ref.owner}/${ref.id}`;
 			if (hosted.has(key)) continue;
-			const view = seen.get(key) ?? { alias: ref.id, title: `来自 ${shortNodeId(ref.owner)} 的线程`, state: "open", unread: 0, last_seq: "0", messages: [] };
+			const view = seen.get(key) ?? { ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: `来自 ${shortNodeId(ref.owner)} 的线程`, state: "open", unread: 0, last_seq: "0", messages: [] };
 			seen.set(key, view);
 			if (!item.injected) view.unread++;
 			const entry = item.attention.entry;
 			if (entry !== undefined) {
-				view.messages.push({ seq: entry.seq, direction: entry.message.sender === this.config.node.id ? "out" : "in", author: entry.authenticated_author, at: entry.at, text: entry.message.msg, relation: entry.message.meta?.relation });
+				view.messages.push({ ref: { sender: entry.message.sender, id: entry.message.id }, seq: entry.seq, direction: entry.message.sender === this.config.node.id ? "out" : "in", author: entry.authenticated_author, at: entry.at, text: entry.message.msg, relation: entry.message.meta?.relation });
 				view.last_seq = entry.seq;
 			}
 		}
@@ -280,10 +287,10 @@ class OmpRuntime implements PluginRuntime {
 			const ref = receipt.thread_ref;
 			const key = `${ref.owner}/${ref.id}`;
 			if (hosted.has(key)) continue;
-			const view = seen.get(key) ?? { alias: ref.id, title: `来自 ${shortNodeId(ref.owner)} 的线程`, state: "open", unread: 0, last_seq: "0", messages: [] };
+			const view = seen.get(key) ?? { ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: `来自 ${shortNodeId(ref.owner)} 的线程`, state: "open", unread: 0, last_seq: "0", messages: [] };
 			seen.set(key, view);
 			const message = row.value.request.message;
-			view.messages.push({ seq: receipt.seq, direction: "out", author: message.sender, at: "", text: message.msg, relation: message.meta?.relation });
+			view.messages.push({ ref: { sender: message.sender, id: message.id }, seq: receipt.seq, direction: "out", author: message.sender, at: row.value.created_at ?? "", text: message.msg, relation: message.meta?.relation });
 			if (Number(receipt.seq) > Number(view.last_seq)) view.last_seq = receipt.seq;
 		}
 		for (const view of seen.values()) view.messages.sort((left, right) => Number(left.seq) - Number(right.seq));

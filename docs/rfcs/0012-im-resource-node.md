@@ -14,7 +14,9 @@ IM 会话是事件驱动型资源节点。平台事件由 IM endpoint 首次接�
 | 交接截点与截点之前的事件引用 | IM endpoint |
 | 是否建立待办、怎么回复平台 | assignee |
 
-IM endpoint 是资源节点，不是 agent，不调用模型。它只做事件接收、去重、归属、绑定和推送。
+IM endpoint 是资源节点，不是 agent，不调用模型。它做事件接收、去重、归属、绑定和推送。
+
+同时，IM gateway 是外部 IM 会话在 Onlyne 内部的会话发起者与完整线程所有者（thread owner）。平台会话对应一个由 IM gateway 持有的唯一 thread，平台用户的进站消息与各 agent 的回复均存入该 thread，由 gateway 统一分配 seq 并向 assignee 发出关注义务，回复再由 gateway 渲染发回平台。
 
 ## 2. 会话身份
 

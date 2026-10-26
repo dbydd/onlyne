@@ -58,8 +58,12 @@ separate security proposal; leave both at their defaults for the first E2E.
   role chooses the action and delivery plan; the result reports the plan that
   ran. A new execution context belongs to the receiver; the sender never mints
   one.
-- `onlyne://threads`, `onlyne://threads/<alias>`, `onlyne://threads/<alias>/<seq>`,
-  `onlyne://contexts`, `onlyne://inbox`, `onlyne://outbox` — read-only views.
+- `onlyne://threads`, `onlyne://threads/<alias>`, `onlyne://threads/<alias>/messages/<seq>`,
+  `onlyne://conversations`, `onlyne://conversations/<sender>/<id>`,
+  `onlyne://messages/<sender>/<id>`, `onlyne://contexts`, `onlyne://inbox`,
+  `onlyne://outbound`, `onlyne://neighbors` — read-only views. List views accept
+  `page_size` (or `limit`) and `cursor`; a conversation holds both directions of one
+  exchange.
 - Inbound messages arrive as `onlyne.inbound` custom messages. A supplement for
   an existing context uses `onlyne.supplement` and `sendCustomMessage`.
 - Tern renders these messages as mailing-list letters: an `[onlyne]` subject,
@@ -69,7 +73,11 @@ separate security proposal; leave both at their defaults for the first E2E.
 - Consumption is confirmed only after the host observes the entry in an actual
   provider request; submitting a custom message or tool result does not advance
   the record.
-- `/onlyne` opens the queue/chat viewer; `/onlyne settings` edits the project
+- `/onlyne` opens a domain rail, thread sidebar, message flow and domain node list.
+  Threads, messages and nodes scroll independently. The inbox opens from the sidebar.
+  Posting names the thread's owner and id; clicking an incoming message selects its
+  message reference for a reply. Reply routing currently follows the original
+  author and can land in another thread. `/onlyne settings` edits the project
   configuration. `/onlyne init` writes a first config and starts the node; with
   no config, `/onlyne` and `/onlyne settings` open the same bootstrap.
 
@@ -82,10 +90,10 @@ host project's `AGENTS.md`: it states that `msg` is the only entry, that a send'
 `admission` is the delivery fact rather than the wait, and that replies arrive as
 inbound messages so a send needs no polling.
 
-On the discovery page, request a key exchange with a peer. The viewer reads the
+Select a domain node to request a key exchange. The viewer reads the
 peer's public key and shows both fingerprints before sending. Confirmation sends
-the signed introduction and records local approval. The peer's contacts page shows
-the pending request. Both nodes become trusted after the peer approves. Committed
+the signed introduction and records local approval. The peer's sidebar and message
+flow show the pending request. Both nodes become trusted after the peer approves. Committed
 trust changes notify the viewer immediately, including introductions received over
 HTTP, so an open viewer does not wait for maintenance to show a request or approval.
 

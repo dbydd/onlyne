@@ -123,7 +123,7 @@ export function registerUi(pi: ExtensionAPI): void {
 							// Fullscreen is what turns on pointer reporting: a normal overlay never gets mouse
 							// events, so every click on a described node would go nowhere. The alt screen also
 							// gives the sheet the whole pane, which the four columns need.
-							overlayOptions: { anchor: "center", fullscreen: true },
+							overlayOptions: { margin: 0, fullscreen: true },
 							signal: controller.signal,
 						},
 					);

@@ -226,13 +226,14 @@ graph TD
 
 ### 5.1 预处理确定性剪枝（Pre-filtering Invariants）
 在构建入站题目之前，必须完成代码层事实提炼：
-1. **回复义务识别（`needs_reply`）**：
-   - 条件 A（元数据）：`entry.message.meta?.in_reply_to !== undefined` 或 `entry.message.meta?.relation === "reply"`。
-   - 条件 B（语义正文启发式）：正文包含显式问候（如“你好”、“在吗”）、问询句（带问号、“请问”、“能否”、“期待回复”）、协作成果索取。
-   - 满足任一条件，即确立 `needs_reply = true`。
+1. **回复义务识别（`needs_answer`）**：
+   - 由判定模型回答一个 yes/no 问题：这条来信是否在等本节点的答复。
+   - 证据：正文、`delivery_kind`、发送方计划（`response` / `execution`）、关系与引用。
+   - 问候、提问、命令式请求与“已完成的答复/状态通知”必须分开判断；`in_reply_to` 存在只说明它在回复某条消息，不说明它还需要回答。关键词表只作提示，不作判据。
 2. **上下文生命周期与发信权限硬过滤（Fatal Pitfall Guard）**：
    - **已销毁过滤**：任何 `disposed === true` 或对应 session 进程已退出的会话上下文，**直接从候选列表中剔除**（彻底消除 `caerulea-found3` 消息入黑洞问题）。
-   - **发信权限过滤**：若 `needs_reply === true`，所有 `can_answer !== true`（如只读子会话）**直接从候选列表中剔除**（彻底消除 `cyanea-found1` 消息误入只读子代理导致死锁问题）。
+   - **发信权限过滤**：若 `needs_answer === true`，所有 `can_answer !== true`（如只读子会话）**直接从候选列表中剔除**（彻底消除 `cyanea-found1` 消息误入只读子代理导致死锁问题）。
+   - **发送方偏好**：`execution: new` 只是偏好，需要回答时改投有发信权的落点并记录改判；`plan.context` 是绑定，指向已丢失上下文时返回 `context_lost`。
 
 ---
 
@@ -242,12 +243,10 @@ graph TD
   1. `main_agent`: 由本节点主会话承载处理（默认首选）。
   2. 针对每一个合法的活跃子上下文（`alias`）：
      - 标签格式：`${alias} (${summary}, state: ${state}, agent: ${agent_id})`。
-  3. `new_subagent`: 开启全新子会话（**硬约束**：仅当 `needs_reply === false` 且消息带来完整独立背景时允许出现）。
-  4. `queue`: 暂存队列待处理（当当前会话显式处于 plan 模式或外部排队模式时）。
+  3. `new_subagent`: 开启全新子会话（**硬约束**：仅当 `needs_answer === false` 且消息带来完整独立背景时允许出现）。
 - **映射动作**：
   - 若选具体上下文 `alias` -> 生成 `{ action: "context", context: alias }`，投递至子代理。
   - 若选 `new_subagent` -> 生成 `{ action: "new_subagent" }`，宿主启动新子代理。
-  - 若选 `queue` -> 生成 `{ action: "queue" }`，入库暂存，不进入模型上下文。
   - 若选 `main_agent` -> **进入节点 I-2，进一步判定主会话插入模式**。
 
 ---

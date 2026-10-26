@@ -112,7 +112,9 @@ async function phasePermitted(): Promise<void> {
     membership?.state === 'active' && sameList([...(membership?.access ?? [])].sort(), ['post', 'read'])
       ? '' : describeProblem(membership));
 
-  const grants = await owner.threads.grants(guestAuth);
+  // The notice the owner issued, read from the owner's outbox: `grants()` is the recipient's
+  // accepted list, and this node is the owner here.
+  const grants = await owner.threads.notices(ownerAuth);
   const notice = grants.items[0];
   check('first-contact.grant_notice',
     grants.items.length === 1 && notice?.thread_ref.id === receipt.thread_ref.id

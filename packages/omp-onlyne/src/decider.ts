@@ -269,7 +269,7 @@ export class JudgeDecider {
 		}
 
 		const plan = await this.#deliveryPlan(scope, meta, lockedRelation, reply !== undefined);
-		const thread = await this.#sendThread(meta, to, reply !== undefined);
+		const thread = await this.#sendThread(meta, to);
 		const context = plan.execution === "new" ? undefined : await this.#receiverContext(scope, to, meta);
 		if (plan.execution === "existing" && context === undefined) {
 			// RFC 0005 §1: `existing` disambiguates or refuses. Quietly opening a new context made
@@ -481,43 +481,28 @@ export class JudgeDecider {
 	}
 
 	/**
-	 * The landing a send names. A reply's landing is the receiver's decision (RFC 0003 §6: the
-	 * thread holding the original message), so naming one of this node's own threads would be
-	 * accepted and then land elsewhere — the failure dpdp report 4 could not detect. A bare id
-	 * that names no local thread is the target's thread id, as a receipt reports it.
+	 * The thread a send names. The thread decides where the message is stored; `to` decides who
+	 * is addressed. An initiator owns its thread for the whole conversation, so every member
+	 * writes into it and the client routes each message to that owner. A bare id that names no
+	 * local thread is the target's thread id, as a receipt reports it.
 	 */
-	async #sendThread(meta: Record<string, Json> | undefined, to: NodeId, reply: boolean): Promise<ThreadRef | undefined> {
+	async #sendThread(meta: Record<string, Json> | undefined, to: NodeId): Promise<ThreadRef | undefined> {
 		if (meta?.thread === undefined) return undefined;
 		const value = meta.thread;
 		if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-			const thread = await this.#thread(meta);
-			if (thread === undefined) return undefined;
-			return this.#landing(thread, to, reply);
+			return this.#thread(meta);
 		}
 		if (typeof value !== "string" || value.length === 0) {
 			throw new OnlyneError("invalid_request", "meta.thread must be a thread alias or {owner,id}.");
 		}
 		const matches = (await this.deps.listThreads()).filter(thread => thread.thread_ref.id === value || thread.title === value);
 		if (matches.length > 1) throw new OnlyneError("ambiguous_target", `More than one local thread is named ${value}.`);
-		if (matches.length === 1) return this.#landing(matches[0]!.thread_ref, to, reply);
+		if (matches.length === 1) return matches[0]!.thread_ref;
 		const slash = value.indexOf("/");
 		if (slash > 0 && slash < value.length - 1) {
-			return this.#landing({ owner: value.slice(0, slash), id: value.slice(slash + 1) }, to, reply);
+			return { owner: value.slice(0, slash), id: value.slice(slash + 1) };
 		}
 		return { owner: to, id: value };
-	}
-
-	#landing(thread: ThreadRef, to: NodeId, reply: boolean): ThreadRef {
-		if (thread.owner === to) return thread;
-		if (thread.owner === this.deps.config.node.id) {
-			throw new OnlyneError(
-				"invalid_request",
-				reply
-					? `meta.thread names ${thread.id}, a thread this node owns. A reply lands in the thread that holds the original message, and ${to} decides it; drop meta.thread and read the receipt for the landing.`
-					: `meta.thread names ${thread.id}, a thread this node owns, but the message targets ${to}. A delivery lands in a thread the target owns.`,
-			);
-		}
-		throw new OnlyneError("invalid_request", `The named thread belongs to ${thread.owner}, but the message targets ${to}.`);
 	}
 
 	/**
@@ -542,7 +527,10 @@ export class JudgeDecider {
 				fallback: "main_agent",
 				reason: "a new-context request cannot hold a message that needs an answer",
 			});
-			return { action: "wake", insertion: await this.#insertionMode(scope, entry, needsAnswer) };
+			const insertion = await this.#insertionMode(scope, entry, needsAnswer);
+			// A message that needs an answer never gets the silent mode; the option is withheld
+			// above, and this keeps the decision type honest if that ever changes.
+			return { action: "wake", insertion: insertion === "fragment" ? "follow_up" : insertion };
 		}
 		// Deterministic prefilter (design §5.1): a disposed or never-bound session is a delivery
 		// black hole, and a message that needs an answer can only land where a reply can be sent.
@@ -652,7 +640,7 @@ export class JudgeDecider {
 					},
 				},
 			},
-			scope.signal,
+			undefined,
 		);
 		this.#record("inbound.i0", { delivery_kind: entry.message.delivery_kind, msg: entry.message.msg, meta: entry.message.meta }, answers, Date.now() - started);
 		const answer = choice(answers, "needs_answer");

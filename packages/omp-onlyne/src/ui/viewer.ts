@@ -1,10 +1,11 @@
-import type { KeyExchange, MsgInput, SendOutcome, TrustPhase } from "@onlyne/lib";
+import type { KeyExchange, MessageRef, MsgInput, SendOutcome, TrustPhase } from "@onlyne/lib";
 import {
 	type Component,
 	type DescribeContext,
 	Editor,
 	type NativeChild,
 	type NativeNode,
+	type NativeScroll,
 	type NativeUiEvent,
 	type Theme,
 	type TspSpan,
@@ -17,18 +18,12 @@ import {
 import { shortNodeId } from "../config.ts";
 import { getRuntime } from "../runtime.ts";
 import type { OnlyneStatus, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "../types.ts";
-import { ageText, clockText, fit, oneLine, shortAlias } from "./format.ts";
-
-type Page = "queue" | "chat" | "discovery" | "contacts";
-
-const PAGES: readonly { id: Page; label: string }[] = [
-	{ id: "queue", label: "队列" },
-	{ id: "chat", label: "对话" },
-	{ id: "discovery", label: "发现" },
-	{ id: "contacts", label: "联系人" },
-];
+import { ageText, clockText, fit, oneLine, shortAlias, sinceText } from "./format.ts";
 
 const REGION_PREFIX = "urn:onlyne:region:";
+
+/** The label column of a fact row: wide enough for the longest label (四格汉字), one gap before the value. */
+const FACT_LABEL = "10ch";
 
 /** A region URI is stored for stability; every label shows the short name the user typed. */
 function regionLabel(region: string | undefined): string {
@@ -66,6 +61,13 @@ const PHASE_TONE: Record<TrustPhase, string> = {
 	revoked: "error",
 };
 
+const PHASE_SHORT: Record<TrustPhase, string> = {
+	exchanged: "已认证",
+	requested: "等对方",
+	invited: "待确认",
+	revoked: "已撤销",
+};
+
 interface Peer {
 	record: ViewerDiscovery;
 	trust?: { phase: TrustPhase; fingerprint: string };
@@ -84,6 +86,14 @@ interface Invite {
 	base_url: string;
 }
 
+/** What the main column shows: one thread, or the queue waiting on this node. */
+type View = { kind: "thread"; alias: string } | { kind: "inbox" };
+
+/** A described node with a scroll request attached; `node()` only builds the wire shape. */
+function scrolling(described: NativeNode, scroll: NativeScroll): NativeNode {
+	return { ...described, scroll } as NativeNode;
+}
+
 /** A TSP line extent, for heights the terminal must never recompute from content. */
 type LineExtent = `${number}lines`;
 
@@ -92,37 +102,25 @@ function linesOf(count: number): LineExtent {
 }
 
 /**
- * Row budgets for the regions inside the sheet. The sheet's own size is the
- * terminal's (`lg`); these are caps only — a `min` would demand more rows than
- * the pane has and get the frame clipped. Content past a cap is named, never drawn.
- */
-interface Geometry {
-	body: number;
-	messages: number;
-	threads: number;
-	members: number;
-	pageRows: number;
-}
-
-/**
- * The Onlyne surface: a domain rail, the thread column with what waits for
- * confirmation, the message flow with its composer, and the member column with
- * the selected member's detail. Every operation is a click on a described node;
- * `draftText` is the one way message text enters, because a native editor
- * reports text through the pointer/keyboard edit events itself.
+ * The Onlyne surface, laid out as the design's four columns: the domain rail,
+ * the thread sidebar, the conversation, and the member column with the
+ * selected member's detail. Every operation is a click on a described node or
+ * a select on a list row; `draftText` is the one way message text enters,
+ * because a native editor reports text through the edit events itself.
  */
 export class OnlyneViewer implements Component {
 	private snapshot: ViewerSnapshot | undefined;
 	private status: OnlyneStatus | undefined;
 	private loading = true;
 	private error: string | undefined;
-	private page: Page = "chat";
+	/** The main column's subject; undefined shows the first thread. */
+	private view: View | undefined;
 	/** The domain the rail highlights; undefined follows this node's own region. */
 	private domainKey: string | undefined;
-	private threadAlias: string | undefined;
 	private memberKey: string | undefined;
-	/** The recipient the composer names, else the open thread's own peer. */
+	/** An explicit recipient starts a new direct message. */
 	private target: string | undefined;
+	private replyTo: MessageRef | undefined;
 	/** The composer's text, mirrored from the editor so a rebuild keeps it. */
 	private draft = "";
 	private composer: Editor | undefined;
@@ -131,6 +129,9 @@ export class OnlyneViewer implements Component {
 	private exchange?: KeyExchange;
 	/** Only the newest request may open a card: a slower earlier lookup must not repaint it. */
 	private exchangeToken = 0;
+	/** Bumped to ask the terminal to scroll the message list to its newest row. */
+	private messageScroll = 0;
+	private messageScrollBy: NativeScroll["by"] = "end";
 	private notice: { text: string; error: boolean } | undefined;
 	private noticeTimer: Timer | undefined;
 	private unsubscribe: (() => void) | undefined;
@@ -169,35 +170,6 @@ export class OnlyneViewer implements Component {
 		this.described = undefined;
 		this.rendered = undefined;
 		this.requestRender();
-	}
-
-	/**
-	 * The sheet's height is the terminal's, so the regions inside it only need
-	 * caps: what the chrome (status, tabs, gaps) leaves for the body.
-	 */
-	private geometry(): Geometry {
-		const rows = Math.max(20, Math.floor(this.rows()));
-		// Chrome (sheet title, borders, status, tabs, gaps) is about ten rows; leave slack so a
-		// smaller-than-estimated pane can never demand more rows than it has.
-		const body = Math.max(6, rows - 16);
-		return {
-			body,
-			messages: Math.max(1, Math.floor((body - 10) / 5)),
-			threads: Math.max(1, Math.floor((body - 9) / 3)),
-			members: Math.max(1, Math.floor((body - 4) / 3)),
-			pageRows: Math.max(2, body - 4),
-		};
-	}
-
-	/** What the fixed frame shows of a list, and how many rows it left out. */
-	private shown<T>(items: readonly T[], budget: number): { rows: readonly T[]; more: number } {
-		if (items.length <= budget) return { rows: items, more: 0 };
-		const keep = Math.max(1, budget - 1);
-		return { rows: items.slice(0, keep), more: items.length - keep };
-	}
-
-	private moreText(count: number): NativeNode {
-		return textNode([span(`…另有 ${count} 条未显示`, "muted")], { truncate: "end" });
 	}
 
 	async reload(): Promise<void> {
@@ -255,8 +227,12 @@ export class OnlyneViewer implements Component {
 
 	private selectedThread(): ViewerThread | undefined {
 		const threads = this.threads();
-		const named = threads.find(thread => thread.alias === this.threadAlias);
-		if (named !== undefined) return named;
+		const view = this.view;
+		if (view?.kind === "thread") {
+			const named = threads.find(thread => thread.alias === view.alias);
+			if (named !== undefined) return named;
+		}
+		if (view?.kind === "inbox") return undefined;
 		// A message card's peer target names the conversation it belongs to.
 		if (this.target !== undefined) {
 			const live = threads.find(thread => thread.messages.some(message => message.author === this.target));
@@ -279,8 +255,8 @@ export class OnlyneViewer implements Component {
 
 	/**
 	 * Peers grouped by the domain they declare. Expired records stay in the
-	 * list, flagged: this page is the one place a user can revoke or retry a
-	 * node whose observation aged out.
+	 * list, flagged: the member column is the one place a user can revoke or
+	 * retry a node whose observation aged out.
 	 */
 	private domainGroups(): DomainGroup[] {
 		const groups = new Map<string, DomainGroup>();
@@ -321,18 +297,11 @@ export class OnlyneViewer implements Component {
 		return this.currentDomain()?.peers ?? [];
 	}
 
-	/** The thread's own peer: the author of its last inbound message, else its owner prefix. */
-	private threadPeer(thread: ViewerThread | undefined): string | undefined {
-		if (thread === undefined) return undefined;
-		const inbound = [...thread.messages].reverse().find(message => message.direction === "in");
-		return inbound?.author;
-	}
-
 	private sendBlocked(): string | undefined {
 		if (this.error !== undefined) return this.error;
 		if (this.draft.trim() === "") return "输入内容后发送";
-		if (this.target === undefined && this.threadPeer(this.selectedThread()) === undefined) {
-			return "先在线程栏选一位成员，或打开一个线程";
+		if (this.target === undefined && this.replyTo === undefined && this.selectedThread() === undefined) {
+			return "先打开线程，或选择收件人";
 		}
 		return undefined;
 	}
@@ -350,307 +319,253 @@ export class OnlyneViewer implements Component {
 		);
 	}
 
-	/** Peer chrome shared by every list: the trust dot, the short id, its domain and state. */
-	private peerHead(peer: Peer): TspSpan[] {
-		const phase = peer.trust?.phase;
-		return [
-			span("● ", phase === undefined ? "muted" : PHASE_TONE[phase]),
-			span(shortNodeId(peer.record.node_id), "strong"),
-			span(` · ${regionLabel(peer.record.region)}`, "dim"),
-			span(` · ${phase === undefined ? "无认证" : PHASE_LABEL[phase]}`, phase === undefined ? "dim" : PHASE_TONE[phase]),
-		];
+	/** The dim one-line label that separates the sidebar's sections inside its scrolling list. */
+	private heading(label: string, count: number): NativeNode {
+		return node(
+			"item",
+			{
+				label: [span(label, "dim")],
+				...(count === 0 ? {} : { value: [span(String(count), "dim")] }),
+				disabled: true,
+				role: "onlyne.heading",
+			},
+			undefined,
+			`head:${label}`,
+		);
 	}
 
-	private memberCard(peer: Peer, withActions: boolean): NativeNode {
-		const id = peer.record.node_id;
-		const phase = peer.trust?.phase;
-		const stale = Date.parse(peer.record.expires_at) <= Date.now();
-		const acts: NativeChild[] = [];
-		if (withActions) {
-			if (phase === "invited") acts.push(this.button("待你确认", "onlyne.page.contacts", { tone: "accent", title: "到联系人页核对指纹并批准" }));
-			else if (phase === undefined || phase === "revoked") acts.push(this.button("请求交换密钥", `onlyne.request:${id}`, { title: "读取对方指纹，核对后发送申请" }));
-			if (phase === "exchanged" || phase === "requested") acts.push(this.button("撤销信任", `onlyne.revoke:${id}`, { tone: "error" }));
-		}
+	/**
+	 * Label/value pairs as rows with a fixed label column. A `kv` grid sizes its
+	 * label column in characters, so a Chinese label (two cells per character)
+	 * leaves the value touching it and each row starting the value at a
+	 * different column; a `ch` bound counts the cells the terminal draws.
+	 */
+	private facts(items: ReadonlyArray<{ k: string; v: string }>): NativeNode {
 		return node(
-			"card",
-			{
-				role: "omp.btn",
-				head: this.peerHead(peer),
-				title: `${id}\n点击查看详情`,
-				actions: { click: `onlyne.member:${id}` },
-				selected: this.memberKey === id,
-			},
-			[
-				textNode([span(peer.record.base_url, "dim"), span(` · 最后可见 ${ageText(peer.record.last_seen) || "未知"}`, "dim"), ...(stale ? [span(" · 记录已过期", "warning")] : []), ...(peer.record.error === undefined ? [] : [span(` · ${peer.record.error}`, "error")]),], { wrap: "word" }),
-				...(acts.length === 0 ? [] : [node("row", { gap: "sm", align: "center" }, acts, "acts")]),
-			],
-			`peer-${id}`,
+			"col",
+			{ role: "onlyne.facts", gap: "xs", align: "stretch" },
+			items.map((item, index) =>
+				node(
+					"row",
+					{ gap: "none", align: "baseline" },
+					[
+						textNode([span(item.k, "dim")], { truncate: "end", min: { w: FACT_LABEL }, max: { w: FACT_LABEL } }),
+						textNode([span(item.v)], { wrap: "word", grow: 1, shrink: 1 }),
+					],
+					`fact-${index}`,
+				),
+			),
+			"facts",
 		);
 	}
 
 	// ── columns ─────────────────────────────────────────────────────────────
 
-	/** The status strip: region, topology, live alerts and unread. Modules spread, never left-packed. */
-	private statusRow(): NativeNode {
-		const status = this.status;
-		const alerts = status?.alerts ?? this.invites().length;
-		const modules: Array<[string, string, string]> = [
-			["域", regionLabel(status?.region), "strong"],
-			["节点", status === undefined ? "…" : String(status.nodes), "strong"],
-			["邻居", status === undefined ? "…" : String(status.neighbors), "strong"],
-			["告警", String(alerts), alerts > 0 ? "strong warning" : "muted"],
-			["未读", String(status?.unread ?? 0), (status?.unread ?? 0) > 0 ? "strong info" : "muted"],
-		];
-		return node(
-			"row",
-			{ role: "onlyne.status", gap: "md", justify: "between", align: "center" },
-			modules.map(([label, value, tone], index) =>
-				node(
-					"col",
-					{ gap: "none", min: { w: "8ch" } },
-					[textNode([span(label, "dim")]), node("text", { spans: [span(value, tone)] })],
-					`status-${index}`,
-				),
-			),
-			"status",
-		);
-	}
-
+	/** The domain rail: one letter per declared domain, with the count waiting on this user. */
 	private railNode(): NativeNode {
 		const groups = this.domainGroups();
 		const current = this.currentDomain();
-		const waiting = this.invites().length;
-		const buttons: NativeChild[] = groups.map(group =>
-			node(
-				"row",
+		const rows: NativeChild[] = groups.map(group => {
+			const waiting = group.peers.filter(peer => peer.trust?.phase === "invited").length;
+			const open = current?.id === group.id;
+			return node(
+				"item",
 				{
-					role: "omp.btn",
-					align: "center",
-					gap: "xs",
-					actions: { click: `onlyne.domain:${group.id ?? ""}` },
+					// The rail names the domain: one letter cannot be told apart from another, and
+					// the column width already truncates a long name.
+					label: [span(group.label, open ? "strong" : "muted")],
+					...(waiting === 0 ? {} : { value: [span(String(waiting), "error")] }),
+					...(open ? { tone: "accent" } : {}),
 					title: `${group.label} · ${group.peers.length} 节点`,
 				},
-				[
-					// The accent tone paints a button; the current domain earns only a dot and weight.
-					textNode([span("●", current?.id === group.id ? "accent" : "dim")]),
-					textNode([span(group.label, current?.id === group.id ? "strong" : "muted")], { truncate: "end" }),
-				],
-				`domain-${group.id ?? "none"}`,
-			),
-		);
-		if (waiting > 0) {
-			buttons.push(
-				node(
-					"row",
-					{ role: "omp.btn", align: "center", actions: { click: "onlyne.page.contacts" }, title: `${waiting} 个密钥申请等你确认` },
-					[node("badge", { text: String(waiting) }, undefined, "badge"), textNode([span("确认", "strong")])],
-					"waiting",
-				),
+				undefined,
+				`domain:${group.id ?? ""}`,
 			);
-		}
+		});
 		return node(
 			"col",
-			{ role: "onlyne.rail", gap: "xs", align: "stretch", min: { w: "10ch" } },
-			buttons.length === 0 ? [textNode([span("无域", "muted")])] : buttons,
+			// Wide enough for a one-word domain name (`daily-workbench` is 15 cells) so the rail
+			// names a domain instead of truncating it to a prefix two domains can share.
+			{ role: "onlyne.rail", gap: "none", min: { w: "16ch" }, max: { w: "22ch" } },
+			[
+				node(
+					"list",
+					{
+						role: "onlyne.rail.list",
+						grow: 1,
+						basis: 0,
+						selected: current === undefined ? null : `domain:${current.id ?? ""}`,
+						empty: [span("无域", "muted")],
+					},
+					rows,
+					"domains",
+				),
+			],
 			"rail",
 		);
 	}
 
-	/** The page strip: one click per page, spread across the width. */
-	private tabsNode(): NativeNode {
-		return node(
-			"tabs",
-			{ items: PAGES.map(page => ({ id: page.id, label: page.label })), active: this.page },
-			undefined,
-			"tabs",
-		);
-	}
-
-	/** The thread column: this node's header, the domain's peers, its threads, the inbox entry. */
-	private threadColumn(): NativeNode {
-		const domain = this.currentDomain();
-		const peers = this.peers();
+	/**
+	 * The thread sidebar: this node's identity, then every row that opens
+	 * something, in one list that scrolls inside its own cap.
+	 */
+	private sidebar(): NativeNode {
+		const invites = this.invites();
 		const threads = this.threads();
-		const geo = this.geometry();
-		const unread = threads.reduce((total, thread) => total + Math.max(0, thread.unread), 0);
+		const domain = this.currentDomain();
 		const fingerprint = this.snapshot?.identity?.fingerprint;
-		const memberList = this.shown(peers, Math.min(3, geo.members));
-		const threadList = this.shown(threads, geo.threads);
+		const queue = this.snapshot?.queue.length ?? 0;
+		const selected = this.selectedThread();
+		const rows: NativeChild[] = [];
+
+		rows.push(this.heading("待你确认", invites.length));
+		for (const invite of invites) {
+			rows.push(
+				node(
+					"item",
+					{
+						label: [span("▢ ", "warning"), span(shortNodeId(invite.node_id), "strong")],
+						value: [span(invite.fingerprint.slice(0, 8), "dim")],
+						tone: "warning",
+						title: `${invite.node_id}\n点击核对指纹`,
+					},
+					undefined,
+					`invite:${invite.node_id}`,
+				),
+			);
+		}
+
+		rows.push(this.heading("线程", threads.length));
+		for (const thread of threads) {
+			const open = selected?.alias === thread.alias && this.view?.kind !== "inbox";
+			rows.push(
+				node(
+					"item",
+					{
+						label: [span(`# ${thread.title}`, open ? "strong" : undefined), ...(thread.state === "closed" ? [span(" 已关闭", "dim")] : [])],
+						// One number per row, always the same number: the unread count. A row that
+						// showed the message total once everything was read made two rows of equal
+						// width mean different things.
+						value: thread.unread > 0 ? [span(String(thread.unread), "info")] : [],
+						title: `${thread.title} · ${thread.messages.length} 条消息 · ${shortAlias(thread.alias)}`,
+					},
+					undefined,
+					`thread:${thread.alias}`,
+				),
+			);
+		}
+		if (threads.length === 0) {
+			rows.push(node("item", { label: [span("还没有线程", "muted")], disabled: true }, undefined, "head:empty-threads"));
+		}
+
+		// The queue is its own section, so it needs no heading: the row names it and counts
+		// what opening it shows.
+		rows.push(
+			node(
+				"item",
+				{
+					label: [span("✉ 收件箱", "muted")],
+					value: [span(String(queue), queue === 0 ? "dim" : "info")],
+				},
+				undefined,
+				"inbox",
+			),
+		);
+
 		return node(
 			"col",
-			{
-				role: "onlyne.threads",
-				gap: "sm",
-				grow: 1,
-				align: "stretch",
-				min: { w: "24ch", h: linesOf(geo.body) },
-				max: { w: "38ch", h: linesOf(geo.body) },
-			},
+			{ role: "onlyne.threads", gap: "sm", align: "stretch", min: { w: "24ch" }, max: { w: "36ch" } },
 			[
 				node(
-					"section",
-					{ head: [span(domain?.label ?? regionLabel(this.snapshot?.region), "strong")] },
+					"col",
+					{ gap: "none" },
 					[
-						textNode([span(shortNodeId(this.status?.node_id ?? ""), "strong")], { wrap: "word" }),
-						textNode([span(fingerprint ?? "无节点密钥", "dim")], { wrap: "word" }),
+						textNode([span(regionLabel(domain?.id ?? this.snapshot?.region), "dim")], { truncate: "end" }),
+						textNode([span(shortNodeId(this.status?.node_id ?? ""), "strong")], { truncate: "end" }),
+						textNode([span(fingerprint ?? "无节点密钥", "dim")], { truncate: "end" }),
 					],
-					"identity",
+					"head",
 				),
 				node(
-					"section",
-					{ head: [span(`成员 · ${peers.length}`, "dim")] },
-					peers.length === 0
-						? [textNode([span("这个域还没有可达节点。到「发现」页看看候选。", "muted")], { wrap: "word" })]
-						: [
-								...memberList.rows.map(peer => this.memberCard(peer, false)),
-								...(memberList.more === 0 ? [] : [this.moreText(memberList.more)]),
-							],
-					"members",
-				),
-				node(
-					"section",
-					{ head: [span(`线程 · ${threads.length}`, "dim")] },
-					threads.length === 0
-						? [textNode([span("还没有线程。", "muted")], { wrap: "word" })]
-						: [
-								...threadList.rows.map(thread =>
-									node(
-										"card",
-										{
-											role: "omp.btn",
-											head: [
-												span(`# ${thread.title}`, "strong"),
-												...(thread.unread > 0 ? [span(` · ${thread.unread} 未读`, "info")] : []),
-												...(thread.state === "closed" ? [span(" · 已关闭", "dim")] : []),
-											],
-											title: `${thread.title} · ${shortAlias(thread.alias)}`,
-											actions: { click: `onlyne.thread:${thread.alias}` },
-											selected: this.selectedThread()?.alias === thread.alias,
-										},
-										[textNode([span(`${thread.messages.length} 条消息`, "dim")], { truncate: "end" })],
-										`thread-${thread.alias}`,
-									),
-								),
-								...(threadList.more === 0 ? [] : [this.moreText(threadList.more)]),
-							],
 					"list",
-				),
-				node(
-					"row",
-					{ role: "omp.btn", align: "center", gap: "sm", actions: { click: "onlyne.page.queue" }, title: "打开待处理队列" },
-					[textNode([span("✉ 收件箱", "muted")]), textNode([span(`${unread} 未读`, unread > 0 ? "info" : "dim")])],
-					"inbox",
+					{
+						role: "onlyne.threads.list",
+						grow: 1,
+						basis: 0,
+						selected: this.view?.kind === "inbox" ? "inbox" : selected === undefined ? null : `thread:${selected.alias}`,
+						empty: [span("还没有线程", "muted")],
+					},
+					rows,
+					"rows",
 				),
 			],
 			"threads",
 		);
 	}
 
-	/**
-	 * The flow shows one line pointing at the approval page. Approving is a
-	 * fingerprint comparison, and it has exactly one surface: the contacts page.
-	 */
+	/** The approval bar: one row per pending request, with both answers on it. */
 	private approvalsCard(): NativeChild[] {
 		const invites = this.invites();
 		if (invites.length === 0) return [];
-		return [
+		const mine = this.snapshot?.identity?.fingerprint ?? "本节点没有密钥";
+		return invites.map(invite =>
 			node(
 				"card",
 				{
-					role: "omp.btn",
+					role: "onlyne.approval",
 					tone: "warning",
-					head: [span(`${invites.length} 个密钥申请等你确认`, "strong")],
-					title: "到联系人页核对指纹并批准",
-					actions: { click: "onlyne.page.contacts" },
+					head: [span(`${shortNodeId(invite.node_id)} 请求与你交换密钥`, "strong")],
 				},
-				[textNode([span(invites.map(invite => shortNodeId(invite.node_id)).join("、"), "dim")], { truncate: "end" })],
-				"approvals",
-			),
-		];
-	}
-
-	private messageCard(message: ViewerMessage, waiting: boolean): NativeNode {
-		const out = message.direction === "out";
-		return node(
-			"card",
-			{
-				role: "omp.btn",
-				head: [
-					span(out ? "→ " : "← ", out ? "accent" : "dim"),
-					span(plainAuthor(message.author), "strong"),
-					span(` ${clockText(message.at) || "—"} `, "dim"),
-					span(out ? "已送达" : waiting ? "等你回复" : "已读", out ? "success" : waiting ? "info" : "success"),
-					...(message.relation === undefined ? [] : [span(` · ${message.relation}`, "dim")]),
+				[
+					this.facts([
+						{ k: "对方指纹", v: invite.fingerprint },
+						{ k: "本机指纹", v: mine },
+						{ k: "端点", v: invite.base_url },
+					]),
+					node(
+						"row",
+						{ gap: "sm", align: "center" },
+						[
+							this.button("同意", `onlyne.accept:${invite.node_id}`, { tone: "accent", title: "双方指纹一致，批准这次交换" }),
+							this.button("拒绝", `onlyne.reject:${invite.node_id}`, { title: "不批准这次申请" }),
+							this.button("查看详情", `onlyne.member:${invite.node_id}`, { title: "在成员栏打开这位节点" }),
+						],
+						"acts",
+					),
 				],
-				title: `#${message.seq} · 点击以此为发送目标`,
-				actions: { click: `onlyne.message:${message.seq}` },
-				selected: this.target !== undefined && this.target === message.author,
-			},
-			[textNode(message.text, { wrap: "word", lines: 3, truncate: "end" })],
-			`message-${message.seq}`,
+				`approval-${invite.node_id}`,
+			),
 		);
 	}
 
-	/** The message flow: the head, the messages, then the composer. */
-	private flowNode(): NativeNode {
-		const thread = this.selectedThread();
-		const invites = this.invites();
-		const geo = this.geometry();
-		if (thread === undefined) {
-			return node(
-				"col",
-				{ role: "onlyne.flow", gap: "sm", grow: 1, shrink: 1, align: "stretch", min: { w: 0, h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } },
-				[
-					...this.approvalsCard(),
-					textNode([span("从左边打开一个线程，或在「发现」页连接一位节点发起对话。", "muted")], { wrap: "word", lines: 3 }),
-					this.composerNode(),
-				],
-				"flow",
-			);
-		}
-		const messages = thread.messages;
-		const peer = this.threadPeer(thread);
-		const last = messages.at(-1);
-		// The newest messages stay in view and each body is clamped: an older history is
-		// named rather than drawn, so no amount of content can push the composer off.
-		const visible = messages.slice(-geo.messages);
+	private messageCard(message: ViewerMessage): NativeNode {
+		const out = message.direction === "out";
+		const messageKey = `${encodeURIComponent(message.ref.sender)}/${encodeURIComponent(message.ref.id)}`;
+		const answered = this.replyTo?.sender === message.ref.sender && this.replyTo.id === message.ref.id;
+		// A message is a flat entry, not a box: `section` gives the head and body placement of a
+		// card without its ring. A `list` row is one fixed line, so a multi-line message must not
+		// be the row itself.
 		return node(
-			"col",
-			{ role: "onlyne.flow", gap: "sm", grow: 1, shrink: 1, align: "stretch", min: { w: 0, h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } },
-			[
-				node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
-					node("col", { gap: "none", grow: 1 }, [
-						textNode([span(`# ${thread.title}`, "strong"), ...(thread.state === "closed" ? [span(" · 已关闭", "dim")] : [])], { truncate: "end" }),
-						textNode([span(`${messages.length} 条消息 · ${this.peers().length} 位成员${last === undefined ? "" : ` · 最近 ${ageText(last.at) || "未知"}前`}`, "dim")], { truncate: "end" }),
-					]),
-					...(peer === undefined ? [] : [this.button("详情", `onlyne.member:${peer}`, { title: "这位对端的详情" })]),
-				], "thread-head"),
-				...this.approvalsCard(),
-				node(
-					"col",
-					{ gap: "sm", grow: 1, shrink: 1, min: { w: 0 }, max: { h: linesOf(geo.body - 6) } },
-					messages.length === 0
-						? [textNode([span("这个线程还没有消息。", "muted")], { wrap: "word" })]
-						: [
-								...(visible.length === messages.length ? [] : [textNode([span(`更早的 ${messages.length - visible.length} 条不在这一屏`, "muted")], { truncate: "end" })]),
-								...visible.map((message, index) =>
-									this.messageCard(
-										message,
-										index === visible.length - 1 && !invites.some(invite => invite.node_id === message.author),
-									),
-								),
-							],
-					"messages",
-				),
-				this.composerNode(),
-			],
-			"flow",
+			"section",
+			{
+				role: "omp.btn",
+				...(answered ? { tone: "accent" } : {}),
+				head: [
+					span(out ? "→ " : "← ", out ? "accent" : "dim"),
+					span(plainAuthor(message.author), "strong"),
+					span(`  ${clockText(message.at) || "—"}`, "dim"),
+					...(message.relation === undefined ? [] : [span(`  ${message.relation}`, "dim")]),
+				],
+				title: `#${message.seq} · 点击回复这一条`,
+				actions: { click: `onlyne.message:${messageKey}` },
+			},
+			[textNode(message.text, { wrap: "word" })],
+			`message-${messageKey}`,
 		);
 	}
 
 	private composerNode(): NativeNode {
 		const thread = this.selectedThread();
-		const target = this.target ?? this.threadPeer(thread);
 		const blocked = this.sendBlocked();
 		if (this.composer === undefined) {
 			const editor = new Editor(getEditorTheme());
@@ -660,69 +575,223 @@ export class OnlyneViewer implements Component {
 			this.composer = editor;
 		}
 		this.composer.focused = this.focused;
+		const where = this.replyTo !== undefined
+			? `回复 ${shortNodeId(this.replyTo.sender)} · ${this.replyTo.id}`
+			: this.target !== undefined
+				? `新消息发送到 ${shortNodeId(this.target)}`
+				: thread === undefined ? "先打开线程，或选择收件人" : `发言到 # ${thread.title} · ${shortNodeId(thread.ref.owner)} 托管`;
 		return node(
 			"card",
-			{ role: "onlyne.composer", inset: true },
+			// `bare` keeps the head-over-body grouping without a ring: the editor draws its own
+			// field, and a card ring around it reads as a box inside a box.
+			{ role: "onlyne.composer", inset: true, variant: "bare" },
 			[
 				this.composer,
-				node("row", { gap: "md", align: "center", justify: "between" }, [
-					textNode([span( target === undefined ? "先选择收件人：线程栏里的一位成员，或一个线程" : `发送到 ${shortNodeId(target)}${thread === undefined ? "" : ` · 线程 ${thread.title}`}`, blocked === undefined ? "dim" : "warning", ),], { wrap: "word", grow: 1 }),
-					...(this.target === undefined ? [] : [this.button("改回线程对端", "onlyne.target:", { title: "清除手动指定的收件人" })]),
-					node(
-						"row",
-						{
-							role: "omp.btn",
-							align: "center",
-							actions: { click: "onlyne.send" },
-							title: blocked ?? "发送这条消息",
-						},
-						[textNode([span(this.sending ? "发送中…" : "发送", blocked === undefined ? "accent strong" : "muted")])],
-						"send",
-					),
-				], "row"),
+				node(
+					"row",
+					{ gap: "md", align: "center", justify: "between" },
+					[
+						textNode([span(where, blocked === undefined ? "dim" : "warning")], { wrap: "word", grow: 1 }),
+						...(this.replyTo === undefined ? [] : [this.button("取消回复", "onlyne.reply.clear", { title: "不再引用这一条" })]),
+						...(this.target === undefined ? [] : [this.button("改回线程发言", "onlyne.target:", { title: "清除手动指定的收件人" })]),
+						node(
+							"row",
+							{
+								role: "omp.btn",
+								align: "center",
+								actions: { click: "onlyne.send" },
+								title: blocked ?? "发送这条消息",
+							},
+							[textNode([span(this.sending ? "发送中…" : "发送", blocked === undefined ? "accent strong" : "muted")])],
+							"send",
+						),
+					],
+					"row",
+				),
 			],
 			"composer",
 		);
 	}
 
+	/** The queue the inbox row opens: one scrolling list, grouped by what each row is. */
+	private inboxRows(): NativeNode {
+		const queue = this.snapshot?.queue ?? [];
+		const rows: NativeChild[] = [];
+		for (const [head, kind] of [["来信", "inbound"], ["出站", "outbound"], ["本地上下文", "context"], ["判定", "decision"]] as const) {
+			const items = queue.filter(entry => entry.kind === kind);
+			if (items.length === 0) continue;
+			rows.push(this.heading(head, items.length));
+			for (const entry of items) {
+				rows.push(
+					node(
+						"item",
+						{
+							label: [span(entry.label, "strong")],
+							detail: [span(oneLine(entry.detail), "dim")],
+							...(entry.at === undefined ? {} : { value: [span(ageText(entry.at), "dim")] }),
+							title: entry.detail,
+						},
+						undefined,
+						`queue:${entry.id}`,
+					),
+				);
+			}
+		}
+		return node(
+			"list",
+			{
+				role: "onlyne.inbox.list",
+				grow: 1,
+				basis: 0,
+				empty: [span("队列是空的。", "muted")],
+			},
+			rows,
+			"queue",
+		);
+	}
+
+	/** The main column: the open thread with its composer, or the queue. */
+	private flowNode(): NativeNode {
+		const children: NativeChild[] = [];
+		if (this.error !== undefined) {
+			children.push(textNode([span(this.error, "error")], { wrap: "word" }));
+			children.push(this.button("重新读取", "onlyne.reload"));
+		}
+		if (this.notice !== undefined) {
+			children.push(textNode([span(this.notice.text, this.notice.error ? "error" : "info")], { wrap: "word" }));
+		}
+		if (this.exchange !== undefined) {
+			children.push(
+				node(
+					"card",
+					{ role: "onlyne.exchange", tone: "warning", head: [span(`与 ${shortNodeId(this.exchange.node_id)} 交换密钥`, "strong")] },
+					[
+						this.facts([
+							{ k: "对方节点", v: this.exchange.node_id },
+							{ k: "对方指纹", v: this.exchange.fingerprint },
+							{ k: "本机指纹", v: this.snapshot?.identity?.fingerprint ?? "本节点没有密钥" },
+						]),
+						node("row", { gap: "sm", align: "center" }, [
+							this.button("确认并发送申请", "onlyne.exchange.confirm", { tone: "accent" }),
+							this.button("取消", "onlyne.exchange.cancel"),
+						], "acts"),
+					],
+					"exchange",
+				),
+			);
+		}
+
+		if (this.view?.kind === "inbox") {
+			children.push(
+				node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
+					node("col", { gap: "none", grow: 1 }, [
+						textNode([span("✉ 收件箱", "strong")], { truncate: "end" }),
+						textNode([span(`${this.snapshot?.queue.length ?? 0} 条待处理`, "dim")], { truncate: "end" }),
+					]),
+				], "thread-head"),
+				this.inboxRows(),
+			);
+		} else {
+			const thread = this.selectedThread();
+			if (thread === undefined) {
+				children.push(textNode([span("从左边打开一个线程，或在成员栏选一位节点发起对话。", "muted")], { wrap: "word", lines: 3 }));
+			} else {
+				const messages = thread.messages;
+				const last = messages.at(-1);
+				children.push(
+					node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
+						node("col", { gap: "none", grow: 1 }, [
+							textNode([span(`# ${thread.title}`, "strong"), ...(thread.state === "closed" ? [span(" · 已关闭", "dim")] : [])], { truncate: "end" }),
+							textNode([span(`${messages.length} 条消息 · ${new Set(messages.map(message => message.author)).size} 位发言者 · ${shortNodeId(thread.ref.owner)} 托管${last === undefined ? "" : ` · 最近一条 ${sinceText(last.at) || "时间未知"}`}`, "dim")], { truncate: "end" }),
+						]),
+					], "thread-head"),
+					...this.approvalsCard(),
+					scrolling(
+						node(
+							"list",
+							{
+								role: "onlyne.messages",
+								grow: 1,
+								basis: 0,
+								empty: [span("这个线程还没有消息。", "muted")],
+							},
+							messages.map(message => this.messageCard(message)),
+							"messages",
+						),
+						{ by: this.messageScrollBy, n: this.messageScroll },
+					),
+					this.composerNode(),
+				);
+			}
+		}
+		if (this.loading) children.push(node("spinner", { label: [span("读取 Onlyne 状态…", "muted")] }, undefined, "loading"));
+		return node(
+			"col",
+			{ role: "onlyne.flow", gap: "sm", grow: 1, shrink: 1, align: "stretch", min: { w: 0 } },
+			children,
+			"flow",
+		);
+	}
+
+	/** The member column: the current domain's peers, then the selected one's detail. */
 	private memberColumn(): NativeNode {
 		const peers = this.peers();
-		const geo = this.geometry();
-		const roster = this.shown(peers, geo.members);
+		const rows: NativeChild[] = peers.map(peer => {
+			const phase = peer.trust?.phase;
+			return node(
+				"item",
+				{
+					label: [span("● ", phase === undefined ? "muted" : PHASE_TONE[phase]), span(shortNodeId(peer.record.node_id), "strong")],
+					// Every row here belongs to the selected domain, so the region would repeat
+					// the column head and truncate the id it sits next to.
+					value: [span(phase === undefined ? "无认证" : PHASE_SHORT[phase], phase === undefined ? "dim" : PHASE_TONE[phase])],
+					title: `${peer.record.node_id}\n${peer.record.base_url}`,
+				},
+				undefined,
+				`peer:${peer.record.node_id}`,
+			);
+		});
 		const children: NativeChild[] = [
+			node("row", { gap: "sm", align: "center", justify: "between" }, [
+				textNode([span(`域内节点 · ${peers.length}`, "dim")]),
+				this.button("刷新", "onlyne.discovery.refresh", { title: "重新观察一轮发现" }),
+			], "head"),
 			node(
-				"section",
-				{ head: [span(`成员 · ${peers.length}`, "dim")] },
-				peers.length === 0
-					? [textNode([span("这个域还没有可达节点。", "muted")], { wrap: "word" })]
-					: [
-							...roster.rows.map(peer => this.memberCard(peer, false)),
-							...(roster.more === 0 ? [] : [this.moreText(roster.more)]),
-						],
+				"list",
+				{
+					role: "onlyne.members.list",
+					grow: 1,
+					basis: 0,
+					selected: this.memberKey === undefined ? null : `peer:${this.memberKey}`,
+					empty: [span("这个域还没有可达节点。", "muted")],
+				},
+				rows,
 				"roster",
 			),
 		];
 		const peer = peers.find(entry => entry.record.node_id === this.memberKey);
 		if (peer !== undefined) {
 			const phase = peer.trust?.phase;
+			const stale = Date.parse(peer.record.expires_at) <= Date.now();
 			children.push(
 				node(
 					"card",
-					{ role: "onlyne.member-detail", head: [span(shortNodeId(peer.record.node_id), "strong"), ...(phase === undefined ? [] : [span(` · ${PHASE_LABEL[phase]}`, PHASE_TONE[phase])])] },
+					{
+						role: "onlyne.member-detail",
+						head: [span(shortNodeId(peer.record.node_id), "strong"), ...(phase === undefined ? [] : [span(` · ${PHASE_LABEL[phase]}`, PHASE_TONE[phase])])],
+					},
 					[
-						node("kv", {
-							layout: "grid",
-							items: [
-								{ k: "指纹", v: peer.trust?.fingerprint ?? "未交换" },
-								{ k: "域", v: regionLabel(peer.record.region) },
-								{ k: "状态", v: phase === undefined ? "无认证" : PHASE_LABEL[phase] },
-								{ k: "端点", v: peer.record.base_url },
-								{ k: "最后可见", v: ageText(peer.record.last_seen) || "未知" },
-							],
-						}),
+						this.facts([
+							{ k: "指纹", v: peer.trust?.fingerprint ?? "未交换" },
+							{ k: "域", v: regionLabel(peer.record.region) },
+							{ k: "状态", v: phase === undefined ? "无认证" : PHASE_LABEL[phase] },
+							{ k: "端点", v: peer.record.base_url },
+							{ k: "最后可见", v: `${sinceText(peer.record.last_seen) || "时间未知"}${stale ? " · 记录已过期" : ""}` },
+						]),
 						node("row", { gap: "sm", align: "center", wrap: true }, [
 							this.button("用作发送目标", `onlyne.target:${peer.record.node_id}`, { title: "把消息发给这位节点" }),
 							...(phase === "invited" ? [this.button("同意交换", `onlyne.accept:${peer.record.node_id}`, { tone: "accent" })] : []),
+							...(phase === undefined || phase === "revoked" ? [this.button("请求交换密钥", `onlyne.request:${peer.record.node_id}`, { title: "读取对方指纹，核对后发送申请" })] : []),
 							...(phase === "exchanged" || phase === "requested" ? [this.button("撤销信任", `onlyne.revoke:${peer.record.node_id}`, { tone: "error" })] : []),
 						], "acts"),
 					],
@@ -732,221 +801,56 @@ export class OnlyneViewer implements Component {
 		}
 		return node(
 			"col",
-			{
-				role: "onlyne.members",
-				gap: "sm",
-				grow: 1,
-				align: "stretch",
-				min: { w: "22ch", h: linesOf(geo.body) },
-				max: { w: "32ch", h: linesOf(geo.body) },
-			},
+			{ role: "onlyne.members", gap: "sm", align: "stretch", min: { w: "24ch" }, max: { w: "34ch" } },
 			children,
 			"members",
 		);
 	}
 
-	// ── pages ───────────────────────────────────────────────────────────────
-
-	private queuePage(): NativeNode[] {
-		const queue = this.snapshot?.queue ?? [];
-		const geo = this.geometry();
-		const sections: NativeChild[] = [];
-		const sectionsOf = 4;
-		const budget = Math.max(1, Math.floor(geo.pageRows / sectionsOf));
-		for (const [head, kind] of [["来信", "inbound"], ["出站", "outbound"], ["本地上下文", "context"], ["判定", "decision"]] as const) {
-			const rows = queue.filter(item => item.kind === kind);
-			const page = this.shown(rows, budget);
-			sections.push(
-				node(
-					"section",
-					{ head: [span(`${head} · ${rows.length}`, "dim")] },
-					rows.length === 0
-						? [textNode([span("空。", "muted")])]
-						: [
-								...page.rows.map(item =>
-									node(
-										"card",
-										{ role: "onlyne.queue-row", head: [span(item.label, "strong"), ...(item.at === undefined ? [] : [span(` · ${ageText(item.at)}前`, "dim")])] },
-										[textNode(item.detail, { wrap: "word" })],
-										item.id,
-									),
-								),
-								...(page.more === 0 ? [] : [this.moreText(page.more)]),
-							],
-					head,
-				),
-			);
-		}
-		return [node("col", { gap: "sm", grow: 1, align: "stretch", min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } }, sections, "queue")];
-	}
-
-	private discoveryPage(): NativeNode[] {
-		const groups = this.domainGroups();
-		const geo = this.geometry();
-		const children: NativeChild[] = [
-			node("row", { gap: "sm", align: "center", justify: "between" }, [
-				textNode([span("按域分组的可达候选。域只决定归组与发现范围，不授予信任：每个节点对都要在这里显式交换密钥。", "dim")], { wrap: "word", grow: 1 }),
-				this.button("刷新发现", "onlyne.discovery.refresh", { title: "重新观察一轮发现" }),
-			]),
-		];
-		if (this.snapshot?.discovery_error !== undefined) {
-			children.push(node("text", { spans: [span(`发现失败：${this.snapshot.discovery_error}`, "error")], wrap: "word" }, undefined, "discovery-error"));
-		}
-		if (groups.length === 0) {
-			children.push(textNode([span("还没发现任何节点。确认对方已经启动，并和你在同一网络上。", "muted")], { wrap: "word" }));
-		}
-		const budget = Math.max(2, Math.floor(geo.pageRows / Math.max(1, groups.length)));
-		for (const group of groups) {
-			const page = this.shown(group.peers, budget);
-			children.push(
-				node(
-					"section",
-					{ head: [span(group.label, "strong"), span(` · ${group.peers.length} 节点`, "dim")] },
-					[
-						...page.rows.map(peer => this.memberCard(peer, true)),
-						...(page.more === 0 ? [] : [this.moreText(page.more)]),
-					],
-					`domain-${group.id ?? "none"}`,
-				),
-			);
-		}
-		return [node("col", { gap: "sm", grow: 1, align: "stretch", min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } }, children, "discovery")];
-	}
-
-	/**
-	 * Two lists and nothing else: what waits for this node's approval, then the
-	 * peers whose keys were exchanged both ways. Requesting an exchange is a
-	 * discovery-page job; here the only act is approving or revoking.
-	 */
-	private contactsPage(): NativeNode[] {
-		const geo = this.geometry();
-		const invites = this.invites();
-		const mine = this.snapshot?.identity?.fingerprint ?? "本节点没有密钥";
-		const trusted = (this.snapshot?.contacts ?? []).filter(contact => this.trustOf(contact.node_id)?.phase === "exchanged");
-		const approvalList = this.shown(invites, Math.max(1, geo.pageRows >> 2));
-		const contactList = this.shown(trusted, Math.max(1, geo.pageRows >> 1));
-		const children: NativeChild[] = [
-			textNode([span("上面是等你批准的申请：核对双方指纹，一致再同意。下面是双方都已批准、可以直接发消息的节点。", "dim")], { wrap: "word" }),
-			node(
-				"section",
-				{ head: [span(`待确认 · ${invites.length}`, invites.length === 0 ? "dim" : "strong")] },
-				invites.length === 0
-					? [textNode([span("没有等你确认的申请。", "muted")], { wrap: "word" })]
-					: [
-							...approvalList.rows.map(invite =>
-								node(
-									"card",
-									{ role: "onlyne.approval", tone: "warning", head: [span(`${shortNodeId(invite.node_id)} 请求与你交换密钥`, "strong")] },
-									[
-										node("kv", {
-											layout: "grid",
-											items: [
-												{ k: "对方指纹", v: invite.fingerprint },
-												{ k: "本机指纹", v: mine },
-												{ k: "端点", v: invite.base_url },
-											],
-										}),
-										node("row", { gap: "sm", align: "center" }, [
-											this.button("同意", `onlyne.accept:${invite.node_id}`, { tone: "accent", title: "双方指纹一致，批准这次交换" }),
-											this.button("拒绝", `onlyne.reject:${invite.node_id}`, { title: "不批准这次申请" }),
-										], "acts"),
-									],
-									`approval-${invite.node_id}`,
-								),
-							),
-							...(approvalList.more === 0 ? [] : [this.moreText(approvalList.more)]),
-						],
-				"approvals",
-			),
-			node(
-				"section",
-				{ head: [span(`已认证 · ${trusted.length}`, "dim")] },
-				trusted.length === 0
-					? [textNode([span("还没有已认证的联系人。到「发现」页找到对方，请求交换密钥。", "muted")], { wrap: "word" })]
-					: [
-							...contactList.rows.map(contact =>
-								node(
-									"card",
-									{
-										role: "omp.btn",
-										head: [
-											span("● ", "success"),
-											span(shortNodeId(contact.node_id), "strong"),
-											span(` · ${regionLabel(contact.region)}`, "dim"),
-											span(" · 已认证", "success"),
-										],
-										actions: { click: `onlyne.member:${contact.node_id}` },
-										title: contact.node_id,
-									},
-									[
-										textNode([span(`${contact.base_url} · 最后可见 ${ageText(contact.last_seen) || "未知"}`, "dim")], { wrap: "word" }),
-										node("row", { gap: "sm", align: "center" }, [
-											this.button("用作发送目标", `onlyne.target:${contact.node_id}`),
-											this.button("撤销信任", `onlyne.revoke:${contact.node_id}`, { tone: "error" }),
-										], "acts"),
-									],
-									`contact-${contact.node_id}`,
-								),
-							),
-							...(contactList.more === 0 ? [] : [this.moreText(contactList.more)]),
-						],
-				"trusted",
-			),
-		];
-		return [node("col", { gap: "sm", grow: 1, align: "stretch", min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } }, children, "contacts")];
-	}
-
 	describe(cx: DescribeContext): NativeNode {
-		const geo = this.geometry();
-		const key = `${this.version}:${cx.cols}:${this.rows()}:${this.page}`;
+		const key = `${this.version}:${cx.cols}:${this.rows()}`;
 		if (this.described !== undefined && this.describedKey === key) return this.described;
-		// Column widths are constraints, never arithmetic on the terminal: the flow takes what the rest leaves.
-		const row = { gap: "md", align: "stretch", grow: 1, shrink: 1, min: { h: linesOf(geo.body) }, max: { h: linesOf(geo.body) } } as const;
-		const body: NativeChild[] =
-			this.page === "chat"
-				? [node("row", row, [this.threadColumn(), this.flowNode(), this.memberColumn()], "columns")]
-				: [
-						node(
-							"row",
-							row,
-							[
-								this.railNode(),
-								node("col", { gap: "sm", grow: 1, align: "stretch", min: { w: 0 } }, [
-									...(this.page === "queue" ? this.queuePage() : this.page === "discovery" ? this.discoveryPage() : this.contactsPage()),
-								], "page"),
-							],
-							"columns",
-						),
-					];
-		const children: NativeChild[] = [this.statusRow(), this.tabsNode()];
-		if (this.exchange !== undefined) {
-			children.push(node("card", { role: "onlyne.exchange", head: [span(`与 ${shortNodeId(this.exchange.node_id)} 交换密钥`, "strong")] }, [
-				node("kv", { layout: "grid", items: [
-					{ k: "对方节点", v: this.exchange.node_id },
-					{ k: "对方指纹", v: this.exchange.fingerprint },
-					{ k: "本机指纹", v: this.snapshot?.identity?.fingerprint ?? "本节点没有密钥" },
-				] }),
-				node("row", { gap: "sm" }, [
-					this.button("确认并发送申请", "onlyne.exchange.confirm", { tone: "accent" }),
-					this.button("取消", "onlyne.exchange.cancel"),
-				]),
-			], "exchange"));
-		}
-		if (this.notice !== undefined) {
-			children.push(node("text", { spans: [span(this.notice.text, this.notice.error ? "error" : "info")], wrap: "word" }, undefined, "notice"));
-		}
-		if (this.error !== undefined) {
-			children.push(node("text", { spans: [span(this.error, "error")], wrap: "word" }, undefined, "error"));
-			children.push(this.button("重新读取", "onlyne.reload"));
-		}
-		if (this.loading) children.push(node("spinner", { label: [span("读取 Onlyne 状态…", "muted")] }, undefined, "loading"));
-		children.push(...body);
-		this.described = node("card", { role: "onlyne.viewer", grow: 1 }, children, "root");
+		// The full sheet draws a title row and one inset row around the body: bound the columns
+		// to the rest of the pane, or the composer lands past the bottom edge.
+		const body = linesOf(Math.max(8, this.rows() - 2));
+		const columns = node(
+			"row",
+			{ gap: "md", align: "stretch", grow: 1, shrink: 1, min: { h: body }, max: { h: body } },
+			[this.railNode(), this.sidebar(), this.flowNode(), this.memberColumn()],
+			"columns",
+		);
+		this.described = node("card", { role: "onlyne.viewer", grow: 1 }, [columns], "root");
 		this.describedKey = key;
 		return this.described;
 	}
 
 	// ── events ──────────────────────────────────────────────────────────────
+
+	/** A row of the sidebar or the member list: its id names what the click opens. */
+	private selectRow(id: string): void {
+		if (id.startsWith("thread:")) {
+			const alias = id.slice("thread:".length);
+			if (!this.threads().some(thread => thread.alias === alias)) return;
+			this.view = { kind: "thread", alias };
+			this.target = undefined;
+			this.replyTo = undefined;
+			this.messageScrollBy = "end";
+			this.messageScroll++;
+		} else if (id.startsWith("invite:")) {
+			this.memberKey = id.slice("invite:".length);
+		} else if (id.startsWith("domain:")) {
+			this.domainKey = id.slice("domain:".length) || undefined;
+			this.memberKey = undefined;
+		} else if (id.startsWith("peer:")) {
+			const peer = id.slice("peer:".length);
+			this.memberKey = this.memberKey === peer ? undefined : peer;
+		} else if (id === "inbox") {
+			this.view = { kind: "inbox" };
+		} else {
+			return;
+		}
+		this.changed();
+	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.disposed || this.signal.aborted) return;
@@ -957,13 +861,10 @@ export class OnlyneViewer implements Component {
 			this.requestRender();
 			return;
 		}
-		// The keypath carries the component's ancestry (`root/tabs`), so match its leaf.
-		if ((event.type === "select" || event.type === "activate") && event.key.split("/").pop() === "tabs") {
-			const page = PAGES.find(entry => entry.id === event.item);
-			if (page !== undefined && page.id !== this.page) {
-				this.page = page.id;
-				this.changed();
-			}
+		// The keypath carries the component's ancestry (`root/columns/sidebar/rows`), so match its leaf.
+		if (event.type === "select" || event.type === "activate") {
+			const leaf = event.key.slice(event.key.lastIndexOf("/") + 1);
+			if (leaf === "rows" || leaf === "roster" || leaf === "domains") this.selectRow(event.item);
 			return;
 		}
 		if (event.type !== "action") return;
@@ -980,6 +881,11 @@ export class OnlyneViewer implements Component {
 			void this.send();
 			return;
 		}
+		if (act === "onlyne.reply.clear") {
+			this.replyTo = undefined;
+			this.changed();
+			return;
+		}
 		if (act === "onlyne.discovery.refresh") {
 			void this.refreshDiscovery();
 			return;
@@ -994,28 +900,10 @@ export class OnlyneViewer implements Component {
 			this.changed();
 			return;
 		}
-		if (act.startsWith("onlyne.page.")) {
-			const id = act.slice("onlyne.page.".length) as Page;
-			if (PAGES.some(page => page.id === id)) {
-				this.page = id;
-				this.changed();
-			}
-			return;
-		}
 		if (act.startsWith("onlyne.domain:")) {
 			this.domainKey = act.slice("onlyne.domain:".length) || undefined;
 			this.memberKey = undefined;
 			this.changed();
-			return;
-		}
-		if (act.startsWith("onlyne.thread:")) {
-			const alias = act.slice("onlyne.thread:".length);
-			if (this.threads().some(thread => thread.alias === alias)) {
-				this.threadAlias = alias;
-				this.target = undefined;
-				this.page = "chat";
-				this.changed();
-			}
 			return;
 		}
 		if (act.startsWith("onlyne.member:")) {
@@ -1027,14 +915,18 @@ export class OnlyneViewer implements Component {
 		if (act.startsWith("onlyne.target:")) {
 			const id = act.slice("onlyne.target:".length);
 			this.target = id === "" || this.target === id ? undefined : id;
+			this.replyTo = undefined;
 			this.changed();
 			return;
 		}
 		if (act.startsWith("onlyne.message:")) {
-			const seq = act.slice("onlyne.message:".length);
-			const message = this.selectedThread()?.messages.find(entry => entry.seq === seq);
-			if (message !== undefined) {
-				this.target = message.author;
+			const identity = act.slice("onlyne.message:".length);
+			const thread = this.selectedThread();
+			const message = thread?.messages.find(entry => `${encodeURIComponent(entry.ref.sender)}/${encodeURIComponent(entry.ref.id)}` === identity);
+			if (message !== undefined && thread !== undefined) {
+				if (message.ref.sender === this.status?.node_id) return;
+				this.replyTo = message.ref;
+				this.target = undefined;
 				this.changed();
 			}
 			return;
@@ -1046,6 +938,7 @@ export class OnlyneViewer implements Component {
 		if (act.startsWith("onlyne.reject:")) {
 			// The runtime's only refusal is a revocation, which leaves the peer able to ask again.
 			void this.revoke(act.slice("onlyne.reject:".length), "拒绝");
+			return;
 		}
 		if (act.startsWith("onlyne.revoke:")) {
 			void this.revoke(act.slice("onlyne.revoke:".length));
@@ -1056,7 +949,7 @@ export class OnlyneViewer implements Component {
 		}
 	}
 
-	/** Escape closes the overlay; every other key belongs to the composer, which the terminal drives by pointer. */
+	/** Escape closes the overlay; the page keys scroll the open list; everything else is the composer's. */
 	handleInput(data: string): void {
 		if (this.disposed || this.signal.aborted) return;
 		if (matchesKey(data, "escape")) {
@@ -1065,6 +958,12 @@ export class OnlyneViewer implements Component {
 		}
 		if (matchesKey(data, "ctrl+enter")) {
 			void this.send();
+			return;
+		}
+		if (matchesKey(data, "pageUp") || matchesKey(data, "pageDown") || matchesKey(data, "end")) {
+			this.messageScrollBy = matchesKey(data, "pageUp") ? "page-up" : matchesKey(data, "pageDown") ? "page-down" : "end";
+			this.messageScroll++;
+			this.changed();
 			return;
 		}
 		if (this.composer === undefined) return;
@@ -1139,7 +1038,7 @@ export class OnlyneViewer implements Component {
 		this.changed();
 		try {
 			await session.confirm(session.fingerprint);
-			this.setNotice(`已提交与 ${shortNodeId(session.node_id)} 的密钥交换，双方批准状态见联系人页。`);
+			this.setNotice(`已提交与 ${shortNodeId(session.node_id)} 的密钥交换，双方批准状态见成员栏。`);
 		} catch (error) {
 			this.setNotice(`请求失败：${errorText(error)}`, true);
 		}
@@ -1149,7 +1048,8 @@ export class OnlyneViewer implements Component {
 	/**
 	 * The composer sends down the one message path the tool uses: the node's own
 	 * client with this session as the consumption context, so a click and a `msg`
-	 * call leave the same records.
+	 * call leave the same records. A reply names the message it answers, which is
+	 * what lands it in the thread holding that message.
 	 */
 	private async send(): Promise<void> {
 		if (this.sending) return;
@@ -1161,13 +1061,22 @@ export class OnlyneViewer implements Component {
 		}
 		if (runtime === undefined) return;
 		const thread = this.selectedThread();
-		const target = this.target ?? this.threadPeer(thread);
-		const meta: Record<string, string> = {};
-		if (target !== undefined) meta.to = target;
+		const meta: NonNullable<MsgInput["meta"]> = {};
+		if (this.replyTo !== undefined) {
+			meta.in_reply_to = { sender: this.replyTo.sender, id: this.replyTo.id };
+			meta.relation = "reply";
+		} else if (this.target !== undefined) {
+			meta.to = this.target;
+		} else if (thread !== undefined) {
+			meta.to = thread.ref.owner;
+			meta.thread = { owner: thread.ref.owner, id: thread.ref.id };
+		}
 		const input: MsgInput = {
-			delivery_kind: thread === undefined
-				? `给 ${shortNodeId(target ?? "")} 发一条消息`
-				: `在 ${thread.title} 里回一条消息`,
+			delivery_kind: this.replyTo !== undefined
+				? `回复 ${shortNodeId(this.replyTo.sender)}`
+				: thread === undefined
+					? `给 ${shortNodeId(this.target ?? "")} 发一条消息`
+					: `在 ${thread.title} 里发一条消息`,
 			msg: this.draft.trim(),
 			...(Object.keys(meta).length === 0 ? {} : { meta }),
 		};
@@ -1179,6 +1088,9 @@ export class OnlyneViewer implements Component {
 			if (outcome.admission === "accepted" || outcome.admission === "unknown") {
 				this.draft = "";
 				this.composer?.setText("");
+				this.replyTo = undefined;
+				this.messageScrollBy = "end";
+				this.messageScroll++;
 			}
 		} catch (error) {
 			this.setNotice(`发送失败：${errorText(error)}`, true);
@@ -1206,7 +1118,6 @@ export class OnlyneViewer implements Component {
 				`Onlyne · ${regionLabel(status?.region)} · 节点 ${status?.nodes ?? "…"} · 邻居 ${status?.neighbors ?? "…"} · 告警 ${status?.alerts ?? 0} · 未读 ${status?.unread ?? 0}`,
 				width,
 			),
-			fit(PAGES.map(page => (page.id === this.page ? `[${page.label}]` : ` ${page.label} `)).join(" "), width),
 		];
 		if (this.error !== undefined) lines.push(this.theme.fg("error", fit(this.error, width)));
 		for (const line of this.ansiRows(width)) lines.push(line);
@@ -1215,50 +1126,25 @@ export class OnlyneViewer implements Component {
 	}
 
 	private ansiRows(width: number): string[] {
-		const geo = this.geometry();
 		const lines: string[] = [];
 		const short = (text: string): string => fit(text, width);
-		if (this.page === "chat") {
-			const thread = this.selectedThread();
-			lines.push(short(`线程 ${this.threads().length} · ${thread === undefined ? "未选择" : thread.title}`));
-			const messages = thread?.messages ?? [];
-			const visible = messages.slice(-geo.messages);
-			if (visible.length < messages.length) lines.push(short(`更早的 ${messages.length - visible.length} 条不在这一屏`));
-			for (const message of visible) {
-				lines.push(short(`${message.direction === "out" ? "→" : "←"} [${message.seq}] ${plainAuthor(message.author)} ${clockText(message.at)}`));
-				for (const line of message.text.split("\n").slice(0, 6)) lines.push(short(`  ${line}`));
+		if (this.view?.kind === "inbox") {
+			lines.push(short(`收件箱 · ${this.snapshot?.queue.length ?? 0} 条待处理`));
+			for (const entry of this.snapshot?.queue ?? []) {
+				lines.push(short(`  ${entry.kind} ${entry.label} · ${oneLine(entry.detail)}`));
 			}
-			const blocked = this.sendBlocked();
-			lines.push(short(`传入：${oneLine(this.draft) || "（空）"}${blocked === undefined ? "" : ` · ${blocked}`}`));
-			return this.fitRows(lines, geo.body);
+			return lines;
 		}
-		if (this.page === "queue") {
-			for (const item of this.snapshot?.queue ?? []) lines.push(short(`${item.kind} ${item.label} · ${oneLine(item.detail)}`));
-			return this.fitRows(lines, geo.body);
+		const thread = this.selectedThread();
+		lines.push(short(`线程 ${this.threads().length} · ${thread === undefined ? "未选择" : thread.title}`));
+		for (const invite of this.invites()) lines.push(short(`待确认 · ${shortNodeId(invite.node_id)} · ${invite.fingerprint}`));
+		for (const message of thread?.messages ?? []) {
+			lines.push(short(`${message.direction === "out" ? "→" : "←"} [${message.seq}] ${plainAuthor(message.author)} ${clockText(message.at)}`));
+			for (const line of message.text.split("\n").slice(0, 6)) lines.push(short(`  ${line}`));
 		}
-		if (this.page === "discovery") {
-			for (const group of this.domainGroups()) {
-				lines.push(short(group.label));
-				for (const peer of group.peers) {
-					lines.push(short(`  ${shortNodeId(peer.record.node_id)} · ${peer.trust === undefined ? "无认证" : PHASE_LABEL[peer.trust.phase]} · ${peer.record.base_url}`));
-				}
-			}
-			return this.fitRows(lines, geo.body);
-		}
-		const invites = this.invites();
-		lines.push(short(`待确认 · ${invites.length}`));
-		for (const invite of invites) lines.push(short(`  ${shortNodeId(invite.node_id)} · 对方 ${invite.fingerprint} · 本机 ${this.snapshot?.identity?.fingerprint ?? "无密钥"}`));
-		const trusted = (this.snapshot?.contacts ?? []).filter(contact => this.trustOf(contact.node_id)?.phase === "exchanged");
-		lines.push(short(`已认证 · ${trusted.length}`));
-		for (const contact of trusted) lines.push(short(`  ${shortNodeId(contact.node_id)} · ${regionLabel(contact.region)} · ${contact.base_url}`));
-		return this.fitRows(lines, geo.body);
-	}
-
-	/** Exactly the body's rows: the fallback pads and trims, so it cannot resize the sheet either. */
-	private fitRows(lines: string[], rows: number): string[] {
-		const out = lines.slice(0, rows);
-		while (out.length < rows) out.push("");
-		return out;
+		const blocked = this.sendBlocked();
+		lines.push(short(`传入：${oneLine(this.draft) || "（空）"}${blocked === undefined ? "" : ` · ${blocked}`}`));
+		return lines;
 	}
 
 	invalidate(): void {

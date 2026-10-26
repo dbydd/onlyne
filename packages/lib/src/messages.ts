@@ -1,19 +1,15 @@
-import type { Attention, Auth, DeliveryPlan, Entry, Event, Failure, Grant, Json, LocalAttention, Member, MessageQuery, MessageRef, Mutation, PageOptions, Receipt, ReplyPermit, SendRequest, Thread, ThreadRef, Transaction } from './types.js';
+import type { Attention, Auth, DeliveryPlan, Entry, Event, Failure, Grant, Json, LocalAttention, Member, MessageQuery, MessageRef, Mutation, Outbound, PageOptions, Receipt, ReplyPermit, SendRequest, Thread, ThreadRef, Transaction } from './types.js';
 import { canonical, decimal, fail, fingerprint, key, OnlyneError, page, requireValue, same, type Context } from './core.js';
 import { canRead, getThread } from './threads.js';
 
 type Remembered = { digest: string; receipt?: Receipt; error?: Failure; retry_until: string };
 type Binding = { digest: string; identity: string };
 type Outcome = { receipt: Receipt } | { error: Failure };
-/** The sender's own record of a message it sent; the chain walk reads the reference it carries. */
-type SentRecord = { request: { message: { meta?: { in_reply_to?: MessageRef } } } };
-/** A reply chain is a conversation, not a log: a few hops reach the incoming message. */
-const MAX_REPLY_CHAIN = 8;
 
 /** Refusals this receiver records durably; retryable, internal and capacity failures roll back instead. */
 const RECORDED_REFUSALS: Record<string, true> = {
   invalid_request: true, forbidden: true, not_a_member: true, not_found: true,
-  id_conflict: true, revision_conflict: true, conflict: true, thread_closed: true,
+  id_conflict: true, revision_conflict: true, conflict: true, thread_closed: true, context_lost: true,
   retry_window_expired: true, payload_too_large: true, unsupported_media_type: true,
   unsupported_delivery: true, ambiguous_target: true, ambiguous_resource: true,
 };
@@ -38,6 +34,11 @@ export class MessageService {
     const identity = key('message', message.sender, message.id);
     const digest = await fingerprint({ message, target_endpoint: request.target_endpoint });
 
+    // Asked before the admission transaction opens: a host that answers from its own store
+    // would otherwise wait on this transaction and deadlock it. The refusal it produces is
+    // still recorded inside the transaction below.
+    const runtime = this.ctx.options.plugins.runtime;
+    const supported = runtime === undefined || await runtime.supports(request.plan, message);
     const outcome = await this.ctx.storage.transaction(async (tx): Promise<Outcome> => {
       const bound = await tx.get<Binding>(operationKey);
       if (bound && (bound.digest !== requestDigest || bound.identity !== identity)) fail('id_conflict', 'The idempotency key is bound to another request.');
@@ -52,8 +53,7 @@ export class MessageService {
         return { receipt: old.receipt };
       }
       try {
-        const runtime = this.ctx.options.plugins.runtime;
-        if (runtime && !await runtime.supports(request.plan)) {
+        if (!supported) {
           return await this.refuse(tx, identity, digest, request, new OnlyneError('unsupported_delivery', 'The runtime cannot fulfill this delivery plan.'));
         }
         this.ctx.deadline(request.retry_until);
@@ -85,12 +85,9 @@ export class MessageService {
     let permit: ReplyPermit | undefined;
     if (original !== undefined) {
       permit = await tx.get<ReplyPermit>(key('permit', original.sender, original.id, message.sender));
-      // RFC 0003 §6: a reply lands in the thread that holds the original message. A closed
-      // thread falls through to the narrow permit, and silence on both sides is the
-      // first-contact path below.
-      if (threadRef === undefined) threadRef = await this.chainLanding(tx, original);
       if (threadRef === undefined && permit && !permit.revoked && permit.remaining > 0 && Date.parse(permit.expires_at) > this.ctx.now()
         && (message.meta?.relation !== 'followup' || permit.followup) && this.ctx.node === permit.landing.owner) threadRef = permit.landing;
+      if (threadRef === undefined) threadRef = await this.chainLanding(tx, original, message.sender);
     }
     let firstContact = false;
     if (threadRef === undefined) {
@@ -113,7 +110,7 @@ export class MessageService {
     }
     this.ctx.owner(threadRef.owner);
     const thread: Thread = firstContact
-      ? { thread_ref: threadRef, title: `first contact from ${message.sender}`, state: 'open', next_seq: '1', event_seq: '0', created_at: new Date(this.ctx.now()).toISOString(), closed_at: null }
+      ? { thread_ref: threadRef, title: message.msg.replace(/\s+/g, ' ').trim().slice(0, 100) || message.delivery_kind, state: 'open', next_seq: '1', event_seq: '0', created_at: new Date(this.ctx.now()).toISOString(), closed_at: null }
       : await getThread(tx, this.ctx, threadRef);
     const member = firstContact ? undefined : await tx.get<Member>(key('member', threadRef.owner, threadRef.id, message.sender));
     const ordinary = firstContact || message.sender === threadRef.owner || (member?.state === 'active' && member.access.includes('post'));
@@ -175,6 +172,7 @@ export class MessageService {
     const receipt: Receipt = {
       message_ref: { sender: message.sender, id: message.id }, receipt_id: this.ctx.id(),
       guarantee: this.ctx.storage.guarantee, thread_ref: threadRef, seq, plan: structuredClone(request.plan),
+      thread_created: firstContact, previous_seq: (decimal(seq) - 1n).toString(),
     };
     await tx.put(key('thread', threadRef.owner, threadRef.id), thread);
     await tx.put(key('entry', threadRef.owner, threadRef.id, seq), entry);
@@ -203,18 +201,29 @@ export class MessageService {
    * the conversation lives in the nearest incoming message the chain reaches, which is what both
    * nodes can read. Every hop is local; the walk stops at the first missing record.
    */
-  private async chainLanding(tx: Transaction, original: MessageRef): Promise<ThreadRef | undefined> {
+  private async chainLanding(tx: Transaction, original: MessageRef, sender: string): Promise<ThreadRef | undefined> {
     let ref: MessageRef | undefined = original;
-    for (let hop = 0; hop < MAX_REPLY_CHAIN && ref !== undefined; hop++) {
+    const visited = new Set<string>();
+    while (ref !== undefined) {
+      const id = key(ref.sender, ref.id);
+      if (visited.has(id)) fail('invalid_request', 'The reply chain contains a cycle.');
+      visited.add(id);
       const entry = await tx.get<Entry>(key('entry-ref', ref.sender, ref.id));
       if (entry !== undefined) {
         const landing = entry.thread_ref;
-        if (landing.owner !== this.ctx.node) return undefined;
+        this.ctx.owner(landing.owner);
         const thread = await tx.get<Thread>(key('thread', landing.owner, landing.id));
-        return thread !== undefined && thread.state !== 'closed' ? landing : undefined;
+        if (thread === undefined) fail('not_found', 'The original reply landing is no longer available.');
+        if (thread.state === 'closed') fail('thread_closed', 'The original reply landing is closed; an explicitly authorized alternative is required.');
+        return landing;
       }
-      const sent: SentRecord | undefined = await tx.get<SentRecord>(key('outbound', ref.sender, ref.id));
-      ref = sent?.request.message.meta?.in_reply_to;
+      const sent: Outbound | undefined = await tx.get<Outbound>(key('outbound', ref.sender, ref.id));
+      if (sent === undefined) fail('not_found', 'The original message history is unavailable; no alternative reply landing was authorized.');
+      if (ref.sender !== this.ctx.node || sent.expected_author !== sender) fail('forbidden', 'This sender is not the expected reply author.');
+      const parent: MessageRef | undefined = sent.request.message.meta?.in_reply_to;
+      // The first reply to an outbound root has no local incoming thread yet.
+      if (parent === undefined) return undefined;
+      ref = parent;
     }
     return undefined;
   }

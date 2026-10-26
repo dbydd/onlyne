@@ -2,8 +2,8 @@ import type { Context } from './core.js';
 import { canonical, decimal, fail, key, requireValue, utc } from './core.js';
 import type {
   Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Json, LocalAttention,
-  InjectOutcome, Message, MessageQuery, MsgInput, Mutation, Outbound, Page, PageOptions, SendRequest, TraceEvent,
-  Thread, ThreadRef, Transaction, Transport, MaintenanceClock,
+  InjectOutcome, Member, Message, MessageQuery, MessageRef, MsgInput, Mutation, Outbound, Page, PageOptions, SendRequest,
+  TraceEvent, Thread, ThreadRef, Transaction, Transport, MaintenanceClock, PreparedSend,
 } from './types.js';
 import type { MessageService } from './messages.js';
 import type { ResourceService } from './resources.js';
@@ -276,15 +276,61 @@ export class OnlyneClient {
     if (plan.response === 'await' && (to === ctx.options.node_id || options.expected_author === ctx.options.node_id)) {
       fail('unsupported_delivery', 'This node cannot await a reply only it could author; no message was sent.');
     }
-    // This node owns its own threads, so appending there is a local admit, not a delivery.
-    if (to === ctx.options.node_id) return this.#admitHere(message, plan);
+    // `to` is the participant this message addresses. The thread decides where the message is
+    // stored: an initiator owns the thread for the whole conversation, so the storing node is
+    // the thread owner and not necessarily the addressee.
+    const thread = message.meta?.thread ?? await this.#threadOf(message.meta?.in_reply_to);
+    // A reply whose original this node cannot see is answered through the reply authority,
+    // which resolves the landing from its own record. A reply never opens a conversation.
+    if (thread === undefined && message.meta?.in_reply_to !== undefined) return this.#sendUntracked(to, message, plan, options);
+    if (thread === undefined && to === ctx.options.node_id) {
+      // A self-addressed message with no conversation yet lands on this node's own default.
+      return this.#admitHere(message, plan);
+    }
+    const ref = thread ?? await this.#startThread(message);
+    const normalized: Message = {
+      ...message,
+      meta: {
+        ...message.meta,
+        thread: ref,
+        // The addressee of a directed send is who must be told; a reply already notifies the
+        // original author through the reply authority, and `@all` covers every member.
+        ...(to === ctx.options.node_id || message.meta?.in_reply_to !== undefined
+          || message.meta?.mentions?.includes(to) === true || message.meta?.mentions?.includes('@all') === true
+          ? {}
+          : { mentions: [...(message.meta?.mentions ?? []), to] }),
+      },
+    };
+    if (ref.owner === ctx.options.node_id && to !== ctx.options.node_id) {
+      await this.#ensureMember(ref, to);
+      // The participant is told about the thread now, not on a later maintenance pass: this
+      // exchange is also where the participant's own policy answers, so a peer that revoked
+      // this node refuses the conversation at the point the sender can still see it.
+      try {
+        await this.#pushGrant(ref, to);
+      } catch (error) {
+        const failure = failureOf(error);
+        return { admission: admissionOf(failure), error: failure };
+      }
+    }
 
+    return this.#deliver(ref.owner, normalized, plan, options);
+  }
+
+  /** The reply-authority route: the receiver owns the landing, so no thread is named here. */
+  async #sendUntracked(to: string, message: Message, plan: DeliveryPlan, options: SendOptions): Promise<SendOutcome> {
+    return this.#deliver(to, message, plan, options);
+  }
+
+  /** Records one outbound request, then transmits it or waits for its answer. */
+  async #deliver(target: string, message: Message, plan: DeliveryPlan, options: SendOptions): Promise<SendOutcome> {
+    const ctx = this.#ctx;
     const slot = outboundKey(message.sender, message.id);
     const request: SendRequest = {
       idempotency_key: options.idempotency_key ?? ctx.id(),
       retry_until: this.#window(options.retry_until),
       message,
-      target_endpoint: to,
+      target_endpoint: target,
       plan,
     };
     const digest = messageDigest(request);
@@ -305,7 +351,8 @@ export class OnlyneClient {
         return updated;
       }
       const fresh: StoredOutbound = {
-        request, expected_author: options.expected_author ?? to, state: 'pending', digest,
+        request, expected_author: options.expected_author ?? target, state: 'pending', digest,
+        created_at: new Date(ctx.now()).toISOString(),
         ...(options.context === undefined ? {} : { local_context: options.context }),
       };
       await tx.put(slot, fresh);
@@ -380,6 +427,66 @@ export class OnlyneClient {
       plan,
     });
     return { admission: 'accepted', receipt };
+  }
+
+  /**
+   * The thread that holds a message this node can see. A reply names its original, and the
+   * original's thread is where the whole conversation lives (RFC 0002 §2): the entry this
+   * node received, or the receipt of the message this node sent.
+   */
+  async #threadOf(original: MessageRef | undefined): Promise<ThreadRef | undefined> {
+    if (original === undefined) return undefined;
+    return this.#ctx.storage.transaction(async tx => {
+      const entry = await tx.get<Entry>(key('entry-ref', original.sender, original.id));
+      if (entry !== undefined) return entry.thread_ref;
+      const sent = await tx.get<StoredOutbound>(outboundKey(original.sender, original.id));
+      if (sent?.receipt !== undefined) return sent.receipt.thread_ref;
+      // A member's copy of an owner-held message lives in its inbox, not in `entry-ref`.
+      const inbox = await tx.scan<LocalAttention>(key('inbox') + '/');
+      const held = inbox.find(row =>
+        row.value.attention.message_ref.sender === original.sender && row.value.attention.message_ref.id === original.id);
+      return held?.value.attention.thread_ref;
+    });
+  }
+
+  /**
+   * The thread a conversation starts in belongs to the node that started it (RFC 0002 §1),
+   * so the initiator records the thread and admits its own message there. The id is the
+   * message id: a retried first send resolves the same thread instead of opening a second.
+   */
+  async #startThread(message: Message): Promise<ThreadRef> {
+    const owner = this.#ctx.options.node_id;
+    const ref: ThreadRef = { owner, id: message.id };
+    const existing = await this.#ctx.storage.transaction(tx => tx.get<Thread>(key('thread', owner, ref.id)));
+    if (existing === undefined) {
+      const title = message.delivery_kind.replace(/\s+/g, ' ').trim().slice(0, 100) || message.msg.slice(0, 100);
+      await this.#threads.create(this.#auth(), {
+        idempotency_key: this.#ctx.id(), retry_until: this.#window(undefined), title, id: ref.id,
+      });
+    }
+    return ref;
+  }
+
+  /**
+   * Grants the addressee `post` and `read` in a thread this node owns, once. The notice the
+   * owner issues here is what teaches the participant the ThreadRef it reconciles against.
+   */
+  async #ensureMember(ref: ThreadRef, peer: string): Promise<void> {
+    const existing = await this.#ctx.storage.transaction(tx => tx.get<Member>(key('member', ref.owner, ref.id, peer)));
+    if (existing !== undefined) return;
+    await this.#threads.member(this.#auth(), ref, peer, {}, {
+      idempotency_key: this.#ctx.id(), retry_until: this.#window(undefined),
+    });
+  }
+
+  /** Delivers one outstanding notice to its recipient; a refusal here is the send's answer. */
+  async #pushGrant(ref: ThreadRef, peer: string): Promise<void> {
+    const notices = await this.#allPages(cursor =>
+      this.#threads.notices(this.#auth(), { page_size: 100, ...(cursor === undefined ? {} : { cursor }) }));
+    const notice = notices.find(grant =>
+      grant.recipient === peer && grant.thread_ref.owner === ref.owner && grant.thread_ref.id === ref.id);
+    if (notice === undefined) return;
+    await this.#remote(peer, 'POST', '/grants', { grant: notice }, undefined, this.#ctx.options.wait_ms ?? 60_000);
   }
 
   // ---- inbound path -----------------------------------------------------------
@@ -501,6 +608,12 @@ export class OnlyneClient {
       if (todos.some(row => !row.value.done)) return true;
       const outbound = await tx.scan<StoredOutbound>(key('outbound') + '/');
       if (outbound.some(row => row.value.digest !== undefined && (row.value.state === 'pending' || row.value.state === 'unknown'))) return true;
+      // A grant notice is how a participant learns the thread it must reconcile, so an
+      // unacked notice is work: skipping it leaves the thread undiscoverable.
+      const notices = await tx.scan<{ acked?: boolean }>(key('notice') + '/');
+      if (notices.some(row => row.value.acked !== true)) return true;
+      const grants = await tx.scan<{ acked?: boolean }>(key('grant') + '/');
+      if (grants.some(row => row.value.acked !== true)) return true;
       // An approval whose statement the peer has not confirmed is owed work too: the loop
       // re-drives it once the retry window opens (RFC 0017 §3.5).
       // A backed-off obligation still counts once its delay has passed; until then the idle
@@ -564,7 +677,17 @@ export class OnlyneClient {
     }
     const action = await this.#decide(input);
     if (action.kind !== 'send') return this.#dispatch(action, options);
+    const prepared = this.#prepare(input, action);
+    return this.send(prepared.to, prepared.message, prepared.plan, options);
+  }
 
+  async prepare(input: MsgInput): Promise<PreparedSend> {
+    const action = await this.#decide(input);
+    if (action.kind !== 'send') fail('invalid_request', 'A draft must describe a message to send.');
+    return this.#prepare(input, action);
+  }
+
+  #prepare(input: MsgInput, action: Extract<Action, { kind: 'send' }>): PreparedSend {
     if (action.response === undefined || action.execution === undefined) {
       fail('decision_unavailable', 'A send needs response and execution; no plan was chosen.');
     }
@@ -591,23 +714,9 @@ export class OnlyneClient {
       response: action.response, execution: action.execution,
       ...(action.context === undefined ? {} : { context: action.context }),
     };
-    // A thread this node hosts is appended locally only when the decision targets this node.
-    // A send for another peer that happens to name a local thread is a contradiction: refusing
-    // it is what keeps a delivery from being reported as accepted while nothing left the node.
-    if (action.thread !== undefined && action.thread.owner === this.#ctx.options.node_id) {
-      if (action.to !== this.#ctx.options.node_id) {
-        fail('invalid_request', `The decision names local thread ${action.thread.id} but targets ${action.to}; a delivery cannot be a local append.`);
-      }
-      return this.#admitHere(message, plan);
-    }
-    const target = await this.#ctx.options.plugins.resolve(action.to);
-    if (target.node_id !== action.to) {
-      fail('unavailable', 'The resolver answered with another identity than the decision named.');
-    }
-    return this.send(target.node_id, message, plan, {
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-      ...(options.context === undefined ? {} : { context: options.context }),
-    });
+    // A thread this node owns stores the entry locally; `action.to` is the participant the
+    // message addresses, and the two differ whenever an initiator writes to a member.
+    return { to: action.to, message, plan };
   }
 
   // ---- internals ---------------------------------------------------------------
@@ -693,11 +802,16 @@ export class OnlyneClient {
     const request = record.request;
     try {
       const thread = request.message.meta?.thread;
-      const path = thread === undefined
-        ? '/messages'
-        : `/threads/${encodeURIComponent(thread.owner)}/${encodeURIComponent(thread.id)}/messages`;
-      const receipt = await this.#remote<NonNullable<Outbound['receipt']>>(
-        request.target_endpoint, 'POST', path, request, signal, this.#attempt(record));
+      // The thread owner stores the entry. When that owner is this node the admission is
+      // local: the same service, the same idempotency and the same receipt, no loopback call.
+      const receipt = request.target_endpoint === this.#ctx.options.node_id
+        ? await this.#messages.admit(this.#auth(), request)
+        : await this.#remote<NonNullable<Outbound['receipt']>>(
+            request.target_endpoint, 'POST',
+            thread === undefined
+              ? '/messages'
+              : `/threads/${encodeURIComponent(thread.owner)}/${encodeURIComponent(thread.id)}/messages`,
+            request, signal, this.#attempt(record));
       await this.#commit(record, { state: 'accepted', receipt });
       const guarantee = (receipt as { guarantee?: unknown }).guarantee;
       this.#trace({
@@ -796,6 +910,7 @@ export class OnlyneClient {
       if (held.size === 0) this.#held.delete(identity);
     }
     this.#trace({ event: 'consumption.confirmed', thread: entry.thread_ref, seq: entry.seq, context: consumedIn, via });
+    this.#ctx.options.plugins.runtime?.notify({ event: 'inbound', thread: entry.thread_ref, seq: entry.seq, sender: entry.message.sender });
     await this.#deliverTodo(entry, consumedIn);
   }
 
@@ -1141,7 +1256,11 @@ export class OnlyneClient {
       if (!this.#attest(attention, ref.owner, local)) return undefined;
       const merged: LocalAttention = {
         attention: { ...attention, obligation_id, entry: attention.entry ?? local },
-        ...(previous?.context === undefined ? {} : { context: previous.context }),
+        // The owner's plan names the context this delivery was addressed to; a row that
+        // arrived through reconciliation must keep it, or the host cannot route it back.
+        ...(previous?.context === undefined
+          ? (attention.plan?.context === undefined ? {} : { context: attention.plan.context })
+          : { context: previous.context }),
         injected: previous?.injected === true,
       };
       if (previous !== undefined && canonical(previous.attention) === canonical(merged.attention)) {
@@ -1203,6 +1322,9 @@ export class OnlyneClient {
         } else {
           await this.#remote(grant.thread_ref.owner, 'POST', `/grants/${encodeURIComponent(grant.id)}/ack`, mutation, signal, budget);
         }
+        // The owner's notice is closed; the local copy records that so this pass stops
+        // re-confirming a grant the owner already acknowledged.
+        await this.#threads.ackGrantLocally(this.#auth(), grant.thread_ref, grant.id);
       } catch {
         // Idempotent; the next pass sends the confirmation again.
       }

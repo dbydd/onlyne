@@ -287,6 +287,30 @@ async function phaseLocal(): Promise<void> {
   });
   check('messages.reply.landing', implicit.thread_ref.id === thread.thread_ref.id && implicit.seq === '3'
     ? '' : `the unnamed reply landed in ${implicit.thread_ref.owner}/${implicit.thread_ref.id} seq ${implicit.seq}`);
+
+  // One exchange reads back as one conversation with both directions (dpdp report 4).
+  const conversation = (await lazuli.node.history.list(lazuliAuth)).items
+    .find(row => row.messages.some(message => message.message_ref.id === 'msg-01'));
+  check('history.conversation', conversation !== undefined
+    && conversation.messages.some(row => row.direction === 'in' && row.message_ref.id === 'msg-01')
+    && conversation.messages.some(row => row.direction === 'out' && row.message_ref.id === 'msg-02')
+    ? '' : `the exchange did not read back as one conversation: ${JSON.stringify(conversation?.messages.map(row => `${row.direction}:${row.message_ref.id}`))}`);
+  const single = await lazuli.node.history.message(lazuliAuth, { sender: dpdpNode, id: 'msg-01' });
+  check('history.message', single.direction === 'in' && single.thread_ref?.id === thread.thread_ref.id && single.consumption !== undefined
+    ? '' : `unexpected single message ${JSON.stringify(single)}`);
+
+  // A reply whose original landing is closed or unknown refuses instead of relocating.
+  await lazuli.node.threads.close(lazuliAuth, thread.thread_ref, mut());
+  check('messages.reply.closed', await refusal('thread_closed', () => lazuli.node.messages.admit(lazuliAuth, {
+    idempotency_key: crypto.randomUUID(), retry_until: future(),
+    message: { id: 'msg-04', sender: lazuliNode, delivery_kind: '迟到回复', msg: '这条不该换线程。', meta: { in_reply_to: { sender: dpdpNode, id: 'msg-01' }, relation: 'reply' } },
+    target_endpoint: lazuliNode, plan,
+  })));
+  check('messages.reply.unknown', await refusal('not_found', () => lazuli.node.messages.admit(lazuliAuth, {
+    idempotency_key: crypto.randomUUID(), retry_until: future(),
+    message: { id: 'msg-05', sender: lazuliNode, delivery_kind: '未知原信', msg: '没有可续写的落点。', meta: { in_reply_to: { sender: dpdpNode, id: 'never-arrived' }, relation: 'reply' } },
+    target_endpoint: lazuliNode, plan,
+  })));
 }
 
 // =============================================================================
@@ -788,8 +812,11 @@ async function phaseAuth(): Promise<void> {
     id: 'auth-01', sender: lazuliNode, delivery_kind: '签名验证', msg: '这条消息经过签名投递。',
   }, plan);
   check('auth.signed_send', signed.admission === 'accepted' ? '' : `a signed send was ${signed.admission}: ${JSON.stringify((signed as { error?: unknown }).error ?? null)}`);
+  // A owns the thread it started, so the entry is stored there; B is a member and pulls the
+  // obligation from the owner's authenticated attention list.
+  await nodeB.client.reconcile();
   check('auth.signed_landed', (await nodeB.messages.inbox(authBOwner)).items.some(row => row.attention.message_ref.id === 'auth-01')
-    ? '' : 'the signed message never landed on B');
+    ? '' : 'the signed message never reached B as a member of A\'s thread');
 
   // Rotation: the new key is proven by the old one, and later sends use it.
   const rotated = await nodeA.trust.rotate(authAOwner);

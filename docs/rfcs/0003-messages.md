@@ -86,7 +86,7 @@
 
 `admission.state` 取 `pending`、`accepted`、`refused` 或 `unknown`。`refused` 保存对端错误码。`unknown` 在期限到达后仍是终态，不改成 `undelivered`。
 
-`local_landing` 记录对方回复落到本节点的哪个 thread。对端回复落在它的 thread 里时，本字段为 null，发送方靠 read 授权查看；对端回复落在本节点时，本字段为该 thread。
+`local_landing` 仅在窄回复许可或跨线程引用例外下使用。常规对话中，完整线程由最初发起者（agent 或 IM gateway）持有，所有往来及群回复统一存入发起者持有的 thread。
 
 ```json
 {
@@ -169,15 +169,13 @@ HTTP 200 或对端返回 Task 不等于 durable 接纳。库必须报告实际�
 
 关系必须指向原消息。等待答复的调用只被 `reply` 解除。`receipt` 和 `followup` 不解除等待。
 
-回复默认走原消息所在 thread 的 `POST /threads/{owner}/{thread_id}/messages`，`in_reply_to` 指向原消息。发送方持有该 thread 的 post 成员资格时走这条路径。
+回复默认走原消息所在 thread 的 `POST /threads/{owner}/{thread_id}/messages`，统一投递到该 thread 的 owner，`in_reply_to` 指向原消息。发送方持有该 thread 的 post 成员资格时走这条路径。双向往来均存盘在发起者的同一 thread 内。
 
-来源没有 post 成员资格时，用 `POST /messages` 到该消息的回复权威节点。窄回复许可允许接收该回复，无需普通 post 成员资格。接收方按保存的本地落点绑定记录这条回复。`meta.relation` 取 `reply` 或 `followup`，带 `in_reply_to` 且省略 relation 时解释为 reply。
+回复的投递目标是该 thread 的 owner 节点，由 owner 统一追加并分配递增 seq。owner 追加 reply 时，在同一事务里为被回复消息的作者（回复权威节点）及 `mentions` 指向的接收方提交关注义务。回复权威节点持有该义务，因此等待方可以从自己的关注清单取回这条答复并解除等待。作者身份由 owner 在接纳时认证并写入清单条目；成员不得从消息正文或 `meta` 的自我声明推断作者。
+
+来源没有 post 成员资格时（如原 thread 已关闭、成员被撤销），使用窄回复许可走 `POST /messages` 到回复权威节点，按保存的本地落点绑定记录这条回复。
 
 合法的 `reply` 证明预期对端收到并答复了原消息。答复先于回执到达时，发送方记录这项证据并解除等待。durable 保证仍需对端的持久接纳回执或协商契约，答复本身不提升保证等级。随后的回执补齐证据，不产生第二次接纳。
-
-回复的投递目标是回复权威节点。落在哪个 thread 由该节点决定：默认是原消息所在的 thread，例外按本地落点绑定。
-
-owner 追加 reply 时，在同一事务里为回复权威节点和 `mentions` 指向的接收方提交关注义务。回复权威节点持有该义务，因此等待方可以从自己的关注清单取回这条答复。作者身份由 owner 在接纳时认证并写入清单条目；成员不得从消息正文或 `meta` 的自我声明推断作者。
 
 ## 7. 回复许可
 

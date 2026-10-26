@@ -23,7 +23,7 @@ export interface ServiceDescription {
 export interface ThreadRef { owner: NodeId; id: string }
 export interface MessageRef { sender: NodeId; id: string }
 export interface ResourceRef { owner: NodeId; id: string }
-export type ErrorCode = 'invalid_request' | 'unauthenticated' | 'forbidden' | 'not_a_member' | 'not_found' | 'id_conflict' | 'revision_conflict' | 'request_in_progress' | 'conflict' | 'thread_closed' | 'retry_window_expired' | 'cursor_expired' | 'payload_too_large' | 'unsupported_media_type' | 'unsupported_delivery' | 'ambiguous_target' | 'ambiguous_resource' | 'capacity_exceeded' | 'internal' | 'unavailable' | 'decision_unavailable';
+export type ErrorCode = 'invalid_request' | 'unauthenticated' | 'forbidden' | 'not_a_member' | 'not_found' | 'id_conflict' | 'revision_conflict' | 'request_in_progress' | 'conflict' | 'thread_closed' | 'context_lost' | 'retry_window_expired' | 'cursor_expired' | 'payload_too_large' | 'unsupported_media_type' | 'unsupported_delivery' | 'ambiguous_target' | 'ambiguous_resource' | 'capacity_exceeded' | 'internal' | 'unavailable' | 'decision_unavailable';
 export interface Failure { code: ErrorCode; message: string; retryable: boolean; details?: Json }
 export interface Auth { actor: NodeId; sender?: NodeId; reply_authority?: NodeId }
 export interface Transaction {
@@ -58,6 +58,7 @@ export interface SendRequest extends Mutation { message: Message; target_endpoin
 export interface Receipt {
   message_ref: MessageRef; receipt_id: string; guarantee: Storage['guarantee'];
   thread_ref: ThreadRef; seq: string; plan: DeliveryPlan;
+  thread_created?: boolean; previous_seq?: string;
 }
 export interface Entry {
   thread_ref: ThreadRef; seq: string; message: Message; authenticated_author: NodeId;
@@ -120,14 +121,26 @@ export interface Handover {
 }
 export interface Outbound {
   request: SendRequest; expected_author: NodeId; state: 'pending' | 'accepted' | 'refused' | 'unknown';
-  receipt?: Receipt; error?: Failure;
+  receipt?: Receipt; error?: Failure; created_at?: string;
 }
+export interface HistoryMessage {
+  message_ref: MessageRef; message: Message; direction: 'in' | 'out';
+  thread_ref?: ThreadRef; seq?: string; at: string | null;
+  delivery: Outbound['state'] | 'received'; consumption?: 'pending' | 'consumed';
+  guarantee?: Storage['guarantee']; error?: Failure;
+}
+export interface Conversation {
+  id: MessageRef; title: string; thread_refs: ThreadRef[]; messages: HistoryMessage[];
+  last_at: string | null;
+}
+export interface HistoryQuery extends PageOptions { thread?: ThreadRef; message?: MessageRef }
 export interface LocalAttention { attention: Attention; context?: string; injected: boolean }
 export interface Target { node_id: NodeId; base_url: string; headers?: Record<string, string> }
 export interface Transport {
   request<T>(target: NodeId, method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T>;
 }
 export interface MsgInput { delivery_kind: string; msg: string; meta?: Record<string, Json> }
+export interface PreparedSend { to: NodeId; message: Message; plan: DeliveryPlan }
 export type Action =
   | { kind: 'domain'; op: 'create' | 'join' | 'leave' | 'list' | 'describe' | 'discover'; domain_id?: DomainId; expected_revision?: string }
   | { kind: 'send'; to: NodeId; thread?: ThreadRef; context?: string; in_reply_to?: MessageRef; relation?: 'reply' | 'followup'; mentions?: NodeId[]; response: DeliveryPlan['response']; execution: DeliveryPlan['execution'] }
@@ -151,7 +164,7 @@ export type TraceEvent =
 /** What the host did with one inbound entry, reported back with the injection result. */
 export type InjectOutcome = 'delivered' | 'queued' | 'waiting' | 'skipped' | 'consumed';
 export interface Runtime {
-  supports(plan: DeliveryPlan): Promise<boolean>;
+  supports(plan: DeliveryPlan, message?: Message): Promise<boolean>;
   /** Submission returns consumed:false; an observed request boundary may confirm it later. */
   inject(entry: Entry, context?: string, plan?: DeliveryPlan): Promise<{ context: string; consumed: boolean; outcome?: InjectOutcome }>;
   todo?(entry: Entry, context: string): Promise<void>;

@@ -10,7 +10,6 @@ Onlyne v3 是面向 agent 消息与资源协作的去中心化 TypeScript 系统
 |---|---|
 | [`packages/lib`](packages/lib/README.zh-CN.md) | `@onlyne/lib`：thread、持久接纳的消息、关注义务、回复关联、无 owner 的域、带显式交接的资源、HTTP 绑定与插件接口 |
 | [`packages/omp-onlyne`](packages/omp-onlyne/README.md) | OMP 接入：单一 `msg` 工具、judge 选择投递、入站注入 |
-| [`packages/qoder-onlyne`](packages/qoder-onlyne/README.md) | Qoder CN 插件：整个安装一个域，工作区是节点，会话是 execution context，线程即频道或私信 |
 
 `packages/` 只放可发布的运行时代码。后续包与 `lib` 并列。
 

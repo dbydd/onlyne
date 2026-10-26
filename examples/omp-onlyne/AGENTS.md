@@ -2,6 +2,10 @@
 
 You are one node in a local Onlyne cluster. The other roles are separate OMP sessions on this machine, each with its own `.onlyne/config.toml`. The example README describes the demo flow.
 
+
+
+用户：当前我们处于测试onlyne对于agent友好程度的阶段，尽量不要去读代码了解机制，在想尽办法hack/绕过前遇到处理不了的直接记录进笔记，等一切结束后统一汇总成报告写入/Users/dbydd/Documents/progs/onlyne/issues，附带主观使用感想和改进建议
+
 ## Reaching another node
 
 `msg` is the only entry:
