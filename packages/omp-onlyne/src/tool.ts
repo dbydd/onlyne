@@ -5,50 +5,23 @@ import { runDecision } from "./decider.ts";
 import { createDraft, sendDraft } from "./drafts.ts";
 import { observeToolResult } from "./messages.ts";
 import { getRuntime } from "./runtime.ts";
+import { toolText } from "./tool-text.ts";
 
 /** Custom entry naming a reply an `await` returned, left pending for the host bridge to confirm. */
 export const AWAIT_RESULT = "onlyne.await-result";
 /** The custom entry type naming an await result the model has actually read. */
 export const AWAIT_CONSUMED = "onlyne.await-consumed";
 
-const parameters = z.object({
-	delivery_kind: z.string().min(1).describe("The delivery intent in natural language"),
-	msg: z.string().describe("The message body or the local query"),
-	meta: z.record(z.string(), z.unknown()).optional().describe("Explicit references and operation fields"),
-});
-
-const DESCRIPTION = `The only surface for Onlyne messages, threads and resources. There is no CLI and nothing else to look up: call this tool with your intent instead of reading docs or source first.
-
-Shape: { delivery_kind, msg, meta }. delivery_kind names the intent in plain language ("reply to dpdp's greeting", "show this thread", "read that message"). meta carries references you already know: to, thread, context, in_reply_to {thread,seq} or {sender,id}, relation (reply|followup), mentions, message {sender,id} or {thread,seq}, resource {owner,id}, operation, op, title, scope, seq, attention, cursor, page_size, data, domain_id.
-
-A send is one call. The result is the delivery fact: admission "accepted" means the receiver recorded the message; wait "timed_out" only means no reply arrived before the wait bound, the message is still delivered; reply_body "withheld" means this context already showed that body. Report the outcome and stop there.
-
-A reply arrives by itself. The plugin injects it as an onlyne.inbound message and starts a turn; you do not need to check. Do not poll after a send: no inbox scans, thread reads, evidence queries, log greps or SQLite lookups. Read state only when the user asks about history, or when a specific fact is missing from the result in hand.
-
-State reads: read the root \`onlyne://\` for the views this node publishes — neighbors, threads, conversations, inbox, contexts, outbound — instead of guessing a route. A conversation is one exchange with both directions: \`onlyne://conversations\` lists them with the latest message and time, \`onlyne://conversations/<sender>/<id>\` shows every message in it, and one message is at \`onlyne://messages/<sender>/<id>\`. Raw thread entries stay at \`onlyne://threads/<thread-id>/messages/<seq>\`.
-
-A delivery is stored in the thread it names, and the thread's owner stores it: the initiator owns the thread for the whole conversation, so a member writes into it and the owner admits. A reply names no thread; it lands in the thread that holds the original message. The receipt reports the landing as thread <id> seq <n> and names the message it answers as in_reply_to.
-
-meta.to takes one node or a list of nodes. A list is delivered one target at a time and returns one result per target, so a failure on one target does not hide the others; report each result separately.
-
-Use cases, each a complete call:
-
-- Reply to a message you received. Do not name a thread; the receiver lands the reply where the original lives:
-  { delivery_kind: "answer dpdp's question", msg: "Yes, the second set is fine.", meta: { in_reply_to: { sender: "urn:onlyne:agent:dpdp", id: "<message id>" }, relation: "reply" } }
-- Send a fresh message to one peer: { delivery_kind: "greet lazuli", msg: "Hello from the workbench.", meta: { to: "lazuli" } }
-- Send the same note to two peers: { delivery_kind: "notify both", msg: "Report is up.", meta: { to: ["caerulea", "lazuli"] } } — you get one result per target, and a failure on one does not hide the other.
-- Read the whole exchange with one peer: read \`onlyne://conversations/<sender>/<id>\` from a list you got at \`onlyne://conversations\`. Read one message with \`onlyne://messages/<sender>/<id>\`.
-- Check what happened to a message you sent: read \`onlyne://outbound/<message-id>\`; it shows the landing the receiver reported, whether it is accepted, and the reply if one arrived.
-- In a subagent, answer without sending: { delivery_kind: "draft the reply", msg: "Here is the answer.", meta: { op: "draft", to: "dpdp", relation: "reply", in_reply_to: { sender: "urn:onlyne:agent:dpdp", id: "<message id>" } } } returns { draft_id }. The main session sends exactly that draft: { delivery_kind: "send the drafted reply", msg: "send draft", meta: { draft_id: "<draft id>" } }.
-- When a send fails with no trusted key, do not retry and do not try to pair: the error names both nodes, the responsible holder and the entry in the host surface. Report it and stop.
-
-The judge role chooses the action and plan from your intent, so never invent message ids, idempotency keys or revisions. A reply or followup states its relation; omitting it is rejected rather than assumed. A reply targets the original reply authority, so a conflicting to is rejected. A subagent session reads its own slice (onlyne://threads, onlyne://inbox, onlyne://contexts) and returns the result to the main session, which does the sending.`;
-
 export function registerMsgTool(pi: ExtensionAPI): void {
+	const parameters = z.object({
+		delivery_kind: z.string().min(1).describe(toolText("param.delivery_kind")),
+		msg: z.string().describe(toolText("param.msg")),
+		meta: z.record(z.string(), z.unknown()).optional().describe(toolText("param.meta")),
+	});
 	pi.registerTool({
 		name: "msg",
-		label: "Onlyne Message",
-		description: DESCRIPTION,
+		label: toolText("label"),
+		description: toolText("description"),
 		parameters,
 		approval: "read",
 		strict: true,
@@ -60,9 +33,9 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 			ctx,
 		): Promise<AgentToolResult<{ result: unknown }>> => {
 			const parsed = parameters.safeParse(raw);
-			if (!parsed.success) return failure(`Invalid msg arguments: ${parsed.error.message}`);
+			if (!parsed.success) return failure(toolText("failure.invalid_args", { message: parsed.error.message }));
 			const runtime = getRuntime();
-			if (runtime === undefined) return failure("Onlyne is not configured for this project. Create .onlyne/config.toml or run /onlyne init.");
+			if (runtime === undefined) return failure(toolText("failure.not_configured"));
 			const input: MsgInput = {
 				delivery_kind: parsed.data.delivery_kind,
 				msg: parsed.data.msg,
@@ -80,7 +53,9 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 				if (op === "draft") {
 					const result = await createDraft(runtime, ctx, input, signal);
 					pi.logger.info("onlyne.draft.created", { ms: Date.now() - started });
-					return { content: [{ type: "text", text: `Draft ${String((result as { draft_id: string }).draft_id)} is ready; the main session sends it with meta.draft_id.` }], details: { result } };
+					// createDraft is typed unknown but always returns the draft record it just stored.
+					const draft = result as { draft_id: string };
+					return { content: [{ type: "text", text: toolText("draft.ready", { draft_id: draft.draft_id }) }], details: { result } };
 				}
 				if (typeof parsed.data.meta?.draft_id === "string") {
 					const result = await sendDraft(runtime, ctx, parsed.data.meta.draft_id, signal);
@@ -89,7 +64,7 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 				}
 				const targets = parsed.data.meta?.to;
 				if (Array.isArray(targets)) {
-					if (targets.length === 0) return failure("meta.to names no target. Name one peer, or send one call per peer.");
+					if (targets.length === 0) return failure(toolText("failure.no_target"));
 					const rows: Array<{ to: unknown; outcome?: unknown; error?: string }> = [];
 					for (const target of targets) {
 						const one: MsgInput = { ...input, meta: { ...input.meta, to: target as Json } };
@@ -103,8 +78,8 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 						}
 					}
 					const text = rows.map(row => row.error === undefined
-						? `→ ${String(row.to)}: ${summary(row.outcome)}`
-						: `→ ${String(row.to)}: not sent — ${row.error}`).join("\n");
+						? toolText("multi.delivered", { to: String(row.to), summary: summary(row.outcome) })
+						: toolText("multi.failed", { to: String(row.to), error: row.error })).join("\n");
 					pi.logger.info("onlyne.msg.multi", { targets: rows.length, failed: rows.filter(row => row.error !== undefined).length });
 					return { content: [{ type: "text", text: `${text}\n\n${JSON.stringify(rows, null, 2)}` }], details: { result: rows } };
 				}
@@ -139,19 +114,20 @@ export function registerMsgTool(pi: ExtensionAPI): void {
  * it is for the rare case that needs a machine-readable detail.
  */
 export function summary(result: unknown): string {
-	if (result === null || typeof result !== "object") return "Onlyne returned no structured result.";
+	if (result === null || typeof result !== "object") return toolText("summary.no_result");
 	const outcome = result as Partial<SendOutcome>;
 	const owner = outcome.receipt?.thread_ref?.owner ?? outcome.reply?.thread_ref.owner;
-	const where = owner === undefined ? "" : ` to ${owner}`;
-	const ref = outcome.receipt === undefined ? undefined : `thread ${outcome.receipt.thread_ref.id} seq ${outcome.receipt.seq}`;
+	const where = owner === undefined ? "" : toolText("summary.where", { owner });
 	// The answer is part of the delivery fact: a reply the receipt cannot attribute is one the
 	// sender cannot prove landed on the message it meant (cyanea report 2, problem 2).
 	const answers = outcome.receipt?.in_reply_to;
-	const answering = answers === undefined ? "" : `, answering ${answers.sender}/${answers.id}`;
-	const facts = ref === undefined ? "" : ` (${ref}${answering})`;
+	const answering = answers === undefined ? "" : toolText("summary.answering", { sender: answers.sender, id: answers.id });
+	const facts = outcome.receipt === undefined
+		? ""
+		: toolText("summary.thread_ref", { thread: outcome.receipt.thread_ref.id, seq: outcome.receipt.seq, answering });
 	// The receipt names a thread the receiver owns, which is not a local object; the outbound
 	// record is. Point the reader at the handle that opens (dpdp report, problem 1).
-	const handle = outcome.receipt === undefined ? undefined : ` · 读回: onlyne://outbound/${outcome.receipt.message_ref.id}`;
+	const trail = outcome.receipt === undefined ? "" : toolText("summary.outbound", { id: outcome.receipt.message_ref.id });
 	if (outcome.admission !== undefined) {
 		if (outcome.admission !== "accepted") {
 			const error = outcome.error;
@@ -159,25 +135,25 @@ export function summary(result: unknown): string {
 			// `retryable` belongs to the runtime, not to the caller: the record stays open and the
 			// runtime drives it again, while a second send commits a second intent.
 			const next = error?.retryable === true
-				? "The record stays open and the runtime retries it; sending again would commit a second intent."
-				: "The record stays open for recovery; do not re-send the same intent.";
-			return `Not confirmed: ${failure}. ${next}`;
+				? toolText("summary.retry")
+				: toolText("summary.recover");
+			return toolText("summary.not_confirmed", { failure, next });
 		}
-		const trail = handle ?? "";
 		if (outcome.wait === "answered" && outcome.reply !== undefined) {
+			const answer = { author: outcome.reply.authenticated_author, seq: outcome.reply.seq, where, facts, trail };
 			return outcome.reply_body === "withheld"
-				? `Delivered${where}${facts}${trail}. ${outcome.reply.authenticated_author} answered at seq ${outcome.reply.seq}, but that body was already shown in this context, so only its arrival is reported.`
-				: `Delivered${where}${facts}${trail}. ${outcome.reply.authenticated_author} answered at seq ${outcome.reply.seq}.`;
+				? toolText("summary.delivered_withheld", answer)
+				: toolText("summary.delivered_answered", answer);
 		}
 		if (outcome.wait === "timed_out") {
-			return `Delivered${where}${facts}${trail} and recorded durably. No reply arrived within the wait; it will arrive on its own as an inbound message.`;
+			return toolText("summary.delivered_timed_out", { where, facts, trail });
 		}
 		if (outcome.wait === "cancelled") {
-			return `Delivered${where}${facts}${trail} and recorded durably. The wait was cancelled; a reply will arrive on its own as an inbound message.`;
+			return toolText("summary.delivered_cancelled", { where, facts, trail });
 		}
-		return `Delivered${where}${facts}${trail} and recorded durably.`;
+		return toolText("summary.delivered", { where, facts, trail });
 	}
-	return "Onlyne answered; the structured result follows.";
+	return toolText("summary.plain");
 }
 
 /** The facts one `msg` call produced, without the reply body. */
