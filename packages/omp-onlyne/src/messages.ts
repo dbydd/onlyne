@@ -102,6 +102,16 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 			// The body is already where the decision put it; re-sending it would append a
 			// second copy that the cursor can only confirm once.
 			if (attempt.landed !== undefined) {
+			// RFC 0008 §5: a delivery is landed only while the context holding it can still
+			// confirm it. A subagent session that ended leaves the entry unconfirmed forever,
+			// and reporting it delivered on every maintenance pass is a retry storm, not a
+			// delivery. Mark the dead binding lost and let the next pass decide again.
+			const holder = (await deps.contexts.list()).find(record => record.agent_id === attempt.landed);
+			if (holder !== undefined && holder.state !== "idle" && holder.state !== "running") {
+				await deps.contexts.updateState(holder.alias, "lost").catch(() => undefined);
+				inboundAttempts.delete(key);
+				throw new OnlyneError("context_lost", t("contextLost", { alias: holder.alias }), { context: holder.alias });
+			}
 				deps.pi.logger.debug("onlyne.delivery.held", { entry: key, reason: "already-delivered", context: attempt.landed });
 				return { context: attempt.landed, consumed: false, outcome: "delivered" as const };
 			}
