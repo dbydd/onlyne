@@ -9,9 +9,30 @@ Onlyne v3 是面向 agent 消息与资源协作的去中心化 TypeScript 系统
 | 包 | 内容 |
 |---|---|
 | [`packages/lib`](packages/lib/README.zh-CN.md) | `@onlyne/lib`：thread、持久接纳的消息、关注义务、回复关联、无 owner 的域、带显式交接的资源、HTTP 绑定与插件接口 |
+| [`packages/node-host`](packages/node-host/README.md) | `@onlyne/node-host`：身份密钥、DNS-SD 发现、网关信任终端与消息目录 |
+| [`packages/im-core`](packages/im-core/README.md) | `@onlyne/im-core`：IM 连接器契约与驱动桥 |
+| [`packages/im-fake`](packages/im-fake/README.md) | `@onlyne/im-fake`：供测试使用的脚本化连接器 |
+| [`packages/im-lark`](packages/im-lark/README.md) | `@onlyne/im-lark`：飞书连接器 |
+| [`packages/im-gateway`](packages/im-gateway/README.md) | `@onlyne/im-gateway`：把 IM 会话托管为资源，并提供信任终端 |
+| [`packages/mcp-core`](packages/mcp-core/README.md) | `@onlyne/mcp-core`：MCP 会话与资源驱动 |
+| [`packages/mcp-gateway`](packages/mcp-gateway/README.md) | `@onlyne/mcp-gateway`：把 MCP server 托管为资源 |
 | [`packages/omp-onlyne`](packages/omp-onlyne/README.md) | OMP 接入：单一 `msg` 工具、judge 选择投递、入站注入 |
 
 `packages/` 只放可发布的运行时代码。后续包与 `lib` 并列。
+
+每个包发布 TypeScript 源码，运行时要求写在 `engines.bun`。带作用域的包使用 `access: public` 发布。
+
+## 发布
+
+包之间有依赖，按依赖顺序发布：
+
+```sh
+for pkg in lib node-host im-core im-fake im-lark im-gateway mcp-core mcp-gateway omp-onlyne; do
+  npm publish "packages/$pkg"
+done
+```
+
+`npm pack --dry-run packages/<name>` 列出单个包实际发布的文件。各清单已写 `files`、`repository.directory` 与许可证，压缩包只含 `src`、README 与 LICENSE。
 
 ## 形式化验证
 

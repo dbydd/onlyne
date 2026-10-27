@@ -1,8 +1,21 @@
 {
   "name": "@onlyne/im-fake",
   "version": "3.0.0",
+  "description": "Scripted in-memory IM connector for Onlyne gateway tests and fixtures",
   "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dbydd/onlyne.git",
+    "directory": "packages/im-fake"
+  },
+  "homepage": "https://github.com/dbydd/onlyne#readme",
+  "bugs": "https://github.com/dbydd/onlyne/issues",
+  "keywords": ["onlyne", "im", "fake", "testing"],
+  "publishConfig": { "access": "public" },
+  "engines": { "bun": ">=1.4.3" },
   "exports": {
     ".": "./src/index.ts"
   },
@@ -12,8 +25,8 @@
     "test": "bun tests/verify.ts"
   },
   "dependencies": {
-    "@onlyne/im-core": "workspace:*",
-    "@onlyne/lib": "workspace:*"
+    "@onlyne/im-core": "^3.0.0",
+    "@onlyne/lib": "^3.0.0"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

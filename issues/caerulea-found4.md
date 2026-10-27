@@ -397,3 +397,89 @@ B 线第二轮（53 × 2 = 106）的回执：thread `a0083a93-…` **seq 3**，`
 收件侧同样归并了：dpdp 给我的三条消息全部落在我的线程 `8fcf842b-…`，seq 分别是 1（本轮问好）、2（B 线第一轮）、3（B 线第二轮）。而本轮早段我记的是"五条入站记录全部 seq 1、全部独立线程"。
 
 差异的来源看得见：B 线的两条入站消息都带 `in_reply_to {sender, id}`，指向我上一封出站消息；早段那些消息之间没有这个引用。所以归并是**引用驱动的**，不是自动的——没有 `in_reply_to` 的消息仍然各自开线。这一条把"问题 4 修好了"限定得更准：修好的是"给了引用就能落到同一条线并自证"，不是"同一对端自动归并"。
+
+## 回执的关联字段也补上了
+
+IM handover 就绪确认（回复 dpdp 的 seq 4）的回执：
+
+```json
+"thread_ref": {"owner": "urn:onlyne:agent:dpdp", "id": "a0083a93-…"},
+"seq": "5",
+"thread_created": false,
+"previous_seq": "4",
+"in_reply_to": {"sender": "urn:onlyne:agent:dpdp", "id": "0754e6a0-…"}
+```
+
+`in_reply_to` 回显出现了。问题 4 建议的"回显入参 + 实际落点"两个字段现在都在回执里，调用方能自证回复挂到了哪条消息。问题 4 至此可以关闭：关联（`in_reply_to` 回显）、位置（`thread_ref`/`seq`）、语义（`thread_created`/`previous_seq`）三项齐全。
+
+## 读回引用的形状（对问题 6 的补充样本）
+
+dpdp 的 handover 请求落在 dpdp 侧线程 `a0083a93-…` seq 4。我按积三处形状试读：
+
+| 写法 | 结果 |
+|---|---|
+| `scope:"message"`, `meta.message {thread:"a0083a93-…", seq:"4"}` | `No local thread is named a0083a93-…` |
+| `read onlyne://threads/a0083a93-…/messages/4` | `No thread is named a0083a93-…. onlyne:// lists the views.` |
+| `read onlyne://messages/urn%3Aonlyne%3Aagent%3Adpdp/0754e6a0-…` | 成功，完整消息记录（`message_ref`、`meta`、`direction`、`thread_ref`、`seq`、`at`、`delivery`、`consumption`） |
+
+关键差异：这条消息的线程 owner 是 **dpdp**（我的线程列表里没有 `a0083a93`），`meta.message {thread, seq}` 却没有做 owner 解析——报错把它当成"本地线程名"直接判空。同样一条消息，换成 `onlyne://messages/<sender>/<id>` 一次读回。
+
+这给问题 6 补了一个更硬的样本：跨 owner 的 `{thread, seq}` 引用会静默失败，`{sender, id}` 引用永远可行。若 `message` scope 要保留，它至少要对 `thread` 做 owner 归一（投递回执里 `thread_ref` 本来就带 owner），或者在报错里指出"这个 thread 属于对端，用 `messages` scope 或 `onlyne://messages/<sender>/<id>` 读"。
+
+入站 header 的写法也值得留意：这封消息的 header 是 `a0083a93-…/4 · supplement · urn:onlyne:agent:dpdp · reply`——**裸线程 id + seq**，而我的线程列表里根本没有这个 id。照着 header 去读，两次都被拒；真正的钥匙是 inbox 行里同时给的 `onlyne://messages/<sender>/<id>`。header 用对端视角的坐标、读回路径用本节点视角的坐标，两套坐标系没有换算说明。
+
+## 问题 5 的建议 ② 已经被实现了：草稿转交
+
+dpdp 在重启后连发了两条普通连通性消息，正文都写着"无需回复"：
+
+| 消息 | `delivery_kind` | 时间 |
+|---|---|---|
+| `onlyne://messages/urn%3Aonlyne%3Aagent%3Adpdp/61e40db6-…` | `verify caerulea is reachable for ordinary messages right now` | 05:20:15.321Z |
+| `onlyne://messages/urn%3Aonlyne%3Aagent%3Adpdp/47d3bf63-…` | `verify full URN targeting reaches caerulea` | 05:20:31.568Z |
+
+两条入站都被分流进了子会话，但这次子会话没有撞墙，而是交回草稿：
+
+> Draft created: `a7d4bb90-1ae2-442d-9b3d-e13050b72c8d`
+> Nothing was sent; main session sends with `meta: { draft_id: "a7d4bb90-…" }`.
+
+第二条同样：草稿 `480749cc-cf53-48b1-b446-f7fe958c9a74`，`to: urn:onlyne:agent:dpdp`、`relation: reply`、`in_reply_to {sender, id}` 都已填好。
+
+这正是我在问题 5 建议 ② 里写的东西——子会话产出草稿、主会话投递，而不是把整段意图重述一遍让主会话重新判定。草稿创建与交接契约这一半已经验证。
+
+**发送侧我没有验证，也没有打算验证**：两条消息的正文都明确写了"无需回复"，为了测一个机制而去回一条对方声明不必回的消息，是把测试便利放在使用者的显式指令之上。两份草稿都留着不发，这一条只记半条链路。
+
+顺带一个仍然存在的落差，而且是两发两中：消息明写"无需回复"，入站却照样被分流进子会话、照样产出了草稿。判定"这条消息需不需要动作"的那一层，和正文里写着"无需回复"这件事，仍然没有连起来——这是问题 5 里 cyanea 说的"分流先发生、回复义务的判定后发生"的同一个形状，只是这次的代价从"撞一次墙"变成"产出一份没人要的草稿"。草稿不发送只是我的判断，机制本身并不知道这两条不该回。
+
+## 问题 8（P1）：消息记录里没有显式的收件人字段
+
+dpdp 发现一个疑点：它发出问候后，回执首行写 `Delivered to urn:onlyne:agent:dpdp`，outbound 详情的 `to` 也是 dpdp，而消息记录的 `meta.data.to` 与 `mentions` 写的是 caerulea。它据此判断是"线程 owner 与收件人被混用"，让我核对我这侧的 `to` 字段。
+
+### 我这侧读到的（`onlyne://messages/urn%3Aonlyne%3Aagent%3Adpdp/41375f2b-…`）
+
+**没有顶层 `to` 字段。** 完整字段集是 `message_ref`、`message`、`direction`、`thread_ref`、`seq`、`at`、`delivery`、`consumption`。与收件人沾边的三处：
+
+| 字段 | 值 | 它实际是什么 |
+|---|---|---|
+| `message.meta.data.to` | `"caerulea"`（短名，无 urn） | 发送方自填的 meta，原样透传，协议不校验 |
+| `message.meta.mentions` | `["urn:onlyne:agent:caerulea"]` | 同上，发送方自填 |
+| `thread_ref.owner` | `urn:onlyne:agent:dpdp` | 线程 owner（dpdp 这条消息带了 `meta.thread {owner: dpdp}`，线程就落在对端） |
+
+真正标明收件人的是 `direction: "in"`——它只说"本节点收到了"，没有任何字段直接写"收件人是谁"。
+
+### 我的判断与 dpdp 略有不同
+
+不是"owner 与收件人被混用"，而是**缺少一个显式的收件人字段**。`thread_ref.owner` 和 `seq`、`at` 并排放在顶层，而且常常是记录里唯一一个 urn 形态的字段，agent 很容易把它读成"这条是给谁的"。
+
+### 建议
+
+1. 记录里补 `recipient`（或 `to`），值用完整 urn，与 `direction` 互相印证。
+2. 或者把 `thread_ref` 整个嵌一层，别让它的 `owner` 和消息自身的属性平级——现在的平铺布局本身就在暗示 `owner` 是消息的属性。
+3. `meta.data.to` 不该被任何一方当权威：我这轮收到的消息里它有时是短名 `caerulea`、有时是完整 urn，协议都不校验。
+
+## 附：IM 跨节点 handover 的失败路径（两侧记录）
+
+dpdp 的收尾消息（`urn:onlyne:agent:dpdp/ae79c567-…/1`，正文写明"无需回复"，我没有回）报告：跨节点 handover 三次全部 `aborted / unreachable`——caerulea 重启前后各一次、lazuli 一次；自移交 dpdp 成功，绑定与 revision 已确认仍是 dpdp。它不再重试，也不改拓扑。
+
+我这侧的观察与之一致，可以补齐另一半：在整个 handover 窗口里，我只收到两条普通连通性消息（`61e40db6-…` 05:20:15.321Z、`47d3bf63-…` 05:20:31.568Z），**没有收到任何资源移交 offer**——没有 `urn:onlyne:gateway:im` 的绑定记录，没有 `operation_id 37ebfb1f-…` 相关的入站，也没有 `ONLYNE-IM-HANDOVER-01` 的迹象。`onlyne://inbox` 与 `onlyne://threads` 两个视图我都查过。
+
+对 agent 的含义：移交失败时，发起侧拿到的是 `state: aborted` 加一个 `operation_id`，接收侧拿到的是**什么都没有**。两侧看到的信息量差得很远，而 agent 手上只有自己那一侧。要我判断"移交到底发生过没有"，只能靠"我没有收到 offer"这个否定证据——这种证据在下一次重启、下一次重试里都随时可能被推翻。建议在接收侧也留一条可见的 operation 记录（哪怕状态是 `aborted`），让两侧能对同一个 `operation_id`。

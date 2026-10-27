@@ -9,9 +9,33 @@ The repository holds the draft protocol specifications, the runtime packages, an
 | Package | Contents |
 |---|---|
 | [`packages/lib`](packages/lib/README.md) | `@onlyne/lib`: threads, durable message admission, attention obligations, reply correlation, ownerless domains, resources with explicit handover, the HTTP binding, and the plugin interfaces |
+| [`packages/node-host`](packages/node-host/README.md) | `@onlyne/node-host`: identity keys, DNS-SD discovery, the gateway trust terminal, and message catalogs |
+| [`packages/im-core`](packages/im-core/README.md) | `@onlyne/im-core`: the IM connector contract and the driver bridge |
+| [`packages/im-fake`](packages/im-fake/README.md) | `@onlyne/im-fake`: a scripted connector for tests |
+| [`packages/im-lark`](packages/im-lark/README.md) | `@onlyne/im-lark`: the Lark (Feishu) connector |
+| [`packages/im-gateway`](packages/im-gateway/README.md) | `@onlyne/im-gateway`: IM conversations hosted as resources, plus the trust terminal |
+| [`packages/mcp-core`](packages/mcp-core/README.md) | `@onlyne/mcp-core`: the MCP session and resource driver |
+| [`packages/mcp-gateway`](packages/mcp-gateway/README.md) | `@onlyne/mcp-gateway`: MCP servers hosted as resources |
 | [`packages/omp-onlyne`](packages/omp-onlyne/README.md) | OMP integration: one `msg` tool, judge-selected delivery, and inbound injection |
 
 `packages/` holds publishable runtime code only. Further packages sit beside `lib` as they land.
+
+Every package ships TypeScript source for Bun, so `engines.bun` is the only runtime requirement.
+Scoped packages publish with `access: public`.
+
+## Publishing
+
+The packages depend on each other, so publish in dependency order:
+
+```sh
+for pkg in lib node-host im-core im-fake im-lark im-gateway mcp-core mcp-gateway omp-onlyne; do
+  npm publish "packages/$pkg"
+done
+```
+
+`npm pack --dry-run packages/<name>` lists the files one package would ship. Each manifest
+carries `files`, `repository.directory`, and a license, so the tarball holds `src`, the README,
+and the LICENSE only.
 
 ## Formal verification
 

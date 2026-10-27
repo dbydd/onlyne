@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import { createLogger, createNodeKey, startNodeHost } from '@onlyne/node-host';
 import { resolveLocale, setLocale } from '@onlyne/node-host/i18n';
 import { dirname, join } from 'node:path';

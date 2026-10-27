@@ -9,7 +9,7 @@
       "name": "@onlyne/im-core",
       "version": "3.0.0",
       "dependencies": {
-        "@onlyne/lib": "workspace:*",
+        "@onlyne/lib": "^3.0.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -20,8 +20,8 @@
       "name": "@onlyne/im-fake",
       "version": "3.0.0",
       "dependencies": {
-        "@onlyne/im-core": "workspace:*",
-        "@onlyne/lib": "workspace:*",
+        "@onlyne/im-core": "^3.0.0",
+        "@onlyne/lib": "^3.0.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -31,27 +31,35 @@
     "packages/im-gateway": {
       "name": "@onlyne/im-gateway",
       "version": "3.0.0",
-      "bin": "./src/main.ts",
+      "bin": {
+        "onlyne-im-gateway": "./src/main.ts",
+      },
       "dependencies": {
-        "@onlyne/im-core": "workspace:*",
-        "@onlyne/im-fake": "workspace:*",
-        "@onlyne/lib": "workspace:*",
-        "@onlyne/node-host": "workspace:*",
+        "@onlyne/im-core": "^3.0.0",
+        "@onlyne/im-fake": "^3.0.0",
+        "@onlyne/lib": "^3.0.0",
+        "@onlyne/node-host": "^3.0.0",
       },
       "devDependencies": {
-        "@onlyne/im-lark": "workspace:*",
+        "@onlyne/im-lark": "^3.0.0",
         "@types/bun": "^1.3.0",
         "typescript": "^5.9.0",
       },
+      "peerDependencies": {
+        "@onlyne/im-lark": "^3.0.0",
+      },
+      "optionalPeers": [
+        "@onlyne/im-lark",
+      ],
     },
     "packages/im-lark": {
       "name": "@onlyne/im-lark",
       "version": "3.0.0",
       "dependencies": {
         "@larksuiteoapi/node-sdk": "^1.76.0",
-        "@onlyne/im-core": "workspace:*",
-        "@onlyne/lib": "workspace:*",
-        "@onlyne/node-host": "workspace:*",
+        "@onlyne/im-core": "^3.0.0",
+        "@onlyne/lib": "^3.0.0",
+        "@onlyne/node-host": "^3.0.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -97,7 +105,7 @@
       "name": "@onlyne/node-host",
       "version": "3.0.0",
       "dependencies": {
-        "@onlyne/lib": "workspace:*",
+        "@onlyne/lib": "^3.0.0",
         "bonjour-service": "^1.4.4",
       },
       "devDependencies": {

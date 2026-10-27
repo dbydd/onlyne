@@ -1,0 +1,15 @@
+{
+  "node": { "id": "urn:onlyne:gateway:im" },
+  "server": { "bind": "127.0.0.1", "port": 3991 },
+  "storage": { "path": "examples/cluster/var/im/store.json" },
+  "credentials_dir": "examples/cluster/credentials",
+  "media_dir": "examples/cluster/var/im/media",
+  "connectors": [
+    {
+      "platform": "lark",
+      "assignee": "urn:onlyne:agent:dpdp",
+      "credential_file": "feishu"
+    }
+  ],
+  "peers": []
+}

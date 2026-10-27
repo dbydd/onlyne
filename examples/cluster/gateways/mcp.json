@@ -1,0 +1,13 @@
+{
+  "node": { "id": "urn:onlyne:gateway:mcp" },
+  "server": { "bind": "127.0.0.1", "port": 3992 },
+  "storage": { "path": "examples/cluster/var/mcp/store.json" },
+  "servers": [
+    {
+      "name": "hindsight",
+      "url": "http://localhost:8888/mcp/mcp-onlyne-test/",
+      "timeout_ms": 60000,
+      "controllers": ["urn:onlyne:agent:lazuli"]
+    }
+  ]
+}

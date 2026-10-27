@@ -104,6 +104,70 @@ conversation 聚合是本地可读的，所列远端 thread URI 可用性则有�
 
 本轮未查各来源候选的语义，不把两条记录直接判定为发现故障。建议查询结果说明覆盖范围，让 agent 区分节点状态、邻居与发现候选。
 
+### 资源节点在 agent 面没有入口
+
+> **状态（本轮，黑盒）：未找到入口。** 以下为 agent 可见面的实测，未读实现，不判断注册侧是否已接上。
+
+用户接入 Feishu IM 后询问能否看到。dpdp 从五个方向探测，全部没有资源信息：
+
+| 探测 | 结果 |
+|---|---|
+| `onlyne://` 根页 Views | 只有 neighbors、threads、inbox、contexts、outbound、conversations |
+| `onlyne://resources` | `Unknown onlyne:// route resources. onlyne:// lists the available views.` |
+| msg 意图「列出资源与 IM 网关」 | `The decision named no read scope; the readable channels are peers, inbox, messages and evidence.` |
+| msg 加 `meta.scope:"resources"`、`meta.op:"resource"` | 同一拒绝 |
+| `onlyne://neighbors` 及详情 | 只有三个 agent，字段仅 node_id、base_url、region、last_seen、verified、phase、fingerprint |
+| inbox、conversations、contexts、outbound | 无任何资源记录 |
+| `.onlyne/config.toml` | 无 resources 段 |
+
+`xd://msg` 的标题写「messages, threads and resources」，schema 里也有 `resource {owner,id}` 和 `operation`，但全文没有资源读取路径、操作列表或示例。
+
+后果是 agent 无法回答三个最基本的问题：我有没有资源、它在不在线、它能做什么。没有 owner/id 可引用，也无法凭空猜一个去试，所以这一轮没有向资源发送任何调用。
+
+建议在根页加一条资源视图，或在 neighbors 详情里列出该节点对外提供的资源与操作；至少在 `xd://msg` 说明资源引用的形状与可执行操作。若资源注册仍属调试中，报错应直说「本节点未注册资源」，而不是把意图判成非法读范围。
+
+### 网关接入后：资源以邻居和消息的形式出现
+
+> **状态（同日稍后）：部分可读。** 上面那张表是接入前的现场，保留不动。以下是接入 Feishu IM 之后重新探测的结果。
+
+节点重启后（endpoint 变为 `http://127.0.0.1:62923/onlyne/v3`），`onlyne://neighbors` 多出两条：
+
+```
+- urn:onlyne:gateway:im · no region · verified · handshake: exchanged · last seen 2026-10-27T03:55:58.738Z · fp 0123456789abcdef
+- urn:onlyne:gateway:mcp · no region · verified · handshake: no_exchange · last seen 2026-10-27T03:55:32.911Z
+```
+
+一条来自 Feishu（Lark）的消息已经落库。`onlyne://inbox` 最后一页列出它，`onlyne://conversations` 里对应标题为 notify 的一组：
+
+| 字段 | 值 |
+|---|---|
+| 消息 id | `im-notify-urn:onlyne:gateway:im-lark-oc_example-1` |
+| 发送者 | `urn:onlyne:gateway:im` |
+| 正文 | `111` |
+| 时间 | `2026-10-27T03:55:29.958Z` |
+| 平台与来源 | `platform: "lark"`，`conversation: "oc_example"`，`from: "ou_example"` |
+| 资源引用 | `resource_ref { owner: "urn:onlyne:gateway:im", id: "lark-oc_example" }` |
+| 提及 | `mentions: ["urn:onlyne:agent:dpdp"]` |
+| 状态 | entry 写 `delivery: "received"`、`consumption: "pending"`；inbox 行写 `acked` |
+
+根页的 contexts 也新增了一条由它派生的上下文：
+
+```
+- `c-1` · idle · onlyne urn:onlyne:gateway:im/im-lark-oc_example/1 · urn:onlyne:gateway:im/im-lark-oc_example · onlyne-c-1 · source urn:onlyne:gateway:im/im-notify-urn:onlyne:gateway:im-lark-oc_example-1
+```
+
+> **状态（同日更正）：上述结论不成立。** 网关投递确实派生了 `c-1`（alias `onlyne-c-1`）并起了回合，只是处理耗时约 5 分钟，dpdp 查看时它尚未完成、状态显示 idle。该子会话读到来信全文并起草了回复 `c0901da8-7b81-4bb4-beb3-a4dfeed0dc88`。主会话当时读到的是未完成的中间态。`consumption: pending` 是当时的实时值，不是漏投证据。
+
+由此可以确认：资源是可发现的，路径是邻居列表加消息元数据，而不是根页的资源视图。根页 Views 仍是原来六项，`onlyne://resources` 依旧返回未知路由。agent 只有收到过该资源的消息，才拿得到 `resource_ref`。
+
+同一组数据里的地址一致性问题：inbox 行给出的 thread 地址是 `onlyne://threads/im-lark-oc_…/messages/1`（不带 owner），conversation 页给出的是 `onlyne://threads/urn%3Aonlyne%3Agateway%3Aim/im-lark-oc_…`。两种写法在本地都返回 `No thread is named …`。conversation 与 message 两条路由可读，`?thread=` 与 `?message=` 过滤都能定位到这一组。
+
+建议：
+
+1. 根页增加资源视图，或在 neighbors 里区分 agent 与 gateway，并列出 gateway 提供的操作。
+2. 消息已经带 `mentions`，但被提及的节点没有收到回合。若这是刻意（资源消息只入库不打扰），应在 entry 与文档里说明；若不是，`consumption: pending` 就是可观测的漏投信号。
+3. 资源拥有的 thread 在本地不可读，建议标注归属，或直接给本地可读的 conversation/message 地址，避免列出两种都打不开的写法。
+
 ## 主观体验与未测事项
 
 这轮我能从工具说明直接找到导航，并在一个 conversation 页读完上轮往返。旧读回地址能打开，出站关联也能读到，明显减少了需要对端用正文解释的工作。真实回复落到 seq 2，且回执带 previous_seq 和 thread_created，我不再需要猜“又新开了吗”。
@@ -127,5 +191,7 @@ conversation 聚合是本地可读的，所列远端 thread URI 可用性则有�
 同一节点的双线程是关键对照：A 线最后一次发出消息 `67fc2518-d1b0-4105-9511-eac164d2f828`，落到 lazuli/8e6b197c 的 seq 5，回复落到 dpdp/40d4a001 的 seq 5。C 线发出消息 `4e7428ef-df47-4556-a1dc-0c20ef6cd0ea`，落到 lazuli/bd47c343 的 seq 2，回复落到 dpdp/6066de43 的 seq 2。同一接收节点没有把两条会话合并。
 
 主会话没有为等回复而轮询，六份回复都直接随发送结果返回。可确认的是主会话能在多个 thread 之间交错操作，并保持消息关联与落点隔离。工具采用同批提交；本轮没有测量网络请求时间是否重叠，因此不把它写成底层并发或压力测试。多节点多线程操作与多目标数组发送也分别计数，后者仍未测试。
+
+补充一处已修：新版发出的消息在 outbound 里带时间戳（`aa0799a8…` 显示 `2026-10-26T04:03:55.118Z`），`no time` 只留在更早的旧记录上。
 
 本报告是新版重新探索的记录，保留上一轮报告作为历史基线，不覆盖旧现场证据。

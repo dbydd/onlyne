@@ -8,7 +8,7 @@ import { createImGateway, nodeClock, type GatewayConfig, type ImGateway } from '
  * Live acceptance against a real Feishu chat: inbound event → conversation thread projection →
  * agent reply rendered back to the platform → resource handover to a second agent.
  *
- *   bun tests/live.ts --env ../../archive/examples/im-gateway/.env --chat oc_xxx [--wait 180000]
+ *   bun tests/live.ts --env <file with FEISHU_CREDENTIAL> --chat oc_xxx [--wait 180000]
  *
  * The script is skipped without a credential. It prints one JSON line per step; send the bot a
  * message from Feishu when it says it is waiting.

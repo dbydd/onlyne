@@ -21,3 +21,8 @@ archive/.omp/
 .env
 node_modules/
 dist/
+# `npm pack` output, kept out of the index so a release tarball never becomes a source file.
+*.tgz
+# Integration checkouts for other projects live outside this repository's history; each becomes
+# its own repository.
+/external-integrations/

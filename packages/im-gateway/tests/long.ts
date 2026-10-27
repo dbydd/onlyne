@@ -13,7 +13,7 @@ import type { ImEvent } from '@onlyne/im-core';
  * backlog fence refuses a handover, a full ack clears it, the handover commits, a restart over
  * the same store must not re-render, and a final real Feishu message must reach agent B.
  *
- *   bun tests/long.ts --env ../../archive/examples/im-gateway/.env --chat oc_xxx [--fill 108]
+ *   bun tests/long.ts --env <file with FEISHU_CREDENTIAL> --chat oc_xxx [--fill 108]
  *
  * Send the first real Feishu message when the script says it is waiting, and the final one
  * after the restart step.

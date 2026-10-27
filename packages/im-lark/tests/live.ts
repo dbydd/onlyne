@@ -7,7 +7,7 @@ import type { ImEvent } from '@onlyne/im-core';
  * Live smoke test against a real Feishu app. It is skipped unless a credential is supplied,
  * so `bun run test` stays offline. Usage:
  *
- *   bun tests/live.ts --env ../../archive/examples/im-gateway/.env
+ *   bun tests/live.ts --env <file with FEISHU_CREDENTIAL>
  *   bun tests/live.ts --env <path> --send oc_xxx --wait 30000
  *
  * The credential is `app_id:app_secret`; `--send` posts one message to that chat (a visible
