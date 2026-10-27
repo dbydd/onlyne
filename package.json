@@ -13,6 +13,7 @@
     "publish:packages": "for p in lib node-host im-core im-fake im-lark im-gateway mcp-core mcp-gateway omp-onlyne; do echo \"== packages/$p\"; npm publish \"./packages/$p\" || exit 1; done",
     "publish:dry": "for p in lib node-host im-core im-fake im-lark im-gateway mcp-core mcp-gateway omp-onlyne; do echo \"== packages/$p\"; npm publish \"./packages/$p\" --dry-run || exit 1; done",
     "version:list": "bun scripts/version.ts list",
-    "version:set": "bun scripts/version.ts"
+    "version:set": "bun scripts/version.ts",
+    "devinstall": "bun scripts/devinstall.ts"
   }
 }
