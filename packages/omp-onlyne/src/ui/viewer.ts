@@ -15,7 +15,7 @@ import {
 	span,
 	text as textNode,
 } from "@oh-my-pi/pi-tui";
-import { shortNodeId } from "../config.ts";
+import { normalizeServiceUrl, shortNodeId } from "../config.ts";
 import { getRuntime } from "../runtime.ts";
 import type { OnlyneStatus, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "../types.ts";
 import { ageText, clockText, fit, oneLine, shortAlias, sinceText } from "./format.ts";
@@ -125,6 +125,11 @@ export class OnlyneViewer implements Component {
 	private draft = "";
 	private composer: Editor | undefined;
 	private sending = false;
+	/** The address card: a node typed by hand, and the one read in flight. */
+	private addressOpen = false;
+	private address: Editor | undefined;
+	private addressText = "";
+	private connecting = false;
 	/** The exchange whose fingerprint card is open; confirming is the session's own call. */
 	private exchange?: KeyExchange;
 	/** Only the newest request may open a card: a slower earlier lookup must not repaint it. */
@@ -574,7 +579,8 @@ export class OnlyneViewer implements Component {
 			editor.setMaxHeight(3);
 			this.composer = editor;
 		}
-		this.composer.focused = this.focused;
+		// One caret at a time: the address card owns it while it is open.
+		this.composer.focused = this.focused && !this.addressOpen;
 		const where = this.replyTo !== undefined
 			? `回复 ${shortNodeId(this.replyTo.sender)} · ${this.replyTo.id}`
 			: this.target !== undefined
@@ -733,6 +739,48 @@ export class OnlyneViewer implements Component {
 		);
 	}
 
+	/**
+	 * A node reached by address instead of by discovery: mDNS never leaves the link, and a
+	 * remote node on a public name has no advertisement at all. The address is read once and
+	 * saved as a seed, so the next start finds the node again without this card.
+	 */
+	private addressCard(): NativeNode {
+		if (this.address === undefined) {
+			const editor = new Editor(getEditorTheme());
+			editor.disableSubmit = true;
+			editor.setText(this.addressText);
+			editor.setMaxHeight(1);
+			editor.onChange = () => {
+				this.addressText = editor.getExpandedText();
+				this.described = undefined;
+				this.requestRender();
+			};
+			this.address = editor;
+		}
+		this.address.focused = this.focused;
+		return node(
+			"card",
+			{ role: "onlyne.connect", inset: true, head: [span("连接一个节点", "strong")] },
+			[
+				this.address,
+				textNode(
+					[span("origin（http://host:7801）或服务地址（http://host:7801/onlyne/v3）都可以；连上后保存为种子，下次启动自动联系。", "dim")],
+					{ wrap: "word" },
+				),
+				node(
+					"row",
+					{ gap: "sm", align: "center", wrap: true },
+					[
+						this.button(this.connecting ? "连接中…" : "连接", "onlyne.connect.submit", { tone: "accent", title: "读取这个地址并保存为种子" }),
+						this.button("取消", "onlyne.connect.cancel", { title: "关掉地址输入" }),
+					],
+					"acts",
+				),
+			],
+			"connect",
+		);
+	}
+
 	/** The member column: the current domain's peers, then the selected one's detail. */
 	private memberColumn(): NativeNode {
 		const peers = this.peers();
@@ -754,8 +802,17 @@ export class OnlyneViewer implements Component {
 		const children: NativeChild[] = [
 			node("row", { gap: "sm", align: "center", justify: "between" }, [
 				textNode([span(`域内节点 · ${peers.length}`, "dim")]),
-				this.button("刷新", "onlyne.discovery.refresh", { title: "重新观察一轮发现" }),
+				node(
+					"row",
+					{ gap: "xs", align: "center" },
+					[
+						...(this.addressOpen ? [] : [this.button("添加地址", "onlyne.connect.open", { title: "按地址连接一个发现不到的节点" })]),
+						this.button("刷新", "onlyne.discovery.refresh", { title: "重新观察一轮发现" }),
+					],
+					"acts",
+				),
 			], "head"),
+			...(this.addressOpen ? [this.addressCard()] : []),
 			node(
 				"list",
 				{
@@ -786,6 +843,7 @@ export class OnlyneViewer implements Component {
 							{ k: "域", v: regionLabel(peer.record.region) },
 							{ k: "状态", v: phase === undefined ? "无认证" : PHASE_LABEL[phase] },
 							{ k: "端点", v: peer.record.base_url },
+							{ k: "来源", v: peer.record.source === "bootstrap" ? "按地址连接（已存为种子）" : peer.record.source },
 							{ k: "最后可见", v: `${sinceText(peer.record.last_seen) || "时间未知"}${stale ? " · 记录已过期" : ""}` },
 						]),
 						node("row", { gap: "sm", align: "center", wrap: true }, [
@@ -855,8 +913,13 @@ export class OnlyneViewer implements Component {
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.disposed || this.signal.aborted) return;
 		if (event.type === "edit" || event.type === "undo") {
-			this.composer?.handleNativeEvent(event);
-			this.draft = this.composer?.getExpandedText() ?? this.draft;
+			if (this.addressOpen) {
+				this.address?.handleNativeEvent(event);
+				this.addressText = this.address?.getExpandedText() ?? this.addressText;
+			} else {
+				this.composer?.handleNativeEvent(event);
+				this.draft = this.composer?.getExpandedText() ?? this.draft;
+			}
 			this.described = undefined;
 			this.requestRender();
 			return;
@@ -888,6 +951,19 @@ export class OnlyneViewer implements Component {
 		}
 		if (act === "onlyne.discovery.refresh") {
 			void this.refreshDiscovery();
+			return;
+		}
+		if (act === "onlyne.connect.open") {
+			this.addressOpen = true;
+			this.changed();
+			return;
+		}
+		if (act === "onlyne.connect.cancel") {
+			this.closeAddress();
+			return;
+		}
+		if (act === "onlyne.connect.submit") {
+			void this.connect();
 			return;
 		}
 		if (act === "onlyne.exchange.confirm") {
@@ -953,7 +1029,23 @@ export class OnlyneViewer implements Component {
 	handleInput(data: string): void {
 		if (this.disposed || this.signal.aborted) return;
 		if (matchesKey(data, "escape")) {
+			if (this.addressOpen) {
+				this.closeAddress();
+				return;
+			}
 			this.done();
+			return;
+		}
+		if (this.addressOpen) {
+			// A single-line field: Enter is the one way to submit it from the keyboard.
+			if (matchesKey(data, "enter")) {
+				void this.connect();
+				return;
+			}
+			this.address?.handleInput(data);
+			this.addressText = this.address?.getExpandedText() ?? this.addressText;
+			this.described = undefined;
+			this.requestRender();
 			return;
 		}
 		if (matchesKey(data, "ctrl+enter")) {
@@ -983,6 +1075,55 @@ export class OnlyneViewer implements Component {
 			this.setNotice(`刷新失败：${errorText(error)}`, true);
 		}
 		await this.reload();
+	}
+
+	private closeAddress(): void {
+		this.addressOpen = false;
+		this.address = undefined;
+		this.addressText = "";
+		this.changed();
+	}
+
+	/**
+	 * Reads the typed address through the runtime, which owns normalization, the discovery
+	 * read and the seed write. The node keeps running; the new peer arrives in the member
+	 * list, where the ordinary exchange request applies to it.
+	 */
+	private async connect(): Promise<void> {
+		if (this.connecting) return;
+		const runtime = getRuntime();
+		if (runtime === undefined) {
+			this.setNotice("Onlyne 还没启动，先运行 /onlyne init。", true);
+			return;
+		}
+		const typed = this.addressText.trim();
+		if (typed.length === 0) {
+			this.setNotice("先填写地址，例如 http://127.0.0.1:7801/onlyne/v3", true);
+			return;
+		}
+		this.connecting = true;
+		this.changed();
+		let seed: string | undefined;
+		try {
+			seed = normalizeServiceUrl(typed);
+			await runtime.contact(typed);
+			this.setNotice(`已连接 ${seed}，并保存为种子；下次启动会自动联系。`);
+			this.closeAddress();
+		} catch (error) {
+			seed = undefined;
+			this.setNotice(`连接失败：${errorText(error)}`, true);
+		} finally {
+			this.connecting = false;
+			await this.reload();
+		}
+		if (seed === undefined) return;
+		// Land on the new peer, in its own domain: its detail card is where the exchange starts.
+		const target = seed;
+		const record = this.snapshot?.discovery.find(entry => entry.base_url === target);
+		if (record === undefined) return;
+		this.domainKey = record.region;
+		this.memberKey = record.node_id;
+		this.changed();
 	}
 
 	private async accept(nodeId: string): Promise<void> {
@@ -1142,6 +1283,7 @@ export class OnlyneViewer implements Component {
 			lines.push(short(`${message.direction === "out" ? "→" : "←"} [${message.seq}] ${plainAuthor(message.author)} ${clockText(message.at)}`));
 			for (const line of message.text.split("\n").slice(0, 6)) lines.push(short(`  ${line}`));
 		}
+		if (this.addressOpen) lines.push(short(`连接地址：${oneLine(this.addressText) || "（空）"} · Enter 连接`));
 		const blocked = this.sendBlocked();
 		lines.push(short(`传入：${oneLine(this.draft) || "（空）"}${blocked === undefined ? "" : ` · ${blocked}`}`));
 		return lines;
@@ -1161,6 +1303,7 @@ export class OnlyneViewer implements Component {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		this.composer = undefined;
+		this.address = undefined;
 		this.described = undefined;
 		this.rendered = undefined;
 	}

@@ -5,6 +5,8 @@ import type { OnlyneConfig } from "./types.ts";
 const CONFIG_RELATIVE_PATH = join(".onlyne", "config.toml");
 const REGION_PREFIX = "urn:onlyne:region:";
 const AGENT_PREFIX = "urn:onlyne:agent:";
+/** RFC 0011 §5.1: the one service path every HTTP binding answers on. */
+const SERVICE_PATH = "/onlyne/v3";
 const DEFAULT_BIND = "127.0.0.1";
 const DEFAULT_PAGE_SIZE = 50;
 
@@ -55,6 +57,34 @@ export function shortNodeId(value: string): string {
 	} catch {
 		return name;
 	}
+}
+
+/**
+ * A node address as the rest of the plugin uses it: the absolute service URL. An origin
+ * (`http://host:7801`), a service URL, and a bare `host:port` all name the same node, and
+ * only the service URL is stored or contacted, so one address has one spelling.
+ */
+export function normalizeServiceUrl(value: string): string {
+	const raw = value.trim();
+	if (raw.length === 0) throw new ConfigError("invalid", "A node address must not be empty.");
+	// A bare `host:port` reads as a scheme to `URL`; it is the common hand-typed form.
+	const candidate = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(raw) ? raw : `http://${raw}`;
+	let url: URL;
+	try {
+		url = new URL(candidate);
+	} catch {
+		throw new ConfigError("invalid", `A node address must be an absolute URL, got ${JSON.stringify(raw)}.`);
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:") {
+		throw new ConfigError("invalid", `A node address must use http or https, got ${JSON.stringify(raw)}.`);
+	}
+	const path = url.pathname.replace(/\/+$/, "");
+	if (path.length === 0 || path === "/") return `${url.origin}${SERVICE_PATH}`;
+	if (path === SERVICE_PATH) return `${url.origin}${SERVICE_PATH}`;
+	throw new ConfigError(
+		"invalid",
+		`A node address is an origin (http://host:7801) or a service URL (http://host:7801${SERVICE_PATH}), got ${JSON.stringify(raw)}.`,
+	);
 }
 
 /** Read and validate the project configuration. A missing file is an error, not defaults. */
@@ -160,7 +190,8 @@ function validateConfig(config: OnlyneConfig): OnlyneConfig {
 		throw new ConfigError("invalid", `node.key_scope must be project, global or none, got ${JSON.stringify(keyScope)}.`);
 	}
 	if (publicUrl !== undefined && publicUrl.length === 0) throw new ConfigError("invalid", "server.public_url must not be empty.");
-	const seeds = config.discovery?.seeds?.map(seed => seed.trim()).filter(seed => seed.length > 0);
+	// A seed is contacted at every start, so it is stored in the one spelling the node uses.
+	const seeds = [...new Set((config.discovery?.seeds ?? []).map(seed => seed.trim()).filter(seed => seed.length > 0).map(normalizeServiceUrl))];
 	if (bind.length === 0) throw new ConfigError("invalid", "server.bind must not be empty.");
 	if (/[\s/]/.test(bind)) {
 		throw new ConfigError("invalid", `server.bind must be a hostname or IP address, got ${JSON.stringify(bind)}.`);
@@ -175,7 +206,7 @@ function validateConfig(config: OnlyneConfig): OnlyneConfig {
 		node: { id, ...(keyRef === undefined || keyRef.length === 0 ? {} : { key_ref: keyRef }), ...(keyScope === undefined ? {} : { key_scope: keyScope }) },
 		server: { bind, ...(publicUrl === undefined ? {} : { public_url: publicUrl }) },
 		threads: { page_size: pageSize },
-		...(seeds === undefined || seeds.length === 0 ? {} : { discovery: { seeds } }),
+		...(seeds.length === 0 ? {} : { discovery: { seeds } }),
 		...(config.trust === undefined ? {} : { trust: config.trust }),
 	};
 }

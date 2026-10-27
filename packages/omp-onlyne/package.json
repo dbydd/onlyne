@@ -31,7 +31,8 @@
 		"test": "bun test"
 	},
 	"dependencies": {
-		"@onlyne/lib": "^3.0.0"
+		"@onlyne/lib": "^3.0.0",
+		"@onlyne/node-host": "workspace:*"
 	},
 	"peerDependencies": {
 		"@oh-my-pi/pi-agent-core": "*",

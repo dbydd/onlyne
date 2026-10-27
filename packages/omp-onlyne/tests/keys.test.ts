@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyMaterial } from "@onlyne/lib";
-import { loadOrCreateKey, writeKeyMaterial } from "../src/keys.ts";
+import { loadOrCreateKey, writeKeyMaterial } from "@onlyne/node-host/keys";
 
 const dirs: string[] = [];
 afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });

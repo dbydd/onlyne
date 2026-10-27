@@ -1,12 +1,12 @@
 import { dirname, join } from "node:path";
 import { OnlyneError, trustPhase, type DiscoveryCandidate, type DiscoveryRecord, type KeyExchange, type KeyHook, type MaintenanceClock, type NotifyEvent, type OnlyneNode, type Outbound, type Page } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { ensureKeyDir } from "@onlyne/node-host/keys";
+import { NetworkDiscovery } from "@onlyne/node-host/network";
 import { currentDecision, JudgeDecider } from "./decider.ts";
-import { loadConfig, saveConfig, shortNodeId } from "./config.ts";
-import { ensureKeyDir } from "./keys.ts";
+import { loadConfig, normalizeServiceUrl, saveConfig, shortNodeId } from "./config.ts";
 import { createRuntimeBridge } from "./messages.ts";
 import { advertisedHost, createOnlyneNode } from "./node.ts";
-import { NetworkDiscovery } from "./network.ts";
 import { canAnswer, ContextRegistry, SqliteStorage } from "./store.ts";
 import type { OnlyneConfig, OnlyneStatus, QueueItem, ViewerContact, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "./types.ts";
 
@@ -160,6 +160,14 @@ class OmpRuntime implements PluginRuntime {
 		try { await this.network.start(); } catch (error) { this.pi.logger.warn("onlyne.discovery.unavailable", { error: errorText(error) }); }
 		await this.contexts.ensureMain();
 		await this.node.client.recover(this.controller.signal);
+		// A saved seed is reached on every start, so a node that moved ports is found again even
+		// where mDNS never hears it. One unreachable seed is a logged fact, never a failed start,
+		// and the seeds are read together so a dead address costs one wait rather than one each.
+		await Promise.all((this.config.discovery?.seeds ?? []).map(async seed => {
+			try { await this.follow(seed); }
+			catch (error) { this.pi.logger.warn("onlyne.seed.failed", { seed, error: errorText(error) }); }
+		}));
+		this.changed();
 		this.node.client.runMaintenance();
 		this.rediscover();
 		this.timer = this.main.setInterval(() => this.rediscover(), DISCOVERY_REFRESH_MS);
@@ -180,9 +188,30 @@ class OmpRuntime implements PluginRuntime {
 	}
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
 	private changed(): void { for (const listener of this.listeners) listener(); }
+	/**
+	 * A user-typed address. It is normalized once, read for its own identity and everything it
+	 * declares, and only a successful read becomes a seed. The node keeps running: a seed is a
+	 * routing hint, not a second binding.
+	 */
 	async contact(endpoint: string): Promise<void> {
-		await this.node.discovery.observe(endpoint, "bootstrap", undefined, this.controller.signal);
-		const url = new URL(endpoint.replace(/\/$/, "") + "/discovery");
+		const seed = normalizeServiceUrl(endpoint);
+		await this.follow(seed);
+		await this.rememberSeed(seed);
+		this.changed();
+	}
+	/**
+	 * Reads one address into the discovery catalog. The peer's own directory is a bonus: a
+	 * node that answers `/description` but not `/discovery` is still a usable neighbor.
+	 */
+	private async follow(seed: string): Promise<void> {
+		await this.node.discovery.observe(seed, "bootstrap", undefined, this.controller.signal);
+		await this.followDirectory(seed).catch(error => {
+			this.pi.logger.debug("onlyne.seed.directory", { seed, error: errorText(error) });
+		});
+	}
+	/** Every peer the address declares, each read on its own: one failure does not stop the rest. */
+	private async followDirectory(seed: string): Promise<void> {
+		const url = new URL(`${seed}/discovery`);
 		let cursor: string | undefined;
 		do {
 			url.search = "";
@@ -191,10 +220,19 @@ class OmpRuntime implements PluginRuntime {
 			if (!response.ok) throw new OnlyneError("unavailable", `Discovery directory answered HTTP ${response.status}.`);
 			const page = await response.json() as Page<DiscoveryCandidate>;
 			if (!Array.isArray(page.items)) throw new OnlyneError("invalid_request", "The discovery page has no items.");
-			for (const candidate of page.items) if (candidate.node_id !== this.config.node.id) await this.node.discovery.observe(candidate.base_url, endpoint, candidate.node_id, this.controller.signal);
+			for (const candidate of page.items) {
+				if (candidate.node_id === this.config.node.id) continue;
+				await this.node.discovery.observe(candidate.base_url, seed, candidate.node_id, this.controller.signal).catch(() => undefined);
+			}
 			cursor = page.next_cursor ?? undefined;
 		} while (cursor);
-		this.changed();
+	}
+	/** The seed list is configuration: one write per new address, and none on a start. */
+	private async rememberSeed(seed: string): Promise<void> {
+		const seeds = this.config.discovery?.seeds ?? [];
+		if (seeds.includes(seed)) return;
+		const saved = await saveConfig({ ...this.config, discovery: { seeds: [...seeds, seed] } });
+		this.config.discovery = saved.discovery;
 	}
 	/** Stage one of one exchange: the peer's proved fingerprint, and the session that commits it. */
 	async trustBegin(node: string): Promise<KeyExchange> {

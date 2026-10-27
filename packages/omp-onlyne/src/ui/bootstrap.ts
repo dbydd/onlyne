@@ -15,7 +15,7 @@ import {
 	span,
 	text as textNode,
 } from "@oh-my-pi/pi-tui";
-import { configPath, normalizeNodeId, normalizeRegion, saveConfig, shortNodeId } from "../config.ts";
+import { configPath, normalizeNodeId, normalizeRegion, normalizeServiceUrl, saveConfig, shortNodeId } from "../config.ts";
 import { startRuntime } from "../runtime.ts";
 import type { OnlyneConfig } from "../types.ts";
 
@@ -28,7 +28,7 @@ const LABELS: Record<FieldName, string> = {
 	bind: "Server bind",
 	keyScope: "Node key (project/global/none)",
 	pageSize: "Page size",
-	contact: "Initial node address (optional)",
+	contact: "Node addresses (optional)",
 };
 
 const HINTS: Record<FieldName, string> = {
@@ -37,7 +37,7 @@ const HINTS: Record<FieldName, string> = {
 	bind: "127.0.0.1",
 	keyScope: "project：密钥存 .onlyne/keys（git 内需 ignore）；global：存 ~/.config/onlyne/keys；none：回环开发绑定",
 	pageSize: "1..100，默认 50",
-	contact: "自动发现不可达时，联系一个已有节点；不写入配置",
+	contact: "自动发现到不了的节点按地址联系；保存为 discovery.seeds，每次启动都会联系。多个地址用逗号分隔",
 };
 
 /** The values the command handler derived from Tern and the saved config. */
@@ -86,7 +86,7 @@ export class OnlyneBootstrap implements Component {
 			bind: this.makeField(LABELS.bind, defaults.bind, HINTS.bind),
 			keyScope: this.makeField(LABELS.keyScope, defaults.keyScope, HINTS.keyScope),
 			pageSize: this.makeField(LABELS.pageSize, String(defaults.pageSize), HINTS.pageSize),
-			contact: this.makeField(LABELS.contact, "", HINTS.contact),
+			contact: this.makeField(LABELS.contact, (defaults.current?.discovery?.seeds ?? []).join(", "), HINTS.contact),
 		};
 	}
 
@@ -140,16 +140,31 @@ export class OnlyneBootstrap implements Component {
 			this.fail("Node key 只能是 project、global 或 none。");
 			return;
 		}
+		let seeds: string[];
+		try {
+			seeds = this.value("contact")
+				.split(/[,\s]+/)
+				.map(part => part.trim())
+				.filter(part => part.length > 0)
+				.map(normalizeServiceUrl);
+		} catch (error) {
+			this.fail(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		const previous = this.defaults.current;
 		const config: OnlyneConfig = {
 			path: configPath(this.ctx.cwd),
 			region: normalizeRegion(region),
 			node: {
 				id: normalizeNodeId(nodeId),
 				key_scope: scope,
+				// The form does not edit these; saving must not erase them.
+				...(previous?.node.key_ref === undefined ? {} : { key_ref: previous.node.key_ref }),
 			},
-			server: { bind },
+			server: { bind, ...(previous?.server.public_url === undefined ? {} : { public_url: previous.server.public_url }) },
 			threads: { page_size: Number(this.value("pageSize")) },
-			...(this.value("contact").trim() === "" ? {} : { discovery: { seeds: [this.value("contact").trim()] } }),
+			...(seeds.length === 0 ? {} : { discovery: { seeds } }),
+			...(previous?.trust === undefined ? {} : { trust: previous.trust }),
 		};
 		this.saving = true;
 		this.error = undefined;
@@ -159,7 +174,17 @@ export class OnlyneBootstrap implements Component {
 			await saveConfig(config);
 			persisted = true;
 			const runtime = await startRuntime(this.pi, this.ctx);
-			if (this.value("contact")) await runtime.contact(this.value("contact"));
+			// The start already read every saved seed; a seed typed just now is read again only
+			// to report its failure in the form the user typed it in.
+			const known = new Set(previous?.discovery?.seeds ?? []);
+			for (const seed of seeds.filter(seed => !known.has(seed))) {
+				try { await runtime.contact(seed); }
+				catch (error) {
+					if (this.signal.aborted) return;
+					this.fail(`配置已保存并启动，但 ${seed} 没连上：${error instanceof Error ? error.message : String(error)}`);
+					return;
+				}
+			}
 			if (this.disposed || this.signal.aborted) return;
 			this.ctx.ui.notify(`Onlyne 已初始化：${config.region}`, "info");
 			this.done();

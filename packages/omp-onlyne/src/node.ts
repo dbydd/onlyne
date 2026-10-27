@@ -1,8 +1,8 @@
 import { networkInterfaces } from "node:os";
 import { FetchTransport, OnlyneError, OnlyneNode, trustPhase, type Action, type Auth, type Json, type KeyHook, type KeyMaterial, type MaintenanceClock, type MsgInput, type Runtime, type SigningTransportOptions, type Storage, type Target } from "@onlyne/lib";
+import { loadOrCreateKey, writeKeyMaterial } from "@onlyne/node-host/keys";
 import { canAnswer, type ContextRegistry } from "./store.ts";
 import type { OnlyneConfig } from "./types.ts";
-import { loadOrCreateKey, writeKeyMaterial } from "./keys.ts";
 
 export interface NodeDeps {
 	config: OnlyneConfig;
