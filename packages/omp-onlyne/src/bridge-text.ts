@@ -68,6 +68,7 @@ const en = {
 	trustRevoked: "Local approval was dropped. This is a status update; no action is requested.",
 	trustAcceptAction: 'accept: msg({ delivery_kind: "accept the trust handshake", msg: "accept {node}", meta: { op: "trust_accept", node_id: "{node}", fingerprint: "{fingerprint}" } })',
 	trustRevokeAction: 'revoke: msg({ delivery_kind: "revoke the trust handshake", msg: "revoke {node}", meta: { op: "trust_revoke", node_id: "{node}" } })',
+	trustPanelOnly: "The acquisition policy is none, so this approval is the human's: only the panel can accept it. You may read and revoke.",
 };
 
 const zh: Record<keyof typeof en, string> = {
@@ -138,6 +139,7 @@ const zh: Record<keyof typeof en, string> = {
 	trustRevoked: "本地批准已撤销。这是状态更新，不索取任何动作。",
 	trustAcceptAction: '批准：msg({ delivery_kind: "批准信任握手", msg: "批准 {node}", meta: { op: "trust_accept", node_id: "{node}", fingerprint: "{fingerprint}" } })',
 	trustRevokeAction: '撤销：msg({ delivery_kind: "撤销信任握手", msg: "撤销 {node}", meta: { op: "trust_revoke", node_id: "{node}" } })',
+	trustPanelOnly: "获取策略是 none，这次批准属于人类：只有面板能接受它。你可以读取与撤销。",
 };
 
 export const bridgeText = createTranslator({ en, "zh-CN": zh });

@@ -266,6 +266,11 @@ class OmpRuntime implements PluginRuntime {
 				...(observed === undefined ? {} : { observed }), at, cause: event.cause,
 			});
 		} else await this.log.transition(node, fingerprint, at, event.cause);
+		// The statement's own address is also a discovery candidate here, as the tern host's
+		// bridge records it. Awaited, so the verdict below already counts that record (§2.2).
+		if (event.entry.base_url) {
+			await this.node.discovery.observe(event.entry.base_url, "trust-statement", node).catch(() => undefined);
+		}
 		// §2.2: only an invitation whose statement covered a connection this host observed, and
 		// whose declared and recorded addresses all stay inside the allow set, is committed
 		// without a human deciding first.

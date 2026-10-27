@@ -147,7 +147,11 @@ export function handshakeEntry(input: HandshakeInput): { msg: string; trust: { [
 	else if (input.phase === "exchanged") lines.push(t("trustExchanged"));
 	else lines.push(t("trustRevoked"));
 	if (input.phase === "invited" && !input.approved) {
-		lines.push(t("trustAcceptAction", { node: input.node_id, fingerprint: input.fingerprint }));
+		// RFC 0018 §3: under `none` the agent may only look. Offering an action the policy
+		// refuses would ask for a decision that can never be made.
+		lines.push(input.policy.policy === "none"
+			? t("trustPanelOnly")
+			: t("trustAcceptAction", { node: input.node_id, fingerprint: input.fingerprint }));
 	}
 	if (pending) lines.push(t("trustRevokeAction", { node: input.node_id }));
 	return { msg: lines.join("\n"), trust: { node_id: input.node_id, fingerprint: input.fingerprint, phase: input.phase, pending } };

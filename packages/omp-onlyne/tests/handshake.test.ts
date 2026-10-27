@@ -131,6 +131,16 @@ describe("handshake entry", () => {
 		expect(approved.msg).not.toContain("trust_accept");
 	});
 
+	test("policy none offers no approval, only the revocation", () => {
+		const held = handshakeEntry({
+			node_id: PEER, fingerprint: FINGERPRINT, phase: "invited", declared: LOOPBACK,
+			observed: "127.0.0.1", policy: closed, approved: false,
+		});
+		expect(held.trust.pending).toBe(true);
+		expect(held.msg).not.toContain("trust_accept");
+		expect(held.msg).toContain("trust_revoke");
+	});
+
 	test("a status update is delivered but carries no action", () => {
 		for (const phase of ["exchanged", "revoked"] as const) {
 			const status = handshakeEntry({ node_id: PEER, fingerprint: FINGERPRINT, phase, declared: LOOPBACK, policy: DEFAULT_ACQUISITION, approved: true });
