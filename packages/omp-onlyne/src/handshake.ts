@@ -209,6 +209,11 @@ export interface ApprovalRequest {
 	fingerprint: string;
 	/** The statement's own connection address, when the caller is holding it. */
 	observed?: string;
+	/**
+	 * The discovery addresses as they stood when the statement arrived (RFC 0018 §2.2). A record
+	 * this host derives from the statement itself is not part of the judgement.
+	 */
+	recorded?: string[];
 }
 
 /**
@@ -223,11 +228,11 @@ export async function judgeApproval(deps: ApprovalDeps, request: ApprovalRequest
 	const input: AcquireInput = {
 		...(observed === undefined || observed === "" ? {} : { observed }),
 		...(declared === undefined || declared === "" ? {} : { declared }),
-		recorded: await deps.recorded(request.node_id),
+		recorded: request.recorded ?? await deps.recorded(request.node_id),
 	};
 	const judgement: ApprovalJudgement = {
 		at: deps.now(), node_id: request.node_id, fingerprint: request.fingerprint,
-		policy: deps.policy, input, verdict: evaluateAcquisition(deps.policy, input),
+		policy: deps.policy, input, verdict: await evaluateAcquisition(deps.policy, input),
 	};
 	deps.audit(judgement);
 	return judgement;

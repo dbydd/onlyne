@@ -292,8 +292,12 @@ class OmpRuntime implements PluginRuntime {
 				...(observed === undefined ? {} : { observed }), at, cause: event.cause,
 			});
 		} else await this.log.transition(node, fingerprint, at, event.cause);
+		// RFC 0018 §2.2: the verdict reads the catalog as it stood when the statement arrived.
+		// The record this host derives from that statement is not part of the judgement, or the
+		// two conditions would collapse into one.
+		const recorded = await this.recorded(node);
 		// The statement's own address is also a discovery candidate here, as the tern host's
-		// bridge records it. Awaited, so the verdict below already counts that record (§2.2).
+		// bridge records it.
 		if (event.entry.base_url) {
 			await this.node.discovery.observe(event.entry.base_url, "trust-statement", node).catch(() => undefined);
 		}
@@ -301,7 +305,7 @@ class OmpRuntime implements PluginRuntime {
 		// whose declared and recorded addresses all stay inside the allow set, is committed
 		// without a human deciding first.
 		const judgement = event.phase === "invited" && event.cause === "peer-statement"
-			? await judgeApproval(this.peers, { node_id: node, fingerprint, observed })
+			? await judgeApproval(this.peers, { node_id: node, fingerprint, observed, recorded })
 			: undefined;
 		if (judgement?.verdict.allowed === true) this.approveDeferred(node, fingerprint);
 		await this.deliverHandshake(event, observed, judgement);

@@ -1,3 +1,4 @@
+import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 
 /** RFC 0018 §2: how far a peer may be acquired without a human confirming first. */
@@ -6,7 +7,7 @@ export type AcquirePolicy = "all" | "segment" | "none";
 /** RFC 0018 §5: host-side acquisition settings. The library never reads them. */
 export interface AcquisitionPolicy {
 	policy: AcquirePolicy;
-	/** CIDR blocks; only read when `policy` is `segment`. */
+	/** CIDR blocks and host names; only read when `policy` is `segment`. */
 	allow: string[];
 }
 
@@ -18,6 +19,11 @@ export const DEFAULT_ACQUISITION: AcquisitionPolicy = {
 	policy: "segment",
 	allow: ["127.0.0.0/8", "::1/128"],
 };
+
+/** Turns a host name into the addresses it names; an empty list means it names none. */
+export type Resolver = (host: string) => Promise<string[]>;
+
+const dnsResolver: Resolver = async host => (await lookup(host, { all: true })).map(row => row.address);
 
 /** The configured policy, or the documented default when the config carries none. */
 export function acquisitionOf(config: { acquisition?: AcquisitionPolicy }): AcquisitionPolicy {
@@ -39,7 +45,7 @@ export interface AcquireInput {
 	observed?: string;
 	/** The `base_url` the peer wrote into its own statement. */
 	declared?: string;
-	/** Every discovery address recorded for this node id. */
+	/** The discovery addresses recorded for this node id when the statement arrived. */
 	recorded?: readonly string[];
 }
 
@@ -56,27 +62,42 @@ interface Block {
 	type: "ipv4" | "ipv6";
 }
 
-/** One `[acquisition] allow` entry: `network/prefix`, with an IPv6 host optionally bracketed. */
-export function parseAllowBlock(value: string): Block | undefined {
+const HOST_NAME = /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/;
+
+/** One `[acquisition] allow` entry: `network/prefix`, or a host name to accept as written. */
+export function parseAllowBlock(value: string): Block | { name: string } | undefined {
 	const trimmed = value.trim();
+	if (trimmed.length === 0) return undefined;
 	const slash = trimmed.lastIndexOf("/");
-	if (slash <= 0) return undefined;
+	if (slash <= 0) {
+		// A name is matched by its own spelling, so listing it involves no resolution. A bare
+		// address is not a block: it needs a prefix to say what it covers.
+		if (isIP(trimmed) !== 0 || !HOST_NAME.test(trimmed)) return undefined;
+		return { name: trimmed.toLowerCase() };
+	}
 	const prefix = Number(trimmed.slice(slash + 1));
 	if (!Number.isInteger(prefix) || prefix < 0) return undefined;
-	const network = literalHost(trimmed.slice(0, slash));
+	const network = literalAddress(trimmed.slice(0, slash));
 	if (network === undefined) return undefined;
 	if (prefix > (network.type === "ipv4" ? 32 : 128)) return undefined;
 	return { network: network.address, prefix, type: network.type };
 }
 
-/**
- * The literal address an address or service URL names. A host name is not an address: judging
- * it would require a resolution the policy never authorized, so it matches no block.
- */
-function literalHost(value: string): { address: string; type: "ipv4" | "ipv6" } | undefined {
+/** The host a value names: a URL's hostname, or the value itself when it is already a host. */
+function hostOf(value: string): string | undefined {
 	const trimmed = value.trim();
-	const host = trimmed.includes("://") ? urlHost(trimmed) : trimmed;
-	if (host === undefined) return undefined;
+	if (trimmed.length === 0) return undefined;
+	if (!trimmed.includes("://")) return trimmed.replace(/^\[(.*)\]$/, "$1");
+	try {
+		const host = new URL(trimmed).hostname;
+		return host.replace(/^\[(.*)\]$/, "$1");
+	} catch {
+		return undefined;
+	}
+}
+
+/** A host that is already a literal address, with IPv4-mapped IPv6 read as IPv4. */
+function literalAddress(host: string): { address: string; type: "ipv4" | "ipv6" } | undefined {
 	const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
 	const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(bare);
 	if (mapped !== null) return { address: mapped[1]!, type: "ipv4" };
@@ -86,29 +107,49 @@ function literalHost(value: string): { address: string; type: "ipv4" | "ipv6" } 
 	return undefined;
 }
 
-function urlHost(value: string): string | undefined {
-	try {
-		return new URL(value).hostname;
-	} catch {
-		return undefined;
+function blockHolds(address: { address: string; type: "ipv4" | "ipv6" }, block: Block): boolean {
+	if (block.type !== address.type) return false;
+	const blocks = new BlockList();
+	blocks.addSubnet(block.network, block.prefix, block.type);
+	return blocks.check(address.address, block.type);
+}
+
+/** The allow entry an address falls in, or undefined. */
+function entryFor(address: { address: string; type: "ipv4" | "ipv6" }, allow: readonly string[]): string | undefined {
+	for (const entry of allow) {
+		const block = parseAllowBlock(entry);
+		if (block === undefined || "name" in block) continue;
+		if (blockHolds(address, block)) return entry.trim();
 	}
+	return undefined;
 }
 
 /**
- * The allow entry `value` falls in, or undefined. Unreadable entries are skipped here because
- * `parseConfig` already refused them; a hand-built config with a bad entry matches nothing.
+ * The allow entry a value matches, or undefined. A literal address is judged as itself. A host
+ * name matches an allow entry of the same name; otherwise it is resolved and every address it
+ * names must fall inside the allow set (RFC 0018 §2.1) — a name that resolves to nothing, or to
+ * one address outside the set, matches nothing.
  */
-export function allowMatch(value: string, allow: readonly string[]): string | undefined {
-	const target = literalHost(value);
-	if (target === undefined) return undefined;
-	for (const entry of allow) {
+export async function allowMatch(value: string, allow: readonly string[], resolve: Resolver = dnsResolver): Promise<string | undefined> {
+	const host = hostOf(value);
+	if (host === undefined) return undefined;
+	const literal = literalAddress(host);
+	if (literal !== undefined) return entryFor(literal, allow);
+	const named = allow.find(entry => {
 		const block = parseAllowBlock(entry);
-		if (block === undefined || block.type !== target.type) continue;
-		const blocks = new BlockList();
-		blocks.addSubnet(block.network, block.prefix, block.type);
-		if (blocks.check(target.address, block.type)) return entry.trim();
+		return block !== undefined && "name" in block && block.name === host.toLowerCase();
+	});
+	if (named !== undefined) return named.trim();
+	const resolved = await resolve(host).catch(() => [] as string[]);
+	let matched: string | undefined;
+	for (const address of resolved) {
+		const target = literalAddress(address);
+		if (target === undefined) return undefined;
+		const entry = entryFor(target, allow);
+		if (entry === undefined) return undefined;
+		matched ??= entry;
 	}
-	return undefined;
+	return matched;
 }
 
 /**
@@ -119,17 +160,21 @@ export function allowMatch(value: string, allow: readonly string[]): string | un
  * `discovery.resolve()` re-probes every one of them before it connects, so a record outside the
  * allow set is an outbound request the policy never authorized.
  */
-export function evaluateAcquisition(policy: AcquisitionPolicy, input: AcquireInput): AcquireVerdict {
+export async function evaluateAcquisition(
+	policy: AcquisitionPolicy,
+	input: AcquireInput,
+	resolve: Resolver = dnsResolver,
+): Promise<AcquireVerdict> {
 	if (policy.policy === "none") return { allowed: false, reason: "policy_denied_none" };
 	if (policy.policy === "all") return { allowed: true, reason: "policy_all" };
 	if (input.observed === undefined) return { allowed: false, reason: "policy_unobserved" };
-	const observed = allowMatch(input.observed, policy.allow);
+	const observed = await allowMatch(input.observed, policy.allow, resolve);
 	if (observed === undefined) return { allowed: false, reason: "policy_denied_observed" };
-	if (input.declared !== undefined && allowMatch(input.declared, policy.allow) === undefined) {
+	if (input.declared !== undefined && await allowMatch(input.declared, policy.allow, resolve) === undefined) {
 		return { allowed: false, reason: "policy_denied_declared", matched: observed };
 	}
 	for (const address of input.recorded ?? []) {
-		if (allowMatch(address, policy.allow) === undefined) {
+		if (await allowMatch(address, policy.allow, resolve) === undefined) {
 			return { allowed: false, reason: "policy_denied_recorded", matched: observed };
 		}
 	}
