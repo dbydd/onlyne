@@ -93,12 +93,6 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 			}
 			const decision = attempt.decision;
 			if (decision === undefined) throw new OnlyneError("decision_unavailable", t("noDecision"));
-			if (decision.action === "new_subagent") {
-				attempt.landed ??= await startSubagent(deps, entry);
-				// A spawn is a submission, not a read: the child's prompt carries the token and its
-				// first provider request is the proof, so nothing is consumed here.
-				return { context: attempt.landed, consumed: false, outcome: "delivered" as const };
-			}
 			// The body is already where the decision put it; re-sending it would append a
 			// second copy that the cursor can only confirm once.
 			if (attempt.landed !== undefined) {
@@ -113,6 +107,12 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				throw new OnlyneError("context_lost", t("contextLost", { alias: holder.alias }), { context: holder.alias });
 			}
 				deps.pi.logger.debug("onlyne.delivery.held", { entry: key, reason: "already-delivered", context: attempt.landed });
+				return { context: attempt.landed, consumed: false, outcome: "delivered" as const };
+			}
+			if (decision.action === "new_subagent") {
+				attempt.landed = await startSubagent(deps, entry);
+				// A spawn is a submission, not a read: the child's prompt carries the token and its
+				// first provider request is the proof, so nothing is consumed here.
 				return { context: attempt.landed, consumed: false, outcome: "delivered" as const };
 			}
 			if (decision.action === "context") {
@@ -189,8 +189,7 @@ const pending = new Map<string, PendingObservation>();
 const toolResults = new Map<string, PendingObservation>();
 const observed = new Map<string, string[]>();
 
-function registerPending(entry: Entry, context: string, kind: PendingObservation["kind"]): string {
-	const token = `onlyne-${crypto.randomUUID()}`;
+function registerPending(entry: Entry, context: string, kind: PendingObservation["kind"], token = `onlyne-${crypto.randomUUID()}`): string {
 	pending.set(token, { entry, context, kind });
 	return token;
 }
@@ -300,7 +299,9 @@ async function startSubagent(deps: BridgeDeps, entry: Entry): Promise<string> {
 	await deps.contexts.bind(record.alias, { agent_id: child, ...(parentId === undefined ? {} : { parent_id: parentId }) });
 	// The token is already in the child's prompt, so it can only be registered once the child's
 	// identity is known; until then there is no provider boundary to observe it at.
-	registerPending(entry, child, "fragment");
+	// It is registered as the token the prompt carries: a fresh one would never appear in any
+	// provider payload, and the delivery could never be confirmed.
+	registerPending(entry, child, "fragment", token);
 	return child;
 }
 async function findContextBySource(contexts: ContextRegistry, entry: Entry): Promise<ContextRecord | undefined> {
