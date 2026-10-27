@@ -164,7 +164,9 @@ class OmpRuntime implements PluginRuntime {
 				else this.pi.logger.debug(message, fields);
 			},
 			listPeers: async () => (await this.node.discovery.listRecords()).filter(record => record.verified_at !== undefined && Date.parse(record.expires_at) > Date.now()),
-			listTrust: async () => (await this.node.trust.list(this.node.auth)).map(row => ({ node_id: row.node_id, phase: trustPhase(row) })),
+			listTrust: async () => (await this.node.trust.list(this.node.auth)).map(row => ({
+				node_id: row.node_id, phase: trustPhase(row), base_url: row.base_url,
+			})),
 			listReceiverContexts: async id => id === this.config.node.id
 				? [
 						{ alias: "main", summary: t("main"), state: this.main.isIdle() ? "idle" : "running" },

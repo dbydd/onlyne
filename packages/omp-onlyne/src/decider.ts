@@ -133,6 +133,42 @@ export async function reuseThread(deps: DeciderDeps, to: NodeId): Promise<Thread
 	return undefined;
 }
 
+/**
+ * Every peer this node can name, from both sources that know one.
+ *
+ * A trust row is identity: the peer exists whether or not anyone answered a probe recently. A
+ * discovery record is an address, and a live one wins over the address a statement declared.
+ * Callers that ask "who is this" and callers that ask "who may receive this" must not diverge,
+ * or the same peer resolves for `meta.to` and vanishes from the target question — the shape of
+ * the reported `No discovered node is named …` failure.
+ */
+export async function knownPeers(deps: DeciderDeps): Promise<PeerRecord[]> {
+	const byId = new Map<NodeId, PeerRecord>();
+	let readable = false;
+	let failure = "";
+	try {
+		for (const row of await deps.listTrust()) {
+			readable = true;
+			if (row.phase === "revoked") continue;
+			byId.set(row.node_id, { node_id: row.node_id, base_url: row.base_url ?? "", instance_id: "trust", last_seen: "" });
+		}
+	} catch (error) {
+		failure = message(error);
+		deps.log?.("onlyne.judge.trust_unreadable", { error: failure });
+	}
+	try {
+		for (const peer of await deps.listPeers()) {
+			readable = true;
+			byId.set(peer.node_id, peer);
+		}
+	} catch (error) {
+		failure = message(error);
+		deps.log?.("onlyne.judge.peers_unreadable", { error: failure });
+	}
+	if (!readable) throw new OnlyneError("unavailable", text("reason.discovery_unreadable", { error: failure }));
+	return [...byId.values()].filter(peer => peer.node_id !== deps.config.node.id);
+}
+
 export interface DeciderDeps {
 	config: OnlyneConfig;
 	/** Registry id of this node's main session; children are bound under it. */
@@ -146,7 +182,7 @@ export interface DeciderDeps {
 	/** Peers from the library's live discovery records, never a static configuration. */
 	listPeers(): Promise<PeerRecord[]>;
 	/** Every trust row this node holds, in any phase. Identity outlives a discovery record. */
-	listTrust(): Promise<Array<{ node_id: NodeId; phase: string }>>;
+	listTrust(): Promise<Array<{ node_id: NodeId; phase: string; base_url?: string }>>;
 	/** Contexts the target node publishes for `execution: existing`. */
 	listReceiverContexts(nodeId: NodeId): Promise<ReceiverContext[]>;
 	resourceQuery?(meta: Record<string, Json>): Promise<ResourceReadQuery>;
@@ -374,19 +410,18 @@ export class JudgeDecider {
 
 	/** Node O-2A question 2: the delivery target among live peers, asked only when meta.to is absent. */
 	async #targetQuestion(scope: DecisionScope, meta: Record<string, Json>): Promise<NodeId> {
-		const peers = await this.#peers();
-		if (!peers.available) {
-			throw new OnlyneError("unavailable", text("error.target_unresolved", { reason: peers.reason }));
-		}
-		// One discovered peer is the answer; none means the caller must name a target.
-		if (peers.value.length === 0) throw new OnlyneError("not_found", text("error.no_receiver"));
-		if (peers.value.length === 1) return peers.value[0]!.node_id;
+		// The same set `#peerId` resolves against: a peer this node holds a trust row with is a
+		// candidate even when discovery has nothing fresh to say about its address.
+		const peers = await knownPeers(this.deps);
+		// One known peer is the answer; none means the caller must name a target.
+		if (peers.length === 0) throw new OnlyneError("not_found", text("error.no_receiver"));
+		if (peers.length === 1) return peers[0]!.node_id;
 		const started = Date.now();
 		const answers = await this.#judge(
 			scope.ctx,
 			{
 				focus: { ...this.#focus(scope), meta_to: meta.to ?? null },
-				candidate_peers: peers.value.map(peer => ({
+				candidate_peers: peers.map(peer => ({
 					node_id: peer.node_id,
 					alias: lastSegment(peer.node_id),
 					last_seen: peer.last_seen,
@@ -397,7 +432,7 @@ export class JudgeDecider {
 				target: {
 					type: "choice",
 					instructions: text("judge.target.instructions"),
-					criteria: Object.fromEntries(peers.value.map(peer => [
+					criteria: Object.fromEntries(peers.map(peer => [
 						peer.node_id,
 						text("judge.target.peer", {
 							node: peer.node_id,
@@ -415,7 +450,7 @@ export class JudgeDecider {
 		if (chosen === undefined || chosen === "none") {
 			throw new OnlyneError("ambiguous_target", text("error.delivery_target"));
 		}
-		if (!peers.value.some(peer => peer.node_id === chosen)) {
+		if (!peers.some(peer => peer.node_id === chosen)) {
 			throw new OnlyneError("decision_unavailable", text("error.target_not_published", { chosen }));
 		}
 		return chosen;
@@ -1346,14 +1381,12 @@ export class JudgeDecider {
 	async #knownIds(): Promise<NodeId[]> {
 		const ids = new Set<NodeId>([this.deps.config.node.id]);
 		try {
-			for (const row of await this.deps.listTrust()) {
-				if (row.phase !== "revoked") ids.add(row.node_id);
-			}
+			for (const peer of await knownPeers(this.deps)) ids.add(peer.node_id);
 		} catch (error) {
-			this.deps.log?.("onlyne.judge.trust_unreadable", { error: message(error) });
+			// Both sources failing leaves only this node; an alias then resolves to `not_found`,
+			// which is the honest answer when nothing can be read at all.
+			this.deps.log?.("onlyne.judge.peers_unreadable", { error: message(error) });
 		}
-		const peers = await this.#peers();
-		if (peers.available) for (const peer of peers.value) ids.add(peer.node_id);
 		return [...ids];
 	}
 
@@ -1551,14 +1584,6 @@ export class JudgeDecider {
 		}
 	}
 
-
-	async #peers(): Promise<Source<PeerRecord[]>> {
-		try {
-			return ok(await this.deps.listPeers());
-		} catch (error) {
-			return none(text("reason.discovery_unreadable", { error: message(error) }));
-		}
-	}
 
 	async #receiverContexts(nodeId: NodeId): Promise<Source<ReceiverContext[]>> {
 		try {

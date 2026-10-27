@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Entry, Page, Thread, ThreadRef } from "@onlyne/lib";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { fitState, needsReplyOf, JudgeDecider, reuseThread, type DeciderDeps, type DecisionScope, type PeerRecord } from "../src/decider.ts";
+import { fitState, needsReplyOf, JudgeDecider, knownPeers, reuseThread, type DeciderDeps, type DecisionScope, type PeerRecord } from "../src/decider.ts";
 import type { ContextRegistry } from "../src/store.ts";
 import type { ContextRecord, OnlyneConfig } from "../src/types.ts";
 
@@ -293,6 +293,24 @@ describe("thread reuse", () => {
 });
 
 describe("identity outlives liveness", () => {
+	test("a trust row without a live discovery record is both addressable and a candidate", async () => {
+		const deps = {
+			config, log: () => {},
+			contexts: { list: async () => [] } as unknown as ContextRegistry,
+			listThreads: async () => [thread],
+			listMessages: async (): Promise<Page<Entry>> => ({ items: [entry], next_cursor: null }),
+			listPeers: async () => [],
+			listTrust: async () => [{ node_id: other, phase: "exchanged", base_url: "http://127.0.0.1:7802/onlyne/v3" }],
+			threadMembers: async () => [node, other],
+			listReceiverContexts: async () => [],
+		} as unknown as DeciderDeps;
+		// Both questions read the same source, so the peer cannot resolve for one and vanish
+		// from the other (audit §2.2).
+		expect((await knownPeers(deps)).map(peer => peer.node_id)).toEqual([other]);
+		expect(await new JudgeDecider(deps).decide(scope({ op: "member_add", thread: "research", to: other })))
+			.toMatchObject({ to: other });
+	});
+
 	test("a peer with a trust row is addressable without a live discovery record", async () => {
 		const des = decider([], { peers: [], trust: [{ node_id: other, phase: "exchanged" }] });
 		expect(await des.decide(scope({ op: "member_add", thread: "research", to: other }))).toEqual({
