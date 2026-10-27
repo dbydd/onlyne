@@ -128,7 +128,9 @@ export interface HandshakeInput {
  * says so instead. `pending` is the same fact for the host's todo hook.
  */
 export function handshakeEntry(input: HandshakeInput): { msg: string; trust: { [key: string]: Json } } {
-	const pending = input.phase === "invited" ? !input.approved : input.phase === "requested";
+	// RFC 0018 §3: only an invitation this host did not approve itself is work. A pending local
+	// approval waits on the peer, so there is nothing to do and nothing to wake a turn for.
+	const pending = input.phase === "invited" && !input.approved;
 	const lines = [
 		t("trustHeader", { phase: input.phase, node: input.node_id }),
 		t("trustFingerprint", { fingerprint: input.fingerprint }),

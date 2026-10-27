@@ -141,6 +141,16 @@ describe("handshake entry", () => {
 		expect(held.msg).toContain("trust_revoke");
 	});
 
+	test("a local approval waiting on the peer is delivered without work", () => {
+		const waiting = handshakeEntry({
+			node_id: PEER, fingerprint: FINGERPRINT, phase: "requested", declared: LOOPBACK,
+			policy: DEFAULT_ACQUISITION, approved: true,
+		});
+		expect(waiting.trust.pending).toBe(false);
+		expect(waiting.msg).not.toContain("trust_accept");
+		expect(waiting.msg).not.toContain("trust_revoke");
+	});
+
 	test("a status update is delivered but carries no action", () => {
 		for (const phase of ["exchanged", "revoked"] as const) {
 			const status = handshakeEntry({ node_id: PEER, fingerprint: FINGERPRINT, phase, declared: LOOPBACK, policy: DEFAULT_ACQUISITION, approved: true });
