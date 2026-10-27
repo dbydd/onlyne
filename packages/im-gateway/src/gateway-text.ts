@@ -1,7 +1,7 @@
 import { createTranslator } from '@onlyne/node-host/i18n';
 
 const en = {
-  'cli.usage': 'usage: im-gateway <config.json>',
+  'cli.usage': 'usage: onlyne-im-gateway <config.json>',
   'startup.pending': 'The gateway is starting.',
   'config.unreadable': 'The configuration file is unreadable: {path}',
   'config.object': 'The configuration needs {field} as an object.',
@@ -18,7 +18,7 @@ const en = {
 } as const;
 
 const zh: Record<keyof typeof en, string> = {
-  'cli.usage': '用法：im-gateway <config.json>',
+  'cli.usage': '用法：onlyne-im-gateway <config.json>',
   'startup.pending': '网关正在启动。',
   'config.unreadable': '配置文件无法读取：{path}',
   'config.object': '配置项 {field} 需要是一个对象。',
