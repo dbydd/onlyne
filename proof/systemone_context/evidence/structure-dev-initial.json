@@ -1019,7 +1019,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/research",
+              "cwd": "/Users/example/work/research",
               "project": "sea-ice-review"
             },
             "context_notes": [
@@ -1970,7 +1970,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/packaging",
+              "cwd": "/Users/example/work/packaging",
               "project": "packaging-repro"
             },
             "context_notes": [
@@ -2895,7 +2895,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/ops",
+              "cwd": "/Users/example/work/ops",
               "project": "night-shift"
             },
             "context_notes": [
@@ -3812,7 +3812,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/ops",
+              "cwd": "/Users/example/work/ops",
               "project": "night-shift"
             },
             "context_notes": [
@@ -4774,7 +4774,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/ops",
+              "cwd": "/Users/example/work/ops",
               "project": "night-shift"
             },
             "context_notes": [
@@ -5745,7 +5745,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/research",
+              "cwd": "/Users/example/work/research",
               "project": "revision-review"
             },
             "context_notes": [
@@ -6712,7 +6712,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/packaging",
+              "cwd": "/Users/example/work/packaging",
               "project": "packaging-repro"
             },
             "context_notes": [
@@ -7719,7 +7719,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/research",
+              "cwd": "/Users/example/work/research",
               "project": "sea-ice-review"
             },
             "context_notes": [
@@ -8622,7 +8622,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/research-chamber",
+              "cwd": "/Users/example/work/research-chamber",
               "project": "packaging-repro"
             },
             "context_notes": [
@@ -9367,7 +9367,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/sea-ice",
+              "cwd": "/Users/example/work/sea-ice",
               "project": "sea-ice"
             },
             "context_notes": [
@@ -10110,7 +10110,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/research",
+              "cwd": "/Users/example/work/research",
               "project": "packaging-repro"
             },
             "context_notes": [
@@ -10860,7 +10860,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/research-chamber",
+              "cwd": "/Users/example/work/research-chamber",
               "project": "research-chamber"
             },
             "context_notes": [
@@ -11601,7 +11601,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/packaging",
+              "cwd": "/Users/example/work/packaging",
               "project": "packaging-repro"
             },
             "context_notes": [
@@ -12538,7 +12538,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/research",
+              "cwd": "/Users/example/work/research",
               "project": "sea-ice-review"
             },
             "context_notes": [
@@ -13254,7 +13254,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/research-chamber",
+              "cwd": "/Users/example/work/research-chamber",
               "project": "packaging-repro"
             },
             "context_notes": [
@@ -14116,7 +14116,7 @@
           },
           "context": {
             "workspace": {
-              "cwd": "/Users/dbydd/vibe-agent-working-dir/research-chamber",
+              "cwd": "/Users/example/work/research-chamber",
               "project": "research-chamber"
             },
             "context_notes": [

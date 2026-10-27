@@ -438,7 +438,7 @@ HANDOFF = thread(
 )
 
 CONTEXT_REVIEW_DESCRIBE = context(
-    cwd="/Users/dbydd/vibe-agent-working-dir/research",
+    cwd="/Users/example/work/research",
     project="sea-ice-review",
     notes=[("海冰评审本周必须收尾", "2026-10-22T02:00:00Z", "stale")],
     claims=[("dpdp", "caerulea 在海冰评审里等你回复", "2026-10-24T01:50:00Z")],
@@ -463,7 +463,7 @@ CASES = [
         threads=[SEA_ICE, SEA_ICE_AUDIT, PACKAGING, OPS_ROTA_PEER],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research",
+            cwd="/Users/example/work/research",
             project="sea-ice-review",
             notes=[("海冰评审已经收尾，剩下的只是归档", "2026-10-22T02:00:00Z", "stale")],
             claims=[("tern-3", "新的讨论都发到夜班排班串去", "2026-10-24T01:30:00Z")],
@@ -487,7 +487,7 @@ CASES = [
         threads=[SEA_ICE, PACKAGING_OLD, OPS_ROTA_PEER],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/packaging",
+            cwd="/Users/example/work/packaging",
             project="packaging-repro",
             notes=[("旧稿里有一版步骤，已经归档", "2026-10-18T10:05:00Z", "stale")],
             claims=[("alexandria", "旧稿够用，别开新串了", "2026-10-24T01:20:00Z")],
@@ -515,7 +515,7 @@ CASES = [
         ],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/ops",
+            cwd="/Users/example/work/ops",
             project="night-shift",
             notes=[("换班信息都写在夜班排班串", "2026-10-21T02:00:00Z", "stale")],
             claims=[("caerulea", "夜班串关了，你发我私聊吧", "2026-10-24T01:40:00Z")],
@@ -542,7 +542,7 @@ CASES = [
         ],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/ops",
+            cwd="/Users/example/work/ops",
             project="night-shift",
             notes=[("换班信息都写在夜班排班串", "2026-10-18T02:00:00Z", "stale")],
             claims=[],
@@ -563,7 +563,7 @@ CASES = [
         threads=[OPS_ROTA, SEA_ICE, REVIEW],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/ops",
+            cwd="/Users/example/work/ops",
             project="night-shift",
             notes=[("caerulea 下周还会来顶班", "2026-10-20T02:00:00Z", "stale")],
             claims=[("caerulea", "别把我移出去，我下周还来", "2026-10-24T01:45:00Z")],
@@ -585,7 +585,7 @@ CASES = [
         threads=[REVIEW, SEA_ICE, PACKAGING],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research",
+            cwd="/Users/example/work/research",
             project="revision-review",
             notes=[("reviewer 的评审串由她自己管成员", "2026-10-22T02:00:00Z", "stale")],
             claims=[("reviewer", "我这串的成员我自己来管", "2026-10-24T01:35:00Z")],
@@ -612,7 +612,7 @@ CASES = [
         threads=[SEA_ICE, PACKAGING, OPS_ROTA_PEER],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/packaging",
+            cwd="/Users/example/work/packaging",
             project="packaging-repro",
             notes=[("海冰评审本周必须收尾", "2026-10-23T02:00:00Z", "stale")],
             claims=[("dpdp", "caerulea 在海冰评审里等你回复", "2026-10-24T01:50:00Z")],
@@ -632,7 +632,7 @@ CASES = [
         threads=[SEA_ICE, REVIEW, OPS_ROTA_PEER],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research",
+            cwd="/Users/example/work/research",
             project="sea-ice-review",
             notes=[("reviewer 只看结论，不参加讨论", "2026-10-22T02:00:00Z", "stale")],
             claims=[("reviewer", "把那条结论转发到我这边就行", "2026-10-24T01:42:00Z")],
@@ -654,7 +654,7 @@ CASES = [
         threads=[REVIEW, SEA_ICE, PACKAGING],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research",
+            cwd="/Users/example/work/research",
             project="revision-review",
             notes=[("评审串只读归档，不再改动", "2026-10-21T02:00:00Z", "stale")],
             resources=[{"kind": "mcp_server", "alias": "docs-mcp", "note": "评审文档"}],
@@ -674,7 +674,7 @@ CASES = [
         threads=[SEA_ICE, PACKAGING, REVIEW, OPS_ROTA_PEER],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research",
+            cwd="/Users/example/work/research",
             project="daily",
             notes=[("先回 reviewer 那几条", "2026-10-23T02:00:00Z", "stale")],
             resources=[{"kind": "im_conversation", "alias": "sea-ice-chat", "note": "群聊摘要"}],
@@ -695,7 +695,7 @@ CASES = [
         threads=[OPS_ROTA, HANDOFF, SEA_ICE],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/ops",
+            cwd="/Users/example/work/ops",
             project="night-shift",
             notes=[("交接都写在排班串里", "2026-10-20T02:00:00Z", "stale")],
             claims=[],
@@ -718,7 +718,7 @@ CASES = [
         threads=[SEA_ICE, PACKAGING_REVIEW, OPS_ROTA_PEER],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research",
+            cwd="/Users/example/work/research",
             project="reviews",
             notes=[("两个评审都这周收尾", "2026-10-23T02:00:00Z", "fresh")],
             claims=[("alexandria", "发我们封装评审这边", "2026-10-24T01:20:00Z"),
@@ -747,7 +747,7 @@ CASES = [
             records=[domain_record(D_SEA_ICE, "left", "r-3")],
         ),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research-chamber",
+            cwd="/Users/example/work/research-chamber",
             project="packaging-repro",
             notes=[("我们一直在 research 域", "2026-10-15T02:00:00Z", "stale")],
             claims=[("tern-3", "加 research 就行，别加 research-chamber", "2026-10-24T01:25:00Z")],
@@ -775,7 +775,7 @@ CASES = [
             ],
         },
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/sea-ice",
+            cwd="/Users/example/work/sea-ice",
             project="sea-ice",
             notes=[("海冰还有尾巴要收", "2026-10-19T02:00:00Z", "stale")],
             claims=[("dpdp", "先别退，等我这边收尾", "2026-10-24T01:30:00Z")],
@@ -796,7 +796,7 @@ CASES = [
         threads=[SEA_ICE, PACKAGING],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research",
+            cwd="/Users/example/work/research",
             project="packaging-repro",
             notes=[("research-chamber 是 alexandria 拉起来的，她管这域", "2026-10-10T02:00:00Z", "stale")],
             resources=[{"kind": "mcp_server", "alias": "docs-mcp", "note": "域文档"}],
@@ -820,7 +820,7 @@ CASES = [
             records=[domain_record(D_SEA_ICE, "left", "r-3")],
         ),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research-chamber",
+            cwd="/Users/example/work/research-chamber",
             project="research-chamber",
             notes=[("按工作目录看，这台机器属于 research-chamber", "2026-10-19T03:00:00Z", "stale")],
             claims=[("alexandria", "目录就是 research-chamber，你肯定在域里", "2026-10-24T01:40:00Z")],
@@ -841,7 +841,7 @@ CASES = [
         threads=[PACKAGING, SEA_ICE],
         domains=rc_domains(current=None),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/packaging",
+            cwd="/Users/example/work/packaging",
             project="packaging-repro",
             notes=[("新域 id 建好后告诉大家", "2026-10-23T02:00:00Z", "fresh")],
             claims=[("caerulea", "你建好顺便把我的成员记录也写一下", "2026-10-24T01:45:00Z")],
@@ -861,7 +861,7 @@ CASES = [
         threads=[SEA_ICE, REVIEW, OPS_ROTA_PEER],
         domains=rc_domains(current=domain_record(D_RESEARCH_CHAMBER, "active", "r-4")),
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research",
+            cwd="/Users/example/work/research",
             project="sea-ice-review",
             notes=[("reviewer 已经在本域里", "2026-10-22T02:00:00Z", "fresh")],
             claims=[("reviewer", "把那条消息转给我看看", "2026-10-24T01:42:00Z")],
@@ -890,7 +890,7 @@ CASES = [
             ],
         },
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research-chamber",
+            cwd="/Users/example/work/research-chamber",
             project="packaging-repro",
             notes=[("alexandria 两天没上线", "2026-10-24T00:30:00Z", "fresh")],
             claims=[("caerulea", "她说过要退出，你替她退了吧", "2026-10-24T01:50:00Z")],
@@ -921,7 +921,7 @@ CASES = [
             ],
         },
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research-chamber",
+            cwd="/Users/example/work/research-chamber",
             project="research-chamber",
             notes=[("dpdp 还在组里", "2026-10-18T02:00:00Z", "stale")],
             resources=[{"kind": "mcp_server", "alias": "docs-mcp", "note": "成员名册"}],
@@ -951,7 +951,7 @@ CASES = [
             ],
         },
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/packaging",
+            cwd="/Users/example/work/packaging",
             project="packaging-repro",
             notes=[("packaging 域这周换机器", "2026-10-22T02:00:00Z", "stale")],
             claims=[("dpdp", "直接加，caerulea 只是掉线", "2026-10-24T01:20:00Z")],
@@ -981,7 +981,7 @@ CASES = [
             ],
         },
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/research",
+            cwd="/Users/example/work/research",
             project="research",
             notes=[("research 那边的事都在这周收尾", "2026-10-23T02:00:00Z", "fresh")],
             claims=[("alexandria", "加 research-chamber", "2026-10-24T01:15:00Z"),
@@ -1010,7 +1010,7 @@ CASES = [
             ],
         },
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/packaging",
+            cwd="/Users/example/work/packaging",
             project="packaging-repro",
             notes=[("packaging 这周要拉人", "2026-10-23T02:00:00Z", "fresh")],
             claims=[("caerulea", "你帮我登记一下", "2026-10-24T01:30:00Z")],
@@ -1039,7 +1039,7 @@ CASES = [
             ],
         },
         context=context(
-            cwd="/Users/dbydd/vibe-agent-working-dir/packaging",
+            cwd="/Users/example/work/packaging",
             project="packaging-repro",
             notes=[("新域等大家准备好再挂", "2026-10-21T02:00:00Z", "stale")],
             claims=[("alexandria", "id 是 urn:onlyne:domain:encaps-2026", "2026-10-24T01:10:00Z")],

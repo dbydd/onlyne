@@ -446,7 +446,7 @@ def noise_contexts() -> list[dict]:
                             "source_id": "asst-21", "text": "预算表已归档，不再改动。"},
                            )),
         context("c-old-review", TR_REVIEW, (REVIEWER, "msg-40"), "aborted",
-                summary="上一轮评审", session_file="/Users/dbydd/.omp/sessions/old-review.jsonl",
+                summary="上一轮评审", session_file="/Users/example/.omp/sessions/old-review.jsonl",
                 session="live", last_seq="7", last_at="07:55",
                 transcript=({"at": "07:50", "role": "assistant",
                              "source_id": "asst-18", "text": "上一轮评审已中止。"},)),
@@ -542,7 +542,7 @@ def add_case(*args) -> None:
 def c_review(state: str = "running", **kwargs) -> dict:
     params = dict(
         summary="核对第 3 节实验结论",
-        session_file="/Users/dbydd/.omp/sessions/c-review.jsonl",
+        session_file="/Users/example/.omp/sessions/c-review.jsonl",
         session="live",
         last_seq="108",
         last_at="10:12",
@@ -562,7 +562,7 @@ def c_review(state: str = "running", **kwargs) -> dict:
 def c_recalc(state: str = "parked", **kwargs) -> dict:
     params = dict(
         summary="重算第二组数据",
-        session_file="/Users/dbydd/.omp/sessions/c-recalc.jsonl",
+        session_file="/Users/example/.omp/sessions/c-recalc.jsonl",
         session="parked",
         last_seq="44",
         last_at="09:20",
@@ -582,7 +582,7 @@ def c_recalc(state: str = "parked", **kwargs) -> dict:
 def c_data(state: str = "idle", **kwargs) -> dict:
     params = dict(
         summary="整理第二组数据",
-        session_file="/Users/dbydd/.omp/sessions/c-data.jsonl",
+        session_file="/Users/example/.omp/sessions/c-data.jsonl",
         session="live",
         last_seq="61",
         last_at="09:48",
@@ -599,7 +599,7 @@ def c_data(state: str = "idle", **kwargs) -> dict:
 def c_ops(state: str = "running", **kwargs) -> dict:
     params = dict(
         summary="ops 交接记录",
-        session_file="/Users/dbydd/.omp/sessions/c-ops.jsonl",
+        session_file="/Users/example/.omp/sessions/c-ops.jsonl",
         session="live",
         last_seq="52",
         last_at="09:05",
@@ -971,7 +971,7 @@ add_case(
              delivery_kind="补充说明"),
         [c_recalc(), context("c-budget", TR_RESEARCH, (CAERULEA, "msg-33"),
                              "running", summary="预算表修订",
-                             session_file="/Users/dbydd/.omp/sessions/c-budget.jsonl",
+                             session_file="/Users/example/.omp/sessions/c-budget.jsonl",
                              session="live", last_seq="70", last_at="10:18",
                              task="预算表修订", task_status="in_progress",
                              transcript=({"at": "10:18", "role": "assistant",
@@ -1016,7 +1016,7 @@ add_case(
         [c_review("running"),
          context("c-review-b", TR_RESEARCH, (DPDP, "msg-01"), "running",
                  summary="核对第 3 节实验结论（第二次派生）",
-                 session_file="/Users/dbydd/.omp/sessions/c-review-b.jsonl",
+                 session_file="/Users/example/.omp/sessions/c-review-b.jsonl",
                  session="live", last_seq="12", last_at="10:33",
                  task="核对第 3 节实验结论", task_status="in_progress",
                  transcript=({"at": "10:33", "role": "assistant",
@@ -1046,7 +1046,7 @@ add_case(
         [c_review(),
          context("c-review-sub", TR_RESEARCH, (DPDP, "msg-01"), "running",
                  summary="复核数据范围（c-review 的子任务）",
-                 session_file="/Users/dbydd/.omp/sessions/c-review-sub.jsonl",
+                 session_file="/Users/example/.omp/sessions/c-review-sub.jsonl",
                  session="live", last_seq="9", last_at="10:20",
                  task="复核数据范围", task_status="in_progress", parent="c-review",
                  transcript=({"at": "10:20", "role": "assistant",
