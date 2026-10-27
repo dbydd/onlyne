@@ -1,4 +1,5 @@
 import {
+	OnlyneError,
 	trustPhase,
 	type Conversation,
 	type Entry,
@@ -6,12 +7,18 @@ import {
 	type HistoryQuery,
 	type LocalAttention,
 	type MessageRef,
+	type OperationRecord,
 	type Outbound,
 	type Page,
+	type Resource,
+	type ResourceEvent,
+	type ResourceInventory,
+	type ResourceRef,
 	type Thread,
 	type ThreadRef,
 	type TrustPhase,
 } from "@onlyne/lib";
+import { createTranslator } from "@onlyne/node-host/i18n";
 import {
 	InternalUrlRouter,
 	parseInternalUrl,
@@ -20,13 +27,17 @@ import {
 	type ProtocolHandler,
 	type ResolveContext,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { resourceQuery } from "./resources.ts";
 import { getRuntime, type PluginRuntime } from "./runtime.ts";
 import type { ContextRecord } from "./types.ts";
+import { urlsText } from "./urls-text.ts";
 
 type Caller = { main: boolean; agent_id?: string };
 type View = { host: string; parts: string[]; params: URLSearchParams };
 type Rendered = { content: string; contentType: InternalResource["contentType"] };
 type UrlLike = Pick<URL, "hostname" | "pathname" | "search"> & { rawHost?: string; rawPathname?: string };
+
+const t = createTranslator(urlsText);
 
 /** Scan size for collecting a library page sequence; the visible page size is separate. */
 const PAGE = 100;
@@ -43,7 +54,7 @@ const handler: ProtocolHandler = {
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const runtime = getRuntime();
-		if (runtime === undefined) throw new Error("Onlyne is not configured for this project.");
+		if (runtime === undefined) throw new Error(t("notConfigured"));
 		const rendered = await render(runtime, callerOf(runtime, context), viewOf(url));
 		return { url: url.href, content: rendered.content, contentType: rendered.contentType, immutable: true };
 	},
@@ -52,17 +63,19 @@ const handler: ProtocolHandler = {
 	 * Leaf documents for `read`, `grep` and `find`. The root expands into views and
 	 * thread documents; a thread expands into its message documents; the inbox
 	 * expands into the messages its visible attention items name; a conversation
-	 * expands into its messages.
+	 * expands into its messages; a resource collection expands into its readable
+	 * detail documents, and a log or operation collection into its entry records.
 	 */
 	async enumerate(url: InternalUrl, context?: ResolveContext): Promise<Array<{ url: string; content: string }>> {
 		const runtime = getRuntime();
-		if (runtime === undefined) throw new Error("Onlyne is not configured for this project.");
+		if (runtime === undefined) throw new Error(t("notConfigured"));
 		const caller = callerOf(runtime, context);
 		const view = viewOf(url);
 		if (view.host === "") {
 			const urls = caller.agent_id === undefined
 				? []
 				: ["onlyne://inbox", "onlyne://contexts", "onlyne://outbound", "onlyne://conversations"];
+			if (caller.main) urls.push("onlyne://resources");
 			for (const thread of await visibleThreads(runtime, caller)) {
 				urls.push(threadPath(thread.thread_ref));
 			}
@@ -97,7 +110,7 @@ const handler: ProtocolHandler = {
 			return leafDocuments(runtime, caller, conversations.map(conversation => conversationPath(conversation.id)));
 		}
 		if (view.host === "conversations") {
-			const ref = messageRefFromParts(view.parts, "onlyne://conversations/<encoded-sender>/<encoded-id>");
+			const ref = messageRefFromParts(view.parts, t("conversationsShape"));
 			const conversation = await authorizeConversation(runtime, caller, ref);
 			return conversation.messages.map(message => ({
 				url: messagePath(message.message_ref),
@@ -105,9 +118,10 @@ const handler: ProtocolHandler = {
 			}));
 		}
 		if (view.host === "messages") {
-			const ref = messageRefFromParts(view.parts, "onlyne://messages/<encoded-sender>/<encoded-id>");
+			const ref = messageRefFromParts(view.parts, t("messagesShape"));
 			return leafDocuments(runtime, caller, [messagePath(ref)]);
 		}
+		if (view.host === "resources") return resourceLeaves(runtime, caller, view);
 		return leafDocuments(runtime, caller, [`onlyne://${view.host}${view.parts.length === 0 ? "" : `/${view.parts.map(encodeURIComponent).join("/")}`}`]);
 	},
 };
@@ -133,7 +147,7 @@ function viewOf(url: UrlLike): View {
 			try {
 				return decodeURIComponent(part);
 			} catch {
-				throw new Error(`Malformed percent-encoding in onlyne://${raw}. onlyne:// lists the views.`);
+				throw new Error(t("malformedEncoding", { path: raw }));
 			}
 		});
 	return { host: host === "root" ? "" : host, parts, params: new URLSearchParams(url.search ?? "") };
@@ -152,7 +166,7 @@ function json(value: unknown): Rendered {
 }
 
 function routeShape(shape: string): Error {
-	return new Error(`${shape}. onlyne:// lists the views.`);
+	return new Error(t("routeShape", { shape }));
 }
 
 async function render(runtime: PluginRuntime, caller: Caller, view: View): Promise<Rendered> {
@@ -160,75 +174,88 @@ async function render(runtime: PluginRuntime, caller: Caller, view: View): Promi
 	if (view.host === "threads") return renderThreads(runtime, caller, view);
 	if (view.host === "neighbors" || view.host === "peers") {
 		requireSession(caller, "neighbors");
-		if (view.parts.length > 1) throw routeShape("onlyne://neighbors/<node-id> has no further routes");
+		if (view.parts.length > 1) throw routeShape(t("neighborsShape"));
 		if (view.parts.length === 1) return json(await neighborView(runtime, view.parts[0]!));
 		return markdown(await renderNeighbors(runtime, caller, view));
 	}
 	if (view.host === "contexts") {
 		requireSession(caller, "contexts");
-		if (view.parts.length > 0) throw routeShape("onlyne://contexts has no subroutes");
+		if (view.parts.length > 0) throw routeShape(t("contextsShape"));
 		return markdown(await renderContexts(runtime, caller, view));
 	}
 	if (view.host === "inbox") {
 		requireSession(caller, "inbox");
-		if (view.parts.length > 0) throw routeShape("onlyne://inbox has no subroutes");
+		if (view.parts.length > 0) throw routeShape(t("inboxShape"));
 		return renderInbox(runtime, caller, view);
 	}
 	if (view.host === "outbound") return renderOutbound(runtime, caller, view);
 	if (view.host === "conversations") return renderConversations(runtime, caller, view);
 	if (view.host === "messages") {
 		requireSession(caller, "messages");
-		const ref = messageRefFromParts(view.parts, "onlyne://messages/<encoded-sender>/<encoded-id>");
+		const ref = messageRefFromParts(view.parts, t("messagesShape"));
 		await authorizeConversation(runtime, caller, ref);
 		return json(await runtime.node.history.message(runtime.node.auth, ref));
 	}
-	throw new Error(`Unknown onlyne:// route ${view.host}. onlyne:// lists the available views.`);
+	if (view.host === "resources") return renderResources(runtime, caller, view);
+	throw new Error(t("unknownRoute", { host: view.host }));
 }
 
 function requireSession(caller: Caller, view: string): void {
 	if (caller.agent_id !== undefined) return;
-	throw new Error(`onlyne://${view} is private and needs a calling OMP session.`);
+	throw new Error(t("privateSession", { view }));
+}
+
+/** Resource reads are the main session's: a subagent's slice never covers a peer's inventory. */
+function requireMain(caller: Caller, view: string): void {
+	if (caller.main) return;
+	throw new Error(t("mainSessionOnly", { view }));
 }
 
 async function renderRoot(runtime: PluginRuntime, caller: Caller): Promise<string> {
 	const lines = [
-		`# Onlyne · ${runtime.config.node.id}`,
+		t("rootTitle", { node: runtime.config.node.id }),
 		"",
-		`Region: ${runtime.config.region}`,
-		`Endpoint: ${runtime.endpoint}`,
+		t("rootRegion", { region: runtime.config.region }),
+		t("rootEndpoint", { endpoint: runtime.endpoint }),
 	];
 	try {
 		const domains = await runtime.node.domains.list(runtime.node.auth, { page_size: PAGE });
 		const active = domains.items.filter(membership => membership.state === "active");
-		lines.push(`Domain: ${active.length === 0 ? "none active" : active.map(membership => membership.domain_id).join(", ")}`);
+		lines.push(t("rootDomain", {
+			domains: active.length === 0 ? t("rootDomainNone") : active.map(membership => membership.domain_id).join(", "),
+		}));
 	} catch (error) {
-		lines.push(`Domain: unavailable (${error instanceof Error ? error.message : String(error)})`);
+		lines.push(t("rootDomainUnavailable", { message: error instanceof Error ? error.message : String(error) }));
 	}
 	if (caller.agent_id === undefined) {
-		lines.push(
-			"",
-			"Private views need a calling OMP session: onlyne://threads, onlyne://inbox, onlyne://contexts, onlyne://outbound, onlyne://conversations.",
-		);
+		lines.push("", t("rootPrivateViews"), t("rootResourceViews"));
 		return `${lines.join("\n")}\n`;
 	}
 	const records = await scopedRecords(runtime, caller);
 	const threads = await visibleThreads(runtime, caller);
-	lines.push("", `${caller.main ? "Execution contexts" : `Contexts held by ${caller.agent_id}`}: ${records.length}`);
+	lines.push("", caller.main
+		? t("rootContexts", { count: records.length })
+		: t("rootContextsHeld", { agent: caller.agent_id ?? "", count: records.length }));
 	for (const record of records) {
-		const thread = record.thread_ref === undefined ? "" : ` · ${threadKey(record.thread_ref)}`;
-		lines.push(`- \`${record.alias}\` · ${record.state} · ${record.summary}${thread}`);
+		const thread = record.thread_ref === undefined ? "" : t("suffixThread", { key: threadKey(record.thread_ref) });
+		lines.push(t("rootContextRow", { alias: record.alias, state: record.state, summary: record.summary, thread }));
 	}
-	if (records.length === 0) lines.push("No execution contexts.");
-	lines.push("", `Threads: ${threads.length}`);
+	if (records.length === 0) lines.push(t("rootNoContexts"));
+	lines.push("", t("rootThreads", { count: threads.length }));
 	for (const thread of threads) {
-		lines.push(`- **${thread.title}** \`${threadKey(thread.thread_ref)}\` · ${thread.state} · next seq ${thread.next_seq}`);
+		lines.push(t("rootThreadRow", {
+			title: thread.title,
+			key: threadKey(thread.thread_ref),
+			state: thread.state,
+			next: thread.next_seq,
+		}));
 	}
-	if (threads.length === 0) lines.push("No threads.");
+	if (threads.length === 0) lines.push(t("rootNoThreads"));
 	lines.push(
 		"",
-		"Views: onlyne://neighbors, onlyne://threads, onlyne://inbox, onlyne://contexts, onlyne://outbound, onlyne://conversations",
-		"Conversation: onlyne://conversations/<encoded-sender>/<encoded-id> · message: onlyne://messages/<encoded-sender>/<encoded-id>",
-		"Collection views take ?page_size=1..100 (or ?limit=) and ?cursor=; onlyne://conversations also takes ?thread=<node>/<id> and ?message=<node>/<id>.",
+		caller.main ? t("rootViewsResources") : t("rootViews"),
+		t("rootConversation"),
+		t("rootCollection"),
 	);
 	return `${lines.join("\n")}\n`;
 }
@@ -242,25 +269,35 @@ async function renderThreads(runtime: PluginRuntime, caller: Caller, view: View)
 			.sort((left, right) => threadKey(left.thread_ref).localeCompare(threadKey(right.thread_ref)));
 		const index = await historyIndex(runtime, caller);
 		const page = localPage(threads, request, cursorScope("threads", caller, ""), thread => threadKey(thread.thread_ref));
-		const lines = [`# Threads · ${runtime.config.node.id}`, ""];
+		const lines = [t("threadsTitle", { node: runtime.config.node.id }), ""];
 		for (const thread of page.items) {
 			const rows = index.get(threadKey(thread.thread_ref)) ?? [];
 			const first = rows[0];
 			const latest = rows.at(-1);
 			const title = first === undefined ? thread.title : titleOf(first);
-			lines.push(
-				`- **${title}** \`${threadKey(thread.thread_ref)}\` · ${thread.state} · next seq ${thread.next_seq} · ${rows.length} messages`,
-			);
+			lines.push(t("threadRow", {
+				title,
+				key: threadKey(thread.thread_ref),
+				state: thread.state,
+				next: thread.next_seq,
+				count: rows.length,
+			}));
 			if (latest === undefined) {
-				lines.push(`  no local history yet · thread ${threadPath(thread.thread_ref)}`);
+				lines.push(t("threadNoHistory", { url: threadPath(thread.thread_ref) }));
 			} else {
-				lines.push(`  latest ${latest.direction} · ${latest.at ?? "no time"} · ${firstLine(latest.message.msg, SNIPPET_CHARS)}`);
-				lines.push(
-					`  thread ${threadPath(thread.thread_ref)} · latest ${messagePath(latest.message_ref)} · conversation ${conversationPath(latest.message_ref)}`,
-				);
+				lines.push(t("threadLatest", {
+					direction: latest.direction,
+					at: latest.at ?? t("noTime"),
+					snippet: firstLine(latest.message.msg, SNIPPET_CHARS),
+				}));
+				lines.push(t("threadLinks", {
+					thread: threadPath(thread.thread_ref),
+					latest: messagePath(latest.message_ref),
+					conversation: conversationPath(latest.message_ref),
+				}));
 			}
 		}
-		if (page.items.length === 0) lines.push("No threads.");
+		if (page.items.length === 0) lines.push(t("noThreads"));
 		lines.push("", nextLink("threads", request, page.next));
 		return markdown(`${lines.join("\n")}\n`);
 	}
@@ -283,16 +320,16 @@ interface ThreadTarget {
 function threadTarget(parts: string[]): ThreadTarget {
 	const tail = parts.indexOf("messages");
 	if (tail > 0) {
-		if (parts.length !== tail + 2) throw routeShape("onlyne://threads/<alias>/messages/<seq> takes exactly one seq");
+		if (parts.length !== tail + 2) throw routeShape(t("threadSeqShape"));
 		return { alias: parts.slice(0, tail).join("/"), seq: parts[tail + 1]! };
 	}
-	if (parts.length > 2) throw routeShape("onlyne://threads/<alias> has no further routes");
+	if (parts.length > 2) throw routeShape(t("threadAliasShape"));
 	return { alias: parts.join("/") };
 }
 
 async function entryAt(runtime: PluginRuntime, thread: Thread, seq: string): Promise<Entry> {
 	const entry = (await allMessages(runtime, thread.thread_ref)).find(item => item.seq === seq);
-	if (entry === undefined) throw new Error(`No message at ${threadKey(thread.thread_ref)}/${seq}. onlyne:// lists the views.`);
+	if (entry === undefined) throw new Error(t("noMessageAt", { key: threadKey(thread.thread_ref), seq }));
 	return entry;
 }
 
@@ -304,25 +341,34 @@ async function renderThread(runtime: PluginRuntime, thread: Thread): Promise<str
 	const rows = await threadMessages(runtime, thread.thread_ref);
 	const title = rows.length === 0 ? thread.title : titleOf(rows[0]!);
 	const lines = [
-		`# ${title}`,
+		t("threadTitle", { title }),
 		"",
-		`Thread \`${threadKey(thread.thread_ref)}\` · ${thread.state} · next seq ${thread.next_seq} · ${rows.length} messages`,
+		t("threadMeta", {
+			key: threadKey(thread.thread_ref),
+			state: thread.state,
+			next: thread.next_seq,
+			count: rows.length,
+		}),
 		"",
-		"## Members",
+		t("members"),
 		"",
 	];
 	try {
 		const described = await runtime.node.threads.describe(runtime.node.auth, thread.thread_ref);
 		for (const member of described.members) {
-			lines.push(`- \`${member.peer}\` · ${member.state} · ${member.access.length === 0 ? "no access" : member.access.join(", ")}`);
+			lines.push(t("memberRow", {
+				peer: member.peer,
+				state: member.state,
+				access: member.access.length === 0 ? t("noAccess") : member.access.join(", "),
+			}));
 		}
-		if (described.members.length === 0) lines.push("No membership records.");
+		if (described.members.length === 0) lines.push(t("noMembers"));
 	} catch (error) {
-		lines.push(`unavailable: ${error instanceof Error ? error.message : String(error)}`);
+		lines.push(t("unavailable", { message: error instanceof Error ? error.message : String(error) }));
 	}
-	lines.push("", "## Messages", "");
+	lines.push("", t("messages"), "");
 	for (const row of rows) lines.push(renderHistoryRow(row, runtime.config.node.id));
-	if (rows.length === 0) lines.push("No messages.");
+	if (rows.length === 0) lines.push(t("noMessages"));
 	return `${lines.join("\n")}\n`;
 }
 
@@ -332,14 +378,16 @@ async function renderContexts(runtime: PluginRuntime, caller: Caller, view: View
 		.slice()
 		.sort((left, right) => left.alias.localeCompare(right.alias));
 	const page = localPage(records, request, cursorScope("contexts", caller, ""), record => record.alias);
-	const lines = [`# Execution contexts · ${runtime.config.node.id}`, ""];
+	const lines = [t("contextsTitle", { node: runtime.config.node.id }), ""];
 	for (const record of page.items) {
-		const thread = record.thread_ref === undefined ? "" : ` · ${threadKey(record.thread_ref)}`;
-		const agent = record.agent_id === undefined ? "" : ` · ${record.agent_id}`;
-		const source = record.source === undefined ? "" : ` · source ${record.source.sender}/${record.source.id}`;
-		lines.push(`- \`${record.alias}\` · ${record.state} · ${record.summary}${thread}${agent}${source}`);
+		const thread = record.thread_ref === undefined ? "" : t("suffixThread", { key: threadKey(record.thread_ref) });
+		const agent = record.agent_id === undefined ? "" : t("suffixAgent", { agent: record.agent_id });
+		const source = record.source === undefined
+			? ""
+			: t("suffixSource", { ref: `${record.source.sender}/${record.source.id}` });
+		lines.push(t("contextRow", { alias: record.alias, state: record.state, summary: record.summary, thread, agent, source }));
 	}
-	if (page.items.length === 0) lines.push("No registered contexts.");
+	if (page.items.length === 0) lines.push(t("noContexts"));
 	lines.push("", nextLink("contexts", request, page.next));
 	return `${lines.join("\n")}\n`;
 }
@@ -384,14 +432,21 @@ async function renderNeighbors(runtime: PluginRuntime, caller: Caller, view: Vie
 	const request = pageRequest(view);
 	const rows = await neighborRows(runtime);
 	const page = localPage(rows, request, cursorScope("neighbors", caller, ""), row => row.node_id);
-	const lines = [`# Neighbors · ${runtime.config.node.id}`, ""];
+	const lines = [t("neighborsTitle", { node: runtime.config.node.id }), ""];
 	for (const row of page.items) {
-		const region = row.region === undefined ? "no region" : row.region;
-		const seen = row.last_seen === undefined ? "" : ` · last seen ${row.last_seen}`;
-		const fp = row.fingerprint === null ? "" : ` · fp ${row.fingerprint}`;
-		lines.push(`- ${row.node_id} · ${region} · ${row.verified ? "verified" : "unverified"} · handshake: ${row.phase}${seen}${fp}`);
+		const region = row.region === undefined ? t("noRegion") : row.region;
+		const seen = row.last_seen === undefined ? "" : t("suffixLastSeen", { at: row.last_seen });
+		const fp = row.fingerprint === null ? "" : t("suffixFingerprint", { fp: row.fingerprint });
+		lines.push(t("neighborRow", {
+			node: row.node_id,
+			region,
+			verified: row.verified ? t("verified") : t("unverified"),
+			phase: row.phase,
+			seen,
+			fp,
+		}));
 	}
-	if (page.items.length === 0) lines.push("No neighbor nodes have been observed.");
+	if (page.items.length === 0) lines.push(t("noNeighbors"));
 	lines.push("", nextLink("neighbors", request, page.next));
 	return `${lines.join("\n")}\n`;
 }
@@ -399,7 +454,7 @@ async function renderNeighbors(runtime: PluginRuntime, caller: Caller, view: Vie
 async function neighborView(runtime: PluginRuntime, node: string): Promise<NeighborRow> {
 	const rows = await neighborRows(runtime);
 	const row = rows.find(entry => entry.node_id === node);
-	if (row === undefined) throw new Error(`No neighbor is named ${node}. onlyne:// lists the views.`);
+	if (row === undefined) throw new Error(t("noNeighborNamed", { node }));
 	return row;
 }
 
@@ -413,9 +468,9 @@ async function renderInbox(runtime: PluginRuntime, caller: Caller, view: View): 
 		.map(item => inboxRow(runtime, item))
 		.sort((left, right) => left.position.localeCompare(right.position));
 	const page = localPage(rows, request, cursorScope("inbox", caller, ""), row => row.position);
-	const lines = [`# Inbox · ${runtime.config.node.id}`, ""];
+	const lines = [t("inboxTitle", { node: runtime.config.node.id }), ""];
 	for (const row of page.items) lines.push(...row.lines);
-	if (page.items.length === 0) lines.push("No attention items.");
+	if (page.items.length === 0) lines.push(t("noAttention"));
 	lines.push("", nextLink("inbox", request, page.next));
 	return markdown(`${lines.join("\n")}\n`);
 }
@@ -425,16 +480,27 @@ function inboxRow(runtime: PluginRuntime, item: LocalAttention): { position: str
 	const entry = attention.entry;
 	const direction = entry === undefined ? "in" : entry.message.sender === runtime.config.node.id ? "out" : "in";
 	const at = entry?.at;
-	const status = [attention.acked ? "acked" : "pending", attention.disposition === "expired" ? "expired" : ""]
+	const status = [attention.acked ? t("acked") : t("pending"), attention.disposition === "expired" ? t("expired") : ""]
 		.filter(part => part.length > 0)
 		.join(" · ");
 	const ref = attention.message_ref;
 	const position = `${at ?? ""}\u0000${threadKey(attention.thread_ref)}\u0000${attention.seq}`;
 	const lines = [
-		`- \`${threadKey(attention.thread_ref)}/${attention.seq}\` · ${direction} · ${attention.authenticated_author} · ${at ?? "no time"} · ${status}`,
+		t("attentionRow", {
+			key: threadKey(attention.thread_ref),
+			seq: attention.seq,
+			direction,
+			author: attention.authenticated_author,
+			at: at ?? t("noTime"),
+			status,
+		}),
 	];
 	if (entry !== undefined) lines.push(`  ${firstLine(entry.message.msg, SNIPPET_CHARS)}`);
-	lines.push(`  message ${messagePath(ref)} · conversation ${conversationPath(ref)} · entry ${entryPath(attention.thread_ref, attention.seq)}`);
+	lines.push(t("messageLinks", {
+		message: messagePath(ref),
+		conversation: conversationPath(ref),
+		entry: entryPath(attention.thread_ref, attention.seq),
+	}));
 	return { position, lines };
 }
 
@@ -447,15 +513,15 @@ async function renderOutbound(runtime: PluginRuntime, caller: Caller, view: View
 			.map(outbound => outboundRow(outbound))
 			.sort((left, right) => left.position.localeCompare(right.position));
 		const page = localPage(list, request, cursorScope("outbound", caller, ""), row => row.position);
-		const lines = [`# Outbound · ${runtime.config.node.id}`, ""];
+		const lines = [t("outboundTitle", { node: runtime.config.node.id }), ""];
 		for (const row of page.items) lines.push(...row.lines);
-		if (page.items.length === 0) lines.push("No outbound records.");
+		if (page.items.length === 0) lines.push(t("noOutbound"));
 		lines.push("", nextLink("outbound", request, page.next));
 		return markdown(`${lines.join("\n")}\n`);
 	}
-	if (view.parts.length !== 1) throw routeShape("onlyne://outbound/<message-id> has no further routes");
+	if (view.parts.length !== 1) throw routeShape(t("outboundShape"));
 	const found = rows.find(row => row.request.message.id === view.parts[0]);
-	if (found === undefined) throw new Error(`No outbound record is named ${view.parts[0]}. onlyne:// lists the views.`);
+	if (found === undefined) throw new Error(t("noOutboundNamed", { id: view.parts[0]! }));
 	return json(await readableOutbound(runtime, found));
 }
 
@@ -465,12 +531,18 @@ function outboundRow(outbound: Outbound): { position: string; lines: string[] } 
 	const related = message.meta?.in_reply_to;
 	const at = outbound.created_at ?? null;
 	const status = [outbound.state, outbound.error?.code ?? ""].filter(part => part.length > 0).join(" · ");
-	const reply = related === undefined ? "" : ` · reply to ${related.sender}/${related.id}`;
+	const reply = related === undefined ? "" : t("suffixReply", { ref: `${related.sender}/${related.id}` });
 	const position = `${at ?? ""}\u0000${refKey(ref)}`;
 	const lines = [
-		`- \`${ref.id}\` · out → ${outbound.request.target_endpoint} · ${at ?? "no time"} · ${status}${reply}`,
+		t("outboundRow", {
+			id: ref.id,
+			endpoint: outbound.request.target_endpoint,
+			at: at ?? t("noTime"),
+			status,
+			reply,
+		}),
 		`  ${firstLine(message.msg, SNIPPET_CHARS)}`,
-		`  message ${messagePath(ref)} · conversation ${conversationPath(ref)}`,
+		t("outboundLinks", { message: messagePath(ref), conversation: conversationPath(ref) }),
 	];
 	return { position, lines };
 }
@@ -534,41 +606,59 @@ async function renderConversations(runtime: PluginRuntime, caller: Caller, view:
 			cursorScope("conversations", caller, filter.key),
 			conversation => `${conversation.last_at ?? ""}\u0000${refKey(conversation.id)}`,
 		);
-		const lines = [`# Conversations · ${runtime.config.node.id}`, ""];
+		const lines = [t("conversationsTitle", { node: runtime.config.node.id }), ""];
 		for (const conversation of page.items) {
 			const latest = conversation.messages.at(-1);
 			const title = conversation.title.length > 0
 				? conversation.title
 				: latest === undefined ? refKey(conversation.id) : titleOf(latest);
-			lines.push(
-				`- **${title}** \`${refKey(conversation.id)}\` · ${conversation.messages.length} messages · last ${conversation.last_at ?? "unknown"}`,
-			);
+			lines.push(t("conversationRow", {
+				title,
+				key: refKey(conversation.id),
+				count: conversation.messages.length,
+				at: conversation.last_at ?? t("conversationUnknown"),
+			}));
 			if (latest === undefined) {
-				lines.push(`  conversation ${conversationPath(conversation.id)}`);
+				lines.push(t("conversationOnly", { url: conversationPath(conversation.id) }));
 			} else {
-				lines.push(`  latest ${latest.direction} · ${latest.at ?? "no time"} · ${firstLine(latest.message.msg, SNIPPET_CHARS)}`);
-				lines.push(`  conversation ${conversationPath(conversation.id)} · message ${messagePath(latest.message_ref)}`);
+				lines.push(t("conversationLatest", {
+					direction: latest.direction,
+					at: latest.at ?? t("noTime"),
+					snippet: firstLine(latest.message.msg, SNIPPET_CHARS),
+				}));
+				lines.push(t("conversationLinks", {
+					conversation: conversationPath(conversation.id),
+					message: messagePath(latest.message_ref),
+				}));
 			}
-			if (conversation.thread_refs.length > 0) lines.push(`  threads ${conversation.thread_refs.map(threadPath).join(", ")}`);
+			if (conversation.thread_refs.length > 0) {
+				lines.push(t("conversationThreads", { threads: conversation.thread_refs.map(threadPath).join(", ") }));
+			}
 		}
-		if (page.items.length === 0) lines.push("No conversations.");
+		if (page.items.length === 0) lines.push(t("noConversations"));
 		lines.push("", nextLink("conversations", request, page.next, filter.params));
 		return markdown(`${lines.join("\n")}\n`);
 	}
-	if (view.parts.length !== 2) throw routeShape("onlyne://conversations/<encoded-sender>/<encoded-id> takes exactly two segments");
+	if (view.parts.length !== 2) throw routeShape(t("conversationsShape"));
 	const ref: MessageRef = { sender: view.parts[0]!, id: view.parts[1]! };
 	const conversation = await authorizeConversation(runtime, caller, ref);
 	const rows = conversation.messages;
 	const title = conversation.title.length > 0 ? conversation.title : rows.length === 0 ? refKey(ref) : titleOf(rows[0]!);
 	const lines = [
-		`# ${title}`,
+		t("threadTitle", { title }),
 		"",
-		`Conversation \`${refKey(ref)}\` · ${rows.length} messages · last ${conversation.last_at ?? "unknown"}`,
+		t("conversationMeta", {
+			key: refKey(ref),
+			count: rows.length,
+			at: conversation.last_at ?? t("conversationUnknown"),
+		}),
 	];
-	if (conversation.thread_refs.length > 0) lines.push(`Threads: ${conversation.thread_refs.map(threadPath).join(", ")}`);
-	lines.push("", "## Messages", "");
+	if (conversation.thread_refs.length > 0) {
+		lines.push(t("threadsList", { threads: conversation.thread_refs.map(threadPath).join(", ") }));
+	}
+	lines.push("", t("messages"), "");
 	for (const row of rows) lines.push(renderHistoryRow(row, runtime.config.node.id));
-	if (rows.length === 0) lines.push("No messages.");
+	if (rows.length === 0) lines.push(t("noMessages"));
 	return markdown(`${lines.join("\n")}\n`);
 }
 
@@ -604,13 +694,13 @@ function conversationFilter(view: View): ConversationFilter {
 function parsePair(raw: string, label: string): [string, string] {
 	const parts = raw.split("/");
 	if (parts.length !== 2 || parts[0] === undefined || parts[0].length === 0 || parts[1] === undefined || parts[1].length === 0) {
-		throw routeShape(`?${label}= must be <node>/<id>`);
+		throw routeShape(t("pairShape", { label }));
 	}
 	return [parts[0]!, parts[1]!];
 }
 
 function messageRefFromParts(parts: string[], shape: string): MessageRef {
-	if (parts.length !== 2) throw routeShape(`${shape} takes exactly two segments`);
+	if (parts.length !== 2) throw routeShape(shape);
 	return { sender: parts[0]!, id: parts[1]! };
 }
 
@@ -676,9 +766,9 @@ async function findThread(runtime: PluginRuntime, caller: Caller, alias: string)
 		threadKey(thread.thread_ref) === alias,
 	);
 	if (matches.length === 1) return matches[0]!;
-	if (matches.length > 1) throw new Error(`More than one thread is named ${alias}.`);
-	if (!caller.main && caller.agent_id !== undefined) throw new Error(`This session holds no read slice for thread ${alias}.`);
-	throw new Error(`No thread is named ${alias}. onlyne:// lists the views.`);
+	if (matches.length > 1) throw new Error(t("manyThreadsNamed", { alias }));
+	if (!caller.main && caller.agent_id !== undefined) throw new Error(t("noThreadSlice", { alias }));
+	throw new Error(t("noThreadNamed", { alias }));
 }
 
 /** Contexts this caller may see: every node-local record for the main session, its own records otherwise. */
@@ -817,9 +907,294 @@ async function authorizeConversation(runtime: PluginRuntime, caller: Caller, ref
 	if (caller.main) return conversation;
 	const records = await scopedRecords(runtime, caller);
 	if (!conversationPermitted(conversation, allowedThreads(records), sourceRefs(records))) {
-		throw new Error(`This session holds no read slice for conversation ${refKey(ref)}.`);
+		throw new Error(t("noConversationSlice", { key: refKey(ref) }));
 	}
 	return conversation;
+}
+
+/**
+ * Resource views. Reads go through the library client so every peer page is a signed
+ * request, and the caller boundary is checked before any query runs: resources are
+ * the main session's channel, never a subagent's slice.
+ */
+async function renderResources(runtime: PluginRuntime, caller: Caller, view: View): Promise<Rendered> {
+	requireMain(caller, "resources");
+	const parts = view.parts;
+	if (parts.length === 0) {
+		const request = pageRequest(view);
+		if (request.cursor !== undefined) throw routeShape(t("resourceCursorOneOwner"));
+		const query = await resourceQuery(runtime.node, { op: "list", page_size: request.size });
+		const inventory = (await runtime.node.client.readResources(query)) as ResourceInventory;
+		return markdown(renderInventory(runtime, inventory, request));
+	}
+	const owner = parts[0]!;
+	if (parts.length === 1) {
+		const request = pageRequest(view);
+		const query = await resourceQuery(runtime.node, {
+			op: "list",
+			owner,
+			page_size: request.size,
+			...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+		});
+		const inventory = (await runtime.node.client.readResources(query)) as ResourceInventory;
+		return markdown(renderInventory(runtime, inventory, request));
+	}
+	const ref: ResourceRef = { owner, id: parts[1]! };
+	if (parts.length === 2) {
+		const query = await resourceQuery(runtime.node, { op: "describe", resource: ref });
+		return json(await runtime.node.client.readResources(query));
+	}
+	const tail = parts[2]!;
+	if (tail === "log") {
+		if (parts.length === 3) {
+			const request = pageRequest(view);
+			const since = view.params.get("since") ?? undefined;
+			const query = await resourceQuery(runtime.node, {
+				op: "log",
+				resource: ref,
+				page_size: request.size,
+				...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+				...(since === undefined ? {} : { since }),
+			});
+			const page = (await runtime.node.client.readResources(query)) as Page<ResourceEvent>;
+			return markdown(renderLog(ref, page, request, since));
+		}
+		if (parts.length === 4) {
+			const query = await resourceQuery(runtime.node, { op: "event", resource: ref, event_id: parts[3]! });
+			return json(await runtime.node.client.readResources(query));
+		}
+		throw routeShape(t("resourceLogShape"));
+	}
+	if (tail === "operations") {
+		if (parts.length === 3) {
+			const request = pageRequest(view);
+			const query = await resourceQuery(runtime.node, {
+				op: "operations",
+				resource: ref,
+				page_size: request.size,
+				...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+			});
+			const page = (await runtime.node.client.readResources(query)) as Page<OperationRecord>;
+			return markdown(renderOperations(ref, page, request));
+		}
+		if (parts.length === 4) {
+			// Status is read directly: a former handler keeps its own operation record after
+			// a handover, and an extra describe first would refuse the very access this route exists for.
+			const query = await resourceQuery(runtime.node, { op: "status", resource: ref, operation_id: parts[3]! });
+			return json(await runtime.node.client.readResources(query));
+		}
+		throw routeShape(t("resourceOperationsShape"));
+	}
+	throw routeShape(t("resourceShape"));
+}
+
+function renderInventory(runtime: PluginRuntime, inventory: ResourceInventory, request: PageRequest): string {
+	const lines = [t("resourcesTitle", { node: runtime.config.node.id }), ""];
+	for (const entry of inventory.owners) {
+		lines.push(`## ${entry.owner}`);
+		if ("error" in entry) {
+			lines.push(t("resourceOwnerError", { code: entry.error.code, message: entry.error.message }));
+			continue;
+		}
+		if (entry.page.items.length === 0) lines.push(t("noResources"));
+		for (const resource of entry.page.items) {
+			const ref = resource.resource_ref;
+			lines.push(t("resourceRow", {
+				id: ref.id,
+				kind: resource.kind,
+				operations: resource.operations.length === 0 ? t("noOperations") : resource.operations.join(", "),
+				handler: resource.binding.handler,
+				cursor: resource.binding.cursor,
+				revision: resource.revision,
+				event_seq: resource.event_seq,
+			}));
+			lines.push(t("resourceLinks", {
+				detail: resourcePath(ref),
+				log: resourceLogPath(ref),
+				operations: resourceOperationsPath(ref),
+			}));
+		}
+		// A list cursor names one owner, so its continuation leaves the aggregate route.
+		if (entry.page.next_cursor !== null) {
+			lines.push(nextLink(`resources/${encodeURIComponent(entry.owner)}`, request, entry.page.next_cursor));
+		}
+	}
+	return `${lines.join("\n")}\n`;
+}
+
+function renderLog(ref: ResourceRef, page: Page<ResourceEvent>, request: PageRequest, since: string | undefined): string {
+	const lines = [t("resourceLogTitle", { resource: `${ref.owner}/${ref.id}` }), ""];
+	for (const event of page.items) {
+		lines.push(t("eventRow", {
+			id: event.event_id,
+			source: event.source_id,
+			at: event.at,
+			expires: event.expires_at,
+			expired: event.expired ? t("suffixExpired") : "",
+		}));
+		lines.push(t("eventLink", { url: resourceEventPath(ref, event.event_id) }));
+	}
+	if (page.items.length === 0) lines.push(t("noEvents"));
+	lines.push("", nextLink(
+		`resources/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}/log`,
+		request,
+		page.next_cursor,
+		since === undefined ? {} : { since },
+	));
+	return `${lines.join("\n")}\n`;
+}
+
+function renderOperations(ref: ResourceRef, page: Page<OperationRecord>, request: PageRequest): string {
+	const lines = [t("resourceOperationsTitle", { resource: `${ref.owner}/${ref.id}` }), ""];
+	for (const record of page.items) {
+		const id = record.request.operation_id;
+		lines.push(t("operationRow", {
+			id,
+			operation: record.request.operation,
+			state: record.result.state,
+			actor: record.actor,
+			at: record.accepted_at,
+		}));
+		lines.push(t("statusLink", { url: resourceStatusPath(ref, id) }));
+	}
+	if (page.items.length === 0) lines.push(t("noOperationRecords"));
+	lines.push("", nextLink(
+		`resources/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}/operations`,
+		request,
+		page.next_cursor,
+	));
+	return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Resource enumeration. A collection expands into the detail documents the caller may
+ * read; a log or operation collection expands into its entry records with the same
+ * filters the route accepts. The main-session check runs before any query.
+ */
+async function resourceLeaves(
+	runtime: PluginRuntime,
+	caller: Caller,
+	view: View,
+): Promise<Array<{ url: string; content: string }>> {
+	requireMain(caller, "resources");
+	const parts = view.parts;
+	if (parts.length === 0) {
+		if (view.params.get("cursor") !== null) throw routeShape(t("resourceCursorOneOwner"));
+		return detailLeaves(runtime, await listResources(runtime));
+	}
+	const owner = parts[0]!;
+	if (parts.length === 1) {
+		return detailLeaves(runtime, await listResources(runtime, owner));
+	}
+	const ref: ResourceRef = { owner, id: parts[1]! };
+	if (parts.length === 2) return leafDocuments(runtime, caller, [resourcePath(ref)]);
+	const tail = parts[2]!;
+	if (tail !== "log" && tail !== "operations") throw routeShape(t("resourceShape"));
+	if (parts.length === 3) {
+		const request = pageRequest(view);
+		if (tail === "log") {
+			const since = view.params.get("since") ?? undefined;
+			const query = await resourceQuery(runtime.node, {
+				op: "log",
+				resource: ref,
+				page_size: request.size,
+				...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+				...(since === undefined ? {} : { since }),
+			});
+			const page = (await runtime.node.client.readResources(query)) as Page<ResourceEvent>;
+			return page.items.map(event => ({
+				url: resourceEventPath(ref, event.event_id),
+				content: `${JSON.stringify(event, null, 2)}\n`,
+			}));
+		}
+		const query = await resourceQuery(runtime.node, {
+			op: "operations",
+			resource: ref,
+			page_size: request.size,
+			...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+		});
+		const page = (await runtime.node.client.readResources(query)) as Page<OperationRecord>;
+		return page.items.map(record => ({
+			url: resourceStatusPath(ref, record.request.operation_id),
+			content: `${JSON.stringify(record, null, 2)}\n`,
+		}));
+	}
+	if (parts.length === 4) {
+		return leafDocuments(runtime, caller, [
+			tail === "log" ? resourceEventPath(ref, parts[3]!) : resourceStatusPath(ref, parts[3]!),
+		]);
+	}
+	throw routeShape(tail === "log" ? t("resourceLogShape") : t("resourceOperationsShape"));
+}
+
+/** Every resource in the caller's inventory, across owner pages; enumeration is not a view page. */
+async function listResources(runtime: PluginRuntime, owner?: string): Promise<Resource[]> {
+	const first = (await runtime.node.client.readResources(await resourceQuery(runtime.node, {
+		op: "list",
+		page_size: PAGE,
+		...(owner === undefined ? {} : { owner }),
+	}))) as ResourceInventory;
+	const resources: Resource[] = [];
+	for (const entry of first.owners) {
+		if ("error" in entry) continue;
+		resources.push(...entry.page.items);
+		let cursor = entry.page.next_cursor;
+		for (let page = 0; cursor !== null; page++) {
+			if (page >= MAX_PAGES) throw new Error(t("paginationCap"));
+			const next = (await runtime.node.client.readResources(await resourceQuery(runtime.node, {
+				op: "list",
+				owner: entry.owner,
+				page_size: PAGE,
+				cursor,
+			}))) as ResourceInventory;
+			const row = next.owners[0];
+			if (row === undefined || "error" in row) break;
+			resources.push(...row.page.items);
+			cursor = row.page.next_cursor;
+		}
+	}
+	return resources;
+}
+
+/** One detail document per readable resource; a list row the caller cannot describe is not a leaf. */
+async function detailLeaves(
+	runtime: PluginRuntime,
+	resources: Resource[],
+): Promise<Array<{ url: string; content: string }>> {
+	const leaves: Array<{ url: string; content: string }> = [];
+	for (const resource of resources) {
+		const ref = resource.resource_ref;
+		try {
+			const query = await resourceQuery(runtime.node, { op: "describe", resource: ref });
+			const described = await runtime.node.client.readResources(query);
+			leaves.push({ url: resourcePath(ref), content: `${JSON.stringify(described, null, 2)}\n` });
+		} catch (error) {
+			// The listing already filtered readability; a resource that changed between the
+			// list and the describe simply has no detail leaf to enumerate.
+			if (!(error instanceof OnlyneError)) throw error;
+		}
+	}
+	return leaves;
+}
+
+function resourcePath(ref: ResourceRef): string {
+	return `onlyne://resources/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`;
+}
+
+function resourceLogPath(ref: ResourceRef): string {
+	return `${resourcePath(ref)}/log`;
+}
+
+function resourceEventPath(ref: ResourceRef, eventId: string): string {
+	return `${resourceLogPath(ref)}/${encodeURIComponent(eventId)}`;
+}
+
+function resourceOperationsPath(ref: ResourceRef): string {
+	return `${resourcePath(ref)}/operations`;
+}
+
+function resourceStatusPath(ref: ResourceRef, operationId: string): string {
+	return `${resourceOperationsPath(ref)}/${encodeURIComponent(operationId)}`;
 }
 
 async function collect<T>(fetch: (cursor?: string) => Promise<Page<T>>): Promise<T[]> {
@@ -832,7 +1207,7 @@ async function collect<T>(fetch: (cursor?: string) => Promise<Page<T>>): Promise
 		if (next === undefined) return items;
 		cursor = next;
 	}
-	throw new Error("onlyne:// pagination did not terminate within the page cap.");
+	throw new Error(t("paginationCap"));
 }
 
 interface PageRequest {
@@ -844,12 +1219,12 @@ function pageRequest(view: View): PageRequest {
 	const explicit = view.params.get("page_size");
 	const alias = view.params.get("limit");
 	if (explicit !== null && alias !== null && explicit !== alias) {
-		throw routeShape("?page_size and ?limit disagree; pass one");
+		throw routeShape(t("pageSizeDisagree"));
 	}
 	const raw = explicit ?? alias;
 	const size = raw === null ? DEFAULT_PAGE : Number(raw);
 	if (!Number.isInteger(size) || size < 1 || size > MAX_PAGE) {
-		throw routeShape(`?page_size must be an integer from 1 to ${MAX_PAGE}`);
+		throw routeShape(t("pageSizeRange", { max: MAX_PAGE }));
 	}
 	const cursor = view.params.get("cursor");
 	return { size, ...(cursor === null || cursor.length === 0 ? {} : { cursor }) };
@@ -864,11 +1239,11 @@ function decodeCursor(scope: string, cursor: string): string {
 	try {
 		parsed = JSON.parse(decodeURIComponent(cursor));
 	} catch {
-		throw routeShape("Invalid ?cursor; start the list again without one");
+		throw routeShape(t("invalidCursor"));
 	}
 	const record = parsed as { scope?: unknown; after?: unknown } | null;
 	if (record === null || typeof record !== "object" || record.scope !== scope || typeof record.after !== "string") {
-		throw routeShape("This ?cursor belongs to another view, caller or query; start the list again without one");
+		throw routeShape(t("foreignCursor"));
 	}
 	return record.after;
 }
@@ -885,12 +1260,12 @@ function localPage<T>(items: T[], request: PageRequest, scope: string, position:
 }
 
 function nextLink(route: string, request: PageRequest, next: string | null, filters: Record<string, string> = {}): string {
-	if (next === null) return "End of list.";
+	if (next === null) return t("endOfList");
 	const params = new URLSearchParams();
 	for (const [key, value] of Object.entries(filters)) params.set(key, value);
 	params.set("page_size", String(request.size));
 	params.set("cursor", next);
-	return `Next: onlyne://${route}?${params.toString()}`;
+	return t("next", { url: `onlyne://${route}?${params.toString()}` });
 }
 
 function refKey(ref: MessageRef): string {
@@ -947,16 +1322,26 @@ function renderHistoryRow(row: HistoryMessage, nodeId: string): string {
 	const related = row.message.meta?.in_reply_to;
 	const status = [
 		row.delivery,
-		row.consumption === undefined ? "" : `consumption ${row.consumption}`,
-		row.guarantee === undefined ? "" : `guarantee ${row.guarantee}`,
-		row.error === undefined ? "" : `error ${row.error.code}`,
+		row.consumption === undefined ? "" : t("consumptionSuffix", { value: row.consumption }),
+		row.guarantee === undefined ? "" : t("guaranteeSuffix", { value: row.guarantee }),
+		row.error === undefined ? "" : t("errorSuffix", { code: row.error.code }),
 	].filter(part => part.length > 0).join(" · ");
 	const lines = [
-		`${row.seq === undefined ? "" : `[${row.seq}] `}${row.direction} · ${ref.sender} · ${row.at ?? "no time"} · ${status}`,
+		t("historyRow", {
+			prefix: row.seq === undefined ? "" : t("historySeqPrefix", { seq: row.seq }),
+			direction: row.direction,
+			sender: ref.sender,
+			at: row.at ?? t("noTime"),
+			status,
+		}),
 	];
-	if (related !== undefined) lines.push(`  → reply to ${related.sender}/${related.id} · ${messagePath(related)}`);
-	const entry = thread === undefined || row.seq === undefined || thread.owner !== nodeId ? "" : ` · entry ${entryPath(thread, row.seq)}`;
-	lines.push(`  message ${messagePath(ref)} · conversation ${conversationPath(ref)}${entry}`);
+	if (related !== undefined) {
+		lines.push(t("replyTo", { ref: `${related.sender}/${related.id}`, url: messagePath(related) }));
+	}
+	const entry = thread === undefined || row.seq === undefined || thread.owner !== nodeId
+		? ""
+		: t("suffixEntry", { url: entryPath(thread, row.seq) });
+	lines.push(t("historyLinks", { message: messagePath(ref), conversation: conversationPath(ref), entry }));
 	for (const line of row.message.msg.split(/\r?\n/)) lines.push(`  > ${line}`);
 	return lines.join("\n");
 }
