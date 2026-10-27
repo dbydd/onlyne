@@ -1,9 +1,11 @@
 import type { MessageRenderer } from "@oh-my-pi/pi-coding-agent";
+import { getLocale } from "@onlyne/node-host/i18n";
 import { Markdown, Text, getMarkdownTheme, node, span, text, type Component, type NativeNode, type Theme, type TspSpan } from "@oh-my-pi/pi-tui";
 import type { HistoryMessage, MessageRef, ThreadRef } from "@onlyne/lib";
 import { shortNodeId } from "../config.ts";
 import { getRuntime, type PluginRuntime } from "../runtime.ts";
 import { conversationPath, messagePath } from "../urls.ts";
+import { t } from "./bootstrap-text.ts";
 
 export interface OnlyneMessageDetails {
 	thread_ref: ThreadRef;
@@ -81,6 +83,7 @@ class MailMessage implements Component {
 	private rendered: readonly string[] | undefined;
 	private refreshing = false;
 	private readonly body: Markdown;
+	private locale = getLocale();
 
 	constructor(
 		private readonly details: OnlyneMessageDetails,
@@ -119,10 +122,12 @@ class MailMessage implements Component {
 	}
 
 	describe(): NativeNode {
+		this.dropLocaleCaches();
 		return this.native ??= this.describeCard();
 	}
 
 	render(width: number): readonly string[] {
+		this.dropLocaleCaches();
 		if (this.rendered !== undefined) return this.rendered;
 		const mail = this.details.mail;
 		if (mail === undefined) return this.rendered = [];
@@ -141,7 +146,11 @@ class MailMessage implements Component {
 	}
 
 	private label(): string {
-		return this.kind === "onlyne.supplement" ? "补笺" : this.kind === "onlyne.routing" ? "转递" : "来信";
+		return this.kind === "onlyne.supplement"
+			? t("mail.supplement")
+			: this.kind === "onlyne.routing"
+				? t("mail.routing")
+				: t("mail.letter");
 	}
 
 	private heading(): string {
@@ -153,13 +162,19 @@ class MailMessage implements Component {
 		const mail = this.details.mail;
 		if (mail === undefined) return "";
 		const fields = [
-			`${this.theme.fg("muted", "From:")} ${shortNodeId(mail.from)} <${mail.from}>`,
-			`${this.theme.fg("muted", "Date:")} ${mail.at}`,
-			`${this.theme.fg("muted", "Thread:")} ${this.details.thread_ref.owner}/${this.details.thread_ref.id} #${this.details.seq}`,
-			...(mail.relation === undefined ? [] : [`${this.theme.fg("muted", "Relation:")} ${mail.relation}`]),
-			...(mail.in_reply_to === undefined ? [] : [`${this.theme.fg("muted", "In-Reply-To:")} ${mail.in_reply_to.sender}/${mail.in_reply_to.id}`]),
-			`${this.theme.fg("muted", "Delivery:")} ${this.status.delivery}${this.status.consumption === undefined ? "" : ` · consumed ${this.status.consumption}`}`,
-			...(this.status.error === undefined ? [] : [`${this.theme.fg("muted", "Status:")} unknown (${this.status.error})`]),
+			`${this.theme.fg("muted", `${t("mail.from")}:`)} ${shortNodeId(mail.from)} <${mail.from}>`,
+			`${this.theme.fg("muted", `${t("mail.date")}:`)} ${mail.at}`,
+			`${this.theme.fg("muted", `${t("mail.thread")}:`)} ${this.details.thread_ref.owner}/${this.details.thread_ref.id} #${this.details.seq}`,
+			...(mail.relation === undefined ? [] : [`${this.theme.fg("muted", `${t("mail.relation")}:`)} ${mail.relation}`]),
+			...(mail.in_reply_to === undefined
+				? []
+				: [`${this.theme.fg("muted", `${t("mail.inReplyTo")}:`)} ${mail.in_reply_to.sender}/${mail.in_reply_to.id}`]),
+			`${this.theme.fg("muted", `${t("mail.delivery")}:`)} ${this.status.delivery}${
+				this.status.consumption === undefined ? "" : t("mail.consumed", { state: this.status.consumption })
+			}`,
+			...(this.status.error === undefined
+				? []
+				: [`${this.theme.fg("muted", `${t("mail.status")}:`)} unknown (${this.status.error})`]),
 		];
 		return [this.theme.fg("accent", this.theme.bold(this.heading())), ...fields].join("\n");
 	}
@@ -176,15 +191,15 @@ class MailMessage implements Component {
 		const replyHref = mail.in_reply_to === undefined ? undefined : messagePath(mail.in_reply_to);
 		const fields: Array<{ k: string; v: TspSpan[] }> = [
 			{
-				k: "From",
+				k: t("mail.from"),
 				v: [
 					span(shortNodeId(mail.from), "link mono", { href: `onlyne://neighbors/${encodeURIComponent(mail.from)}` }),
 					span(` <${mail.from}>`, "muted mono"),
 				],
 			},
-			{ k: "Date", v: [span(mail.at, "mono")] },
+			{ k: t("mail.date"), v: [span(mail.at, "mono")] },
 			{
-				k: "Thread",
+				k: t("mail.thread"),
 				// Both segments are encoded, so a URN owner stays one segment of the route.
 				v: [
 					span(`${this.details.thread_ref.owner}/${this.details.thread_ref.id}`, "link mono", {
@@ -193,23 +208,25 @@ class MailMessage implements Component {
 					span(` #${this.details.seq}`, "muted mono"),
 				],
 			},
-			...(mail.relation === undefined ? [] : [{ k: "Relation", v: [span(mail.relation, "mono")] }]),
+			...(mail.relation === undefined ? [] : [{ k: t("mail.relation"), v: [span(mail.relation, "mono")] }]),
 			...(mail.in_reply_to === undefined || replyHref === undefined
 				? []
 				: [{
-						k: "In-Reply-To",
+						k: t("mail.inReplyTo"),
 						v: [span(`${mail.in_reply_to.sender}/${mail.in_reply_to.id}`, "link mono", { href: replyHref })],
 					}]),
 			{
-				k: "Delivery",
+				k: t("mail.delivery"),
 				v: [
 					span(this.status.delivery, this.status.delivery === "received" ? "mono" : "warning mono"),
-					...(this.status.consumption === undefined ? [] : [span(` · consumed ${this.status.consumption}`, "mono")]),
+					...(this.status.consumption === undefined
+						? []
+						: [span(t("mail.consumed", { state: this.status.consumption }), "mono")]),
 				],
 			},
 			...(this.status.error === undefined
 				? []
-				: [{ k: "Status", v: [span(`unknown (${this.status.error})`, "warning mono")] }]),
+				: [{ k: t("mail.status"), v: [span(`unknown (${this.status.error})`, "warning mono")] }]),
 		];
 		return node("card", {
 			role: "onlyne.mail",
@@ -221,11 +238,22 @@ class MailMessage implements Component {
 			node("rule"),
 			text([
 				span(`${this.label()} · #${this.details.seq} · `, "muted mono"),
-				span("原始记录", "link mono", { href: messageHref }),
+				span(t("mail.rawRecord"), "link mono", { href: messageHref }),
 				span(" · ", "muted mono"),
-				span("整段对话", "link mono", { href: conversationPath(this.details.message_ref) }),
+				span(t("mail.wholeThread"), "link mono", { href: conversationPath(this.details.message_ref) }),
 			], { wrap: "word" }),
 		]);
+	}
+
+	/** A locale switch rewrites every label, so the frame caches of the old locale are dropped. */
+	private dropLocaleCaches(): void {
+		const locale = getLocale();
+		if (locale === this.locale) return;
+		this.locale = locale;
+		this.native = undefined;
+		this.headers = undefined;
+		this.footer = undefined;
+		this.rendered = undefined;
 	}
 }
 

@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { getLocale } from "@onlyne/node-host/i18n";
 import {
 	type Component,
 	type DescribeContext,
@@ -18,26 +19,27 @@ import {
 import { configPath, normalizeNodeId, normalizeRegion, normalizeServiceUrl, saveConfig, shortNodeId } from "../config.ts";
 import { startRuntime } from "../runtime.ts";
 import type { OnlyneConfig } from "../types.ts";
+import { t, type UiTextKey } from "./bootstrap-text.ts";
 
 const FIELDS = ["region", "nodeId", "bind", "keyScope", "pageSize", "contact"] as const;
 type FieldName = (typeof FIELDS)[number];
 
-const LABELS: Record<FieldName, string> = {
-	region: "Region",
-	nodeId: "Node id",
-	bind: "Server bind",
-	keyScope: "Node key (project/global/none)",
-	pageSize: "Page size",
-	contact: "Node addresses (optional)",
+const LABELS: Record<FieldName, UiTextKey> = {
+	region: "bootstrap.field.region",
+	nodeId: "bootstrap.field.nodeId",
+	bind: "bootstrap.field.bind",
+	keyScope: "bootstrap.field.keyScope",
+	pageSize: "bootstrap.field.pageSize",
+	contact: "bootstrap.field.contact",
 };
 
-const HINTS: Record<FieldName, string> = {
-	region: "短名保存为 urn:onlyne:region:<短名>",
-	nodeId: "短名保存为 urn:onlyne:agent:<短名>",
-	bind: "127.0.0.1",
-	keyScope: "project：密钥存 .onlyne/keys（git 内需 ignore）；global：存 ~/.config/onlyne/keys；none：回环开发绑定",
-	pageSize: "1..100，默认 50",
-	contact: "自动发现到不了的节点按地址联系；保存为 discovery.seeds，每次启动都会联系。多个地址用逗号分隔",
+const HINTS: Record<FieldName, UiTextKey> = {
+	region: "bootstrap.hint.region",
+	nodeId: "bootstrap.hint.nodeId",
+	bind: "bootstrap.hint.bind",
+	keyScope: "bootstrap.hint.keyScope",
+	pageSize: "bootstrap.hint.pageSize",
+	contact: "bootstrap.hint.contact",
 };
 
 /** The values the command handler derived from Tern and the saved config. */
@@ -63,13 +65,16 @@ export class OnlyneBootstrap implements Component {
 	private error: string | undefined;
 	private described: NativeNode | undefined;
 	private disposed = false;
+	private locale = getLocale();
 	focused = true;
-	readonly nativeOverlay = {
-		role: "onlyne.bootstrap",
-		size: "lg" as const,
-		anchor: "center" as const,
-		head: "Onlyne init",
-	};
+	get nativeOverlay() {
+		return {
+			role: "onlyne.bootstrap",
+			size: "lg" as const,
+			anchor: "center" as const,
+			head: t("bootstrap.overlayHead"),
+		};
+	}
 
 	constructor(
 		private readonly pi: ExtensionAPI,
@@ -81,12 +86,16 @@ export class OnlyneBootstrap implements Component {
 		private readonly signal: AbortSignal,
 	) {
 		this.fields = {
-			region: this.makeField(LABELS.region, defaults.region, HINTS.region),
-			nodeId: this.makeField(LABELS.nodeId, shortNodeId(defaults.nodeId), HINTS.nodeId),
-			bind: this.makeField(LABELS.bind, defaults.bind, HINTS.bind),
-			keyScope: this.makeField(LABELS.keyScope, defaults.keyScope, HINTS.keyScope),
-			pageSize: this.makeField(LABELS.pageSize, String(defaults.pageSize), HINTS.pageSize),
-			contact: this.makeField(LABELS.contact, (defaults.current?.discovery?.seeds ?? []).join(", "), HINTS.contact),
+			region: this.makeField(t(LABELS.region), defaults.region, t(HINTS.region)),
+			nodeId: this.makeField(t(LABELS.nodeId), shortNodeId(defaults.nodeId), t(HINTS.nodeId)),
+			bind: this.makeField(t(LABELS.bind), defaults.bind, t(HINTS.bind)),
+			keyScope: this.makeField(t(LABELS.keyScope), defaults.keyScope, t(HINTS.keyScope)),
+			pageSize: this.makeField(t(LABELS.pageSize), String(defaults.pageSize), t(HINTS.pageSize)),
+			contact: this.makeField(
+				t(LABELS.contact),
+				(defaults.current?.discovery?.seeds ?? []).join(", "),
+				t(HINTS.contact),
+			),
 		};
 	}
 
@@ -122,7 +131,9 @@ export class OnlyneBootstrap implements Component {
 	/** The URI that saving will store; empty input reports the required field instead. */
 	private regionPreview(): string {
 		const raw = this.value("region");
-		return raw.length === 0 ? "Region 必填；短名将保存为 urn:onlyne:region:<短名>" : `将保存为 ${normalizeRegion(raw)}`;
+		return raw.length === 0
+			? t("bootstrap.regionMissing")
+			: t("bootstrap.regionPreview", { uri: normalizeRegion(raw) });
 	}
 
 	private async save(): Promise<void> {
@@ -132,12 +143,12 @@ export class OnlyneBootstrap implements Component {
 		const bind = this.value("bind");
 		const keyScope = this.value("keyScope").trim().toLowerCase();
 		if (region.length === 0) {
-			this.fail("Region 不能为空。");
+			this.fail(t("bootstrap.regionEmpty"));
 			return;
 		}
 		const scope = keyScope === "" ? "project" : keyScope;
 		if (scope !== "project" && scope !== "global" && scope !== "none") {
-			this.fail("Node key 只能是 project、global 或 none。");
+			this.fail(t("bootstrap.keyScopeInvalid"));
 			return;
 		}
 		let seeds: string[];
@@ -165,6 +176,7 @@ export class OnlyneBootstrap implements Component {
 			threads: { page_size: Number(this.value("pageSize")) },
 			...(seeds.length === 0 ? {} : { discovery: { seeds } }),
 			...(previous?.trust === undefined ? {} : { trust: previous.trust }),
+			...(previous?.language === undefined ? {} : { language: previous.language }),
 		};
 		this.saving = true;
 		this.error = undefined;
@@ -181,17 +193,22 @@ export class OnlyneBootstrap implements Component {
 				try { await runtime.contact(seed); }
 				catch (error) {
 					if (this.signal.aborted) return;
-					this.fail(`配置已保存并启动，但 ${seed} 没连上：${error instanceof Error ? error.message : String(error)}`);
+					this.fail(
+						t("bootstrap.seedFailed", {
+							seed,
+							reason: error instanceof Error ? error.message : String(error),
+						}),
+					);
 					return;
 				}
 			}
 			if (this.disposed || this.signal.aborted) return;
-			this.ctx.ui.notify(`Onlyne 已初始化：${config.region}`, "info");
+			this.ctx.ui.notify(t("bootstrap.started", { region: config.region }), "info");
 			this.done();
 		} catch (error) {
 			if (this.signal.aborted) return;
 			const reason = error instanceof Error ? error.message : String(error);
-			this.error = persisted ? `配置已写入，启动失败：${reason}` : `未保存：${reason}`;
+			this.error = persisted ? t("bootstrap.startFailed", { reason }) : t("bootstrap.notSaved", { reason });
 		} finally {
 			if (!this.disposed && !this.signal.aborted) {
 				this.saving = false;
@@ -212,12 +229,15 @@ export class OnlyneBootstrap implements Component {
 			{
 				role: "omp.btn",
 				actions: { click: `onlyne.bootstrap.field.${name}` },
-				title: LABELS[name],
+				title: t(LABELS[name]),
 				tone: selected ? "accent" : undefined,
 			},
 			[
 				node("text", {
-					spans: [span(LABELS[name], "strong"), span(`: ${this.value(name) || "[empty]"}`, "muted")],
+					spans: [
+						span(t(LABELS[name]), "strong"),
+						span(`: ${this.value(name) || t("bootstrap.empty")}`, "muted"),
+					],
 					wrap: "word",
 				}),
 			],
@@ -230,6 +250,10 @@ export class OnlyneBootstrap implements Component {
 	}
 
 	describe(_cx: DescribeContext): NativeNode {
+		if (this.locale !== getLocale()) {
+			this.locale = getLocale();
+			this.described = undefined;
+		}
 		if (this.described !== undefined) return this.described;
 		const body: NativeChild[] = [node("text", { text: this.header(), wrap: "word" })];
 		for (const name of FIELDS) {
@@ -243,11 +267,11 @@ export class OnlyneBootstrap implements Component {
 		if (this.error !== undefined) body.push(node("text", { spans: [span(this.error, "error")], wrap: "word" }));
 		body.push(
 			node("col", { gap: "xs" }, [
-				this.button(this.saving ? "保存中…" : "保存并启动", "onlyne.bootstrap.save"),
-				this.button("取消", "onlyne.bootstrap.cancel"),
+				this.button(this.saving ? t("bootstrap.saving") : t("bootstrap.save"), "onlyne.bootstrap.save"),
+				this.button(t("bootstrap.cancel"), "onlyne.bootstrap.cancel"),
 			]),
 		);
-		body.push(node("text", { text: "Tab/Shift+Tab 换行 · Enter 下一项 · Ctrl+Enter 保存 · Esc 取消", wrap: "word" }));
+		body.push(node("text", { text: t("bootstrap.keys"), wrap: "word" }));
 		this.described = node("card", { role: "onlyne.bootstrap" }, body);
 		return this.described;
 	}
@@ -298,17 +322,21 @@ export class OnlyneBootstrap implements Component {
 	}
 
 	render(width: number): readonly string[] {
-		const lines: string[] = [this.theme.bold("Onlyne init"), this.header()];
+		const lines: string[] = [this.theme.bold(t("bootstrap.title")), this.header()];
 		for (const name of FIELDS) {
 			if (name === this.active && !this.saving) {
 				const draft = this.fields[name];
 				draft.field.focused = this.focused;
 				lines.push(...draft.field.render(width));
-			} else lines.push(`${name === this.active ? ">" : " "} ${LABELS[name]}: ${this.value(name) || "[empty]"}`);
+			} else {
+				lines.push(
+					`${name === this.active ? ">" : " "} ${t(LABELS[name])}: ${this.value(name) || t("bootstrap.empty")}`,
+				);
+			}
 			if (name === "region") lines.push(this.regionPreview());
 		}
 		if (this.error !== undefined) lines.push(this.theme.fg("error", this.error));
-		lines.push("Tab/Shift+Tab 换行 · Enter 下一项 · Ctrl+Enter 保存 · Esc 取消");
+		lines.push(t("bootstrap.keys"));
 		return new Text(lines.join("\n"), 0, 0).render(width);
 	}
 
@@ -317,8 +345,8 @@ export class OnlyneBootstrap implements Component {
 	}
 
 	private header(): string {
-		const existing = this.defaults.current === undefined ? "" : "已存在项目配置，保存将覆盖。";
-		return `${this.defaults.regionSource}。保存后启动本节点并发布发现。${existing}`;
+		const existing = this.defaults.current === undefined ? "" : t("bootstrap.headerExisting");
+		return t("bootstrap.header", { source: this.defaults.regionSource, existing });
 	}
 
 	dispose(): void {

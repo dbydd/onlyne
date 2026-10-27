@@ -1,4 +1,5 @@
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
+import { t } from "./bootstrap-text.ts";
 
 /** Collapse a body to one line without losing the first useful characters. */
 export function oneLine(text: string): string {
@@ -27,20 +28,21 @@ export function clockText(at: string): string {
 
 /**
  * How long ago something happened, in words. `ageText` is the compact column
- * form (`12m`) and glues onto Chinese as "12m前"; a sentence needs the unit
- * spelled out. The first minute reads 刚刚, since "0 分钟前" is not what anyone says.
+ * form (`12m`), which stays untranslated because the unit letter is the whole
+ * label; a sentence needs the unit spelled out in the reader's language. The
+ * first minute reads "just now", since "0 min ago" is not what anyone says.
  */
 export function sinceText(at: string | undefined, now = Date.now()): string {
 	if (at === undefined) return "";
 	const time = Date.parse(at);
 	if (!Number.isFinite(time)) return "";
 	const seconds = Math.max(0, Math.floor((now - time) / 1000));
-	if (seconds < 60) return "刚刚";
+	if (seconds < 60) return t("time.justNow");
 	const minutes = Math.floor(seconds / 60);
-	if (minutes < 60) return `${minutes} 分钟前`;
+	if (minutes < 60) return t("time.minutesAgo", { count: minutes });
 	const hours = Math.floor(minutes / 60);
-	if (hours < 48) return `${hours} 小时前`;
-	return `${Math.floor(hours / 24)} 天前`;
+	if (hours < 48) return t("time.hoursAgo", { count: hours });
+	return t("time.daysAgo", { count: Math.floor(hours / 24) });
 }
 
 /** The head of a thread alias: its first UUID segment, which is what a narrow row can afford. */

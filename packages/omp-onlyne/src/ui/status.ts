@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { getLocale } from "@onlyne/node-host/i18n";
 import {
 	type Component,
 	type NativeNode,
@@ -10,6 +11,7 @@ import {
 import { getRuntime, type PluginRuntime } from "../runtime.ts";
 import type { OnlyneStatus as OnlyneStatusSnapshot } from "../types.ts";
 import { shortNodeId } from "../config.ts";
+import { t } from "./bootstrap-text.ts";
 import { fit, oneLine } from "./format.ts";
 
 const REGION_PREFIX = "urn:onlyne:region:";
@@ -53,6 +55,7 @@ export class OnlyneStatus implements Component {
 	private row: string | undefined;
 	private rows: readonly string[] | undefined;
 	private described: NativeNode | undefined;
+	private locale = getLocale();
 
 	constructor(theme: Theme, requestRender: () => void) {
 		this.theme = theme;
@@ -98,17 +101,17 @@ export class OnlyneStatus implements Component {
 		const snapshot = this.snapshot;
 		if (snapshot === undefined) {
 			return this.runtime === undefined
-				? [{ label: "onlyne", value: "unconfigured", tone: "warning" }]
-				: [{ label: "onlyne", value: "starting", tone: "muted" }];
+				? [{ label: "onlyne", value: t("status.unconfigured"), tone: "warning" }]
+				: [{ label: "onlyne", value: t("status.starting"), tone: "muted" }];
 		}
 		const modules: Module[] = [
-			{ label: "nodes", value: String(snapshot.nodes) },
-			{ label: "neighbors", value: String(snapshot.neighbors) },
-			{ label: "alert", value: String(snapshot.alerts) },
-			{ label: "unread", value: String(snapshot.unread) },
+			{ label: t("status.nodes"), value: String(snapshot.nodes) },
+			{ label: t("status.neighbors"), value: String(snapshot.neighbors) },
+			{ label: t("status.alert"), value: String(snapshot.alerts) },
+			{ label: t("status.unread"), value: String(snapshot.unread) },
 		];
 		if (snapshot.discovery_error !== undefined) {
-			modules.push({ label: "discovery", value: oneLine(snapshot.discovery_error), tone: "warning" });
+			modules.push({ label: t("status.discovery"), value: oneLine(snapshot.discovery_error), tone: "warning" });
 		}
 		return modules;
 	}
@@ -123,6 +126,7 @@ export class OnlyneStatus implements Component {
 
 	/** ANSI: one row with the modules spread across the width, region pinned left. */
 	render(width: number): readonly string[] {
+		this.dropLocaleCaches();
 		const lead = this.lead();
 		const cells = this.modules().map(module => `${module.label} ${module.value}`);
 		const head = lead.text === "" ? "" : `${lead.text}  `;
@@ -140,6 +144,7 @@ export class OnlyneStatus implements Component {
 	}
 
 	describe(): NativeNode {
+		this.dropLocaleCaches();
 		if (this.described !== undefined) return this.described;
 		const lead = this.lead();
 		const children: NativeNode[] = [];
@@ -160,6 +165,16 @@ export class OnlyneStatus implements Component {
 			"status",
 		);
 		return this.described;
+	}
+
+	/** A locale switch rewrites every label, so the frame caches of the old locale are dropped. */
+	private dropLocaleCaches(): void {
+		const locale = getLocale();
+		if (locale === this.locale) return;
+		this.locale = locale;
+		this.row = undefined;
+		this.rows = undefined;
+		this.described = undefined;
 	}
 
 	dispose(): void {
