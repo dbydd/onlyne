@@ -1,15 +1,9 @@
 import type {
-  Auth, Failure, Handover, Json, Mutation, OperationRecord, OperationRequest, OperationResult,
-  Page, PageOptions, Resource, ResourceEvent, ResourceRef, Transaction,
+  AckReceipt, Auth, Failure, HandoverProbe, Json, LogQuery, Mutation, OperationRecord, OperationRequest,
+  OperationResult, Page, PageOptions, ProbeAnswer, Resource, ResourceEvent, ResourceRef, Transaction, Transport,
 } from './types.js';
 import type { Context } from './core.js';
 import { OnlyneError, decimal, fail, key, page, requireValue, same, utc } from './core.js';
-
-/** An accepted handover invitation, keyed by its operation ID. */
-export interface HandoverInvitation extends Handover {
-  record: OperationRecord;
-  accepted_frozen: Resource;
-}
 
 export interface ResourceService {
   register(auth: Auth, resource: Resource): Promise<Resource>;
@@ -19,19 +13,16 @@ export interface ResourceService {
   operation(auth: Auth, ref: ResourceRef, id: string): Promise<OperationRecord>;
   operations(auth: Auth, ref: ResourceRef, options?: PageOptions): Promise<Page<OperationRecord>>;
   receive(auth: Auth, ref: ResourceRef, input: { source_id: string; data: Json; expires_at?: string }): Promise<ResourceEvent>;
-  events(auth: Auth, ref: ResourceRef, options?: PageOptions): Promise<Page<ResourceEvent>>;
+  log(auth: Auth, ref: ResourceRef, options?: LogQuery): Promise<Page<ResourceEvent>>;
   event(auth: Auth, ref: ResourceRef, id: string): Promise<ResourceEvent>;
-  ack(auth: Auth, ref: ResourceRef, id: string, mutation: Mutation): Promise<ResourceEvent>;
-  decideHandover(auth: Auth, ref: ResourceRef, id: string, accepted: boolean, mutation: Mutation): Promise<Handover>;
-  invitations(auth: Auth, options?: PageOptions): Promise<Page<HandoverInvitation>>;
+  ack(auth: Auth, ref: ResourceRef, id: string, mutation: Mutation): Promise<AckReceipt>;
+  /** Target side of a handover: record and answer the probe an endpoint sent (RFC 0006 §4.3). */
+  probe(auth: Auth, probe: HandoverProbe): Promise<ProbeAnswer>;
+  /** The answer this node already recorded for a probe, read back by the initiator after a crash. */
+  probeAnswer(auth: Auth, operationId: string): Promise<ProbeAnswer>;
   recover(): Promise<void>;
 }
 
-const SCOPES: Record<'events' | 'results' | 'control', true> = { events: true, results: true, control: true };
-type Scope = keyof typeof SCOPES;
-const ALL_SCOPES: Scope[] = ['events', 'results', 'control'];
-/** `handover` is the protocol's own operation: it runs through `decideHandover`, never through the driver. */
-const RESERVED: Record<string, true> = { handover: true };
 /**
  * RFC 0006 §1: `read`, `describe` and `list_events` are read-only queries. The endpoint answers
  * them from its own state, so they never reach the driver and never claim an operation id.
@@ -42,23 +33,35 @@ const DRIVER_WAIT_MS = 30_000;
 
 type Settlement = Pick<OperationResult, 'state' | 'data' | 'error'>;
 interface Intent { record: OperationRecord; settle: boolean }
-interface PendingEvent { event: ResourceEvent }
-type RowKind = 'resource' | 'operation' | 'event' | 'source' | 'pending' | 'handover';
+/**
+ * One handover from acceptance to settlement. The intent is durable before the probe leaves,
+ * so a crash mid-handshake is recoverable: `open` is the only unfinished state, and every
+ * other value is already written together with the operation's terminal result.
+ */
+interface HandoverIntent {
+  operation_id: string; resource_ref: ResourceRef; initiator: string; target: string;
+  kind: string; operations: string[]; metadata?: Json;
+  expected_revision: string; deadline: string; cursor: string; digest: string;
+  state: 'open' | 'committed' | 'aborted';
+}
+/** The target's recorded answer, keyed by operation id so a replay returns the first answer. */
+interface ProbeRecord { sender: string; digest: string; answer: ProbeAnswer }
+type RowKind = 'resource' | 'operation' | 'event' | 'source' | 'handover';
 interface Row { ref: ResourceRef; kind: RowKind }
 
 const resourceKey = (ref: ResourceRef) => key('resource', ref.owner, ref.id);
 const operationKey = (ref: ResourceRef, id: string) => key('resource', ref.owner, ref.id, 'operation', id);
 const eventKey = (ref: ResourceRef, id: string) => key('resource', ref.owner, ref.id, 'event', id);
 const sourceKey = (ref: ResourceRef, source: string) => key('resource', ref.owner, ref.id, 'source', source);
-const pendingKey = (ref: ResourceRef) => key('resource', ref.owner, ref.id, 'pending');
 const handoverKey = (ref: ResourceRef, id: string) => key('resource', ref.owner, ref.id, 'handover', id);
+const probeKey = (id: string) => key('probe', id);
 const operationsPrefix = (ref: ResourceRef) => key('resource', ref.owner, ref.id, 'operation');
 const eventsPrefix = (ref: ResourceRef) => key('resource', ref.owner, ref.id, 'event');
 /** Idempotency is scoped per resource: the same platform event or operation ID in two resources must not collide. */
 const resourceScope = (ref: ResourceRef) => `${ref.owner}/${ref.id}`;
 
 const EXTENSIONS: Record<string, RowKind> = {
-  operation: 'operation', event: 'event', source: 'source', pending: 'pending', handover: 'handover',
+  operation: 'operation', event: 'event', source: 'source', handover: 'handover',
 };
 
 /** `key` encodes each part and joins with literal slashes, so rows are recognised by decoding parts, never by matching an encoded fragment. */
@@ -69,7 +72,6 @@ function parseRow(path: string): Row | undefined {
   if (parts.length === 3) return { ref, kind: 'resource' };
   const kind = EXTENSIONS[decodeURIComponent(parts[3]!)];
   if (kind === undefined) return undefined;
-  if (kind === 'pending') return parts.length === 4 ? { ref, kind } : undefined;
   return parts.length === 5 ? { ref, kind } : undefined;
 }
 
@@ -94,75 +96,42 @@ const bySequence = (a: string, b: string): number => {
 const anchor = (record: OperationRecord) => `${String(utc(record.accepted_at)).padStart(15, '0')}:${record.request.operation_id}`;
 const byAnchor = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-/** Read access: a reader or the current assignee. Anyone else gets `not_found`, never existence. */
-function mayRead(resource: Resource, actor: string): boolean {
-  return resource.readers.includes(actor) || resource.assignee === actor;
-}
-
-function mayOperate(resource: Resource, actor: string, operation: string): boolean {
-  if (operation === 'describe' || operation === 'read' || operation === 'list_events') return mayRead(resource, actor);
-  if (operation === 'send') return resource.assignee === actor;
-  // RFC 0006 §5: the initiator is the current assignee or a representative the resource explicitly authorizes.
-  if (operation === 'handover') return resource.assignee === actor || resource.controllers.includes(actor);
-  return resource.controllers.includes(actor);
-}
-
-/** Absent scope moves every right; a list names exactly the rights that move, and everything else keeps its members. */
-function handoverScopes(raw: unknown): Scope[] {
-  if (raw === undefined) return [];
-  if (!Array.isArray(raw)) fail('invalid_request', 'The handover scope is a list of permission names.');
-  const scopes: Scope[] = [];
-  for (const value of raw) {
-    if (typeof value !== 'string' || !SCOPES[value as Scope]) fail('invalid_request', 'Unknown handover scope.');
-    scopes.push(value as Scope);
-  }
-  return scopes;
-}
-
-function visible(resource: Resource, actor: string): boolean {
-  return mayRead(resource, actor) || resource.controllers.includes(actor)
-    || resource.event_recipients.includes(actor) || resource.result_recipients.includes(actor);
-}
-
-function union(target: string[], add: string[]): string[] {
-  return Array.from(new Set([...target, ...add]));
-}
-
-/** Event, result, control, and read rights travel together with the assignee (RFC 0012 authorize table). */
-function normalize(resource: Resource): Resource {
-  const assignee = resource.assignee === undefined ? [] : [resource.assignee];
-  return {
-    ...resource,
-    readers: union(resource.readers, assignee),
-    controllers: union(resource.controllers, assignee),
-    event_recipients: union(resource.event_recipients, assignee),
-    result_recipients: union(resource.result_recipients, assignee),
-  };
-}
-
 /**
- * The scopes a handover names move their list to the target and drop the previous assignee, so the old handler keeps
- * no new control or delivery rights; lists it did not name keep every member. The previous handler stays a reader:
- * it keeps the material it already worked on and still learns the binding it handed over (0006 §7).
+ * RFC 0006 §6: the only two read authorities. The binding grants the current handler its
+ * working view; `log_readers` is a standing grant that a handover must not rewrite.
  */
-function transfer(resource: Resource, target: string, scopes: Scope[]): Resource {
-  const previous = resource.assignee;
-  // The handler role moves with control; a partial handover that leaves control alone keeps the current handler.
-  const next: Resource = { ...resource, ...(scopes.includes('control') ? { assignee: target } : {}) };
-  const withTarget = (list: string[]): string[] => (list.includes(target) ? list : [...list, target]);
-  const withoutPrevious = (list: string[]): string[] => list.filter(member => member !== previous);
-  if (scopes.includes('control')) {
-    next.controllers = withTarget(withoutPrevious(next.controllers));
-    next.readers = withTarget(next.readers);
-  }
-  if (scopes.includes('events')) next.event_recipients = withTarget(withoutPrevious(next.event_recipients));
-  if (scopes.includes('results')) next.result_recipients = withTarget(withoutPrevious(next.result_recipients));
-  return next;
+function mayRead(resource: Resource, actor: string): boolean {
+  return resource.binding.handler === actor || resource.log_readers.includes(actor);
 }
 
-export function createResourceService(ctx: Context): ResourceService {
+/** Every operation except a query belongs to the current handler; there is no second operator (RFC 0006 §3). */
+function mayOperate(resource: Resource, actor: string, operation: string): boolean {
+  if (QUERY[operation]) return mayRead(resource, actor);
+  return resource.binding.handler === actor;
+}
+
+/** A target's answer is only an answer if it names a position or a reason; anything else is a broken peer. */
+function probeAnswerOf(value: unknown): ProbeAnswer {
+  if (typeof value !== 'object' || value === null) fail('unavailable', 'The target answered a probe without a body.');
+  const record = value as { answer?: unknown; cursor?: unknown; reason?: unknown };
+  if (record.answer === 'accept') {
+    if (typeof record.cursor !== 'string') fail('unavailable', 'The target accepted a probe without a cursor.');
+    decimal(record.cursor);
+    return { answer: 'accept', cursor: record.cursor };
+  }
+  if (record.answer === 'reject') {
+    if (typeof record.reason !== 'string' || record.reason.length === 0) fail('unavailable', 'The target rejected a probe without a reason.');
+    return { answer: 'reject', reason: record.reason };
+  }
+  fail('unavailable', 'The target answered a probe with an answer the protocol does not define.');
+}
+
+type ProbeReply = { kind: 'answer'; value: ProbeAnswer } | { kind: 'timeout' } | { kind: 'failed'; error?: unknown };
+/** Only recovery can find no answer at all: the in-call probe either lands or does not. */
+type ProbeOutcome = ProbeReply | { kind: 'missing' };
+
+export function createResourceService(ctx: Context, transport: Transport): ResourceService {
   const drivers = ctx.options.plugins.resources;
-  const mayHandover = ctx.options.plugins.mayHandover;
 
   /**
    * Every request for one operation ID must be identical, actor included: the same caller retries, nobody takes over
@@ -193,11 +162,12 @@ export function createResourceService(ctx: Context): ResourceService {
 
   const intentOf = (ref: ResourceRef, id: string) => ctx.storage.transaction(async tx => tx.get<Intent>(operationKey(ref, id)));
 
-  /** A named target reads that one operation back; the invitation itself grants no resource access (0006 §5). */
-  const invitedTarget = async (ref: ResourceRef, id: string, actor: string): Promise<boolean> => {
-    const invitation = await ctx.storage.transaction(async tx => tx.get<HandoverInvitation>(handoverKey(ref, id)));
-    return invitation !== undefined && invitation.target === actor;
-  };
+  function nextRevision(resource: Resource): string {
+    if (!resource.revision) fail('internal', 'The resource revision is missing.');
+    const revision = ctx.id();
+    if (revision === resource.revision) fail('internal', 'The id source reused the current resource revision.');
+    return revision;
+  }
 
   /**
    * Admission and the claim share one transaction: a concurrent caller either finds the intent already written and only
@@ -228,35 +198,6 @@ export function createResourceService(ctx: Context): ResourceService {
   }
 
   /**
-   * Every permission list the handover does not move must still equal the snapshot taken at acceptance. The lists it
-   * does move are rebuilt from the fresh resource at commit, so only the untouched ones need this comparison.
-   */
-  function frozenStillHolds(fresh: Resource, frozen: Resource, scopes: Scope[]): boolean {
-    const lists: Array<[keyof Resource & ('controllers' | 'readers' | 'event_recipients' | 'result_recipients'), Scope]> = [
-      ['controllers', 'control'], ['readers', 'control'], ['event_recipients', 'events'], ['result_recipients', 'results'],
-    ];
-    for (const [field, scope] of lists) {
-      if (scopes.includes(scope)) continue;
-      if (!same(fresh[field].slice().sort(), frozen[field].slice().sort())) return false;
-    }
-    return scopes.includes('control') || fresh.assignee === frozen.assignee;
-  }
-
-  async function recheck(resource: Resource, invitation: HandoverInvitation, record: OperationRecord): Promise<void> {
-    if (!resource.operations.includes('handover')) fail('unsupported_delivery', 'This resource no longer hands over.');
-    if (!mayHandover) return;
-    if (!(await mayHandover(resource, record.actor, invitation.target))) fail('forbidden', 'The resource driver refused this handover.');
-  }
-
-  function strip(item: HandoverInvitation): Handover {
-    return {
-      operation_id: item.operation_id, resource_ref: item.resource_ref, initiator: item.initiator, target: item.target,
-      expected_revision: item.expected_revision, decision_deadline: item.decision_deadline, accepted: item.accepted,
-      state: item.state, cutoff_event_id: item.cutoff_event_id, ...(item.scope === undefined ? {} : { scope: item.scope }),
-    };
-  }
-
-  /**
    * `replaceUnknown` lets a late or recovered driver outcome correct a record only the local wait gave up on; a
    * committed or aborted result is never overwritten.
    */
@@ -278,117 +219,49 @@ export function createResourceService(ctx: Context): ResourceService {
     return ctx.storage.transaction(async tx => settleWith(tx, ref, id, outcome, replaceUnknown));
   }
 
-  /** Aborted means no external effect: the revision never moved past the expected one. */
-  async function abortWith(tx: Transaction, ref: ResourceRef, id: string): Promise<HandoverInvitation> {
-    const current = requireValue(await tx.get<HandoverInvitation>(handoverKey(ref, id)), 'not_found');
-    if (current.state !== 'pending') return current;
-    const stopped: HandoverInvitation = { ...current, state: 'aborted' };
-    await tx.put(handoverKey(ref, id), stopped);
-    await settleWith(tx, ref, id, { state: 'aborted' });
-    return stopped;
-  }
-
-  const abort = (ref: ResourceRef, id: string) => ctx.storage.transaction(async tx => abortWith(tx, ref, id));
-
-  /** A refused commit stays pending for `recover`; the caller reads back what actually holds instead of a guessed state. */
-  async function currentOr(ref: ResourceRef, id: string): Promise<HandoverInvitation> {
-    return requireValue(await ctx.storage.transaction(async tx => tx.get<HandoverInvitation>(handoverKey(ref, id))));
+  /** The operation's recorded result, for a path that finds the handover already settled. */
+  async function resultOf(tx: Transaction, ref: ResourceRef, id: string): Promise<OperationResult> {
+    return requireValue(await tx.get<Intent>(operationKey(ref, id)), 'not_found').record.result;
   }
 
   /**
-   * The single commit point: deadline, revision, initiator, backlog, frozen lists and scope are all rechecked here,
-   * inside one transaction, so an acceptance cannot commit against a resource that moved since.
+   * Retention gives every event a terminal disposition. Expiry is written onto the event row
+   * itself; the log keeps the content and the id is never reused (RFC 0006 §2).
    */
-  async function commitWith(tx: Transaction, ref: ResourceRef, id: string): Promise<HandoverInvitation> {
-    const current = requireValue(await tx.get<HandoverInvitation>(handoverKey(ref, id)), 'not_found');
-    if (current.state !== 'pending' || !current.accepted) return current;
-    if (utc(current.decision_deadline) <= ctx.now()) fail('conflict', 'The handover decision deadline passed before it could commit.');
-    const resource = requireValue(await tx.get<Resource>(resourceKey(ref)));
-    if (resource.revision !== current.expected_revision) {
-      throw new OnlyneError('revision_conflict', 'The resource revision changed before the handover could commit.', {
-        current_revision: resource.revision,
-      });
-    }
-    if (current.initiator !== resource.assignee && !resource.controllers.includes(current.initiator)) {
-      fail('forbidden', 'The initiator no longer holds this resource.');
-    }
-    const backlog = await tx.get<PendingEvent[]>(pendingKey(ref));
-    if (backlog && backlog.length > 0) fail('conflict', 'The resource holds undelivered events; the handover cannot commit.');
-    const scopes = current.scope ?? ALL_SCOPES;
-    if (!frozenStillHolds(resource, current.accepted_frozen, scopes)) {
-      fail('conflict', 'The resource access lists changed after the handover was accepted.');
-    }
-
-    let cutoff: string | null = null;
-    for (const { value } of rowsOf(await tx.scan<ResourceEvent>(eventsPrefix(ref)), 'event')) {
-      if (cutoff === null || bySequence(value.event_id, cutoff) > 0) cutoff = value.event_id;
-    }
-    const next = transfer(resource, current.target, scopes);
-    next.revision = nextRevision(resource);
-    const done: HandoverInvitation = { ...current, state: 'committed', cutoff_event_id: cutoff };
-    await tx.put(resourceKey(ref), next);
-    await tx.put(handoverKey(ref, id), done);
-    await settleWith(tx, ref, id, { state: 'committed', data: { revision: next.revision, cutoff_event_id: cutoff } });
-    return done;
-  }
-
-  const commit = (ref: ResourceRef, id: string) => ctx.storage.transaction(async tx => commitWith(tx, ref, id));
-
-  function nextRevision(resource: Resource): string {
-    if (!resource.revision) fail('internal', 'The resource revision is missing.');
-    const revision = ctx.id();
-    if (revision === resource.revision) fail('internal', 'The id source reused the current resource revision.');
-    return revision;
-  }
-
-  /** Retention gives every delivery obligation a terminal state; only then does the backlog that blocks handover clear. */
-  async function expireBacklog(): Promise<void> {
-    const rows = rowsOf(await ctx.storage.transaction(async tx => tx.scan<PendingEvent[]>(key('resource'))), 'pending')
-      .filter(entry => entry.value.length > 0);
+  async function expireEvents(): Promise<void> {
     const now = ctx.now();
-    for (const { row, value } of rows) {
-      if (!value.some(item => utc(item.event.expires_at) <= now)) continue;
-      await ctx.storage.transaction(async tx => {
-        const current = await tx.get<PendingEvent[]>(pendingKey(row.ref));
-        if (!current) return;
-        const kept: PendingEvent[] = [];
-        for (const item of current) {
-          if (utc(item.event.expires_at) > now) { kept.push(item); continue; }
-          const eventPath = eventKey(row.ref, item.event.event_id);
-          const stored = await tx.get<ResourceEvent>(eventPath);
-          if (stored) await tx.put(eventPath, { ...stored, expired: true });
-        }
-        await tx.put(pendingKey(row.ref), kept);
-      });
-    }
-  }
-
-  async function loadPendingHints(): Promise<HandoverInvitation[]> {
-    const rows = rowsOf(await ctx.storage.transaction(async tx => tx.scan<HandoverInvitation>(key('resource'))), 'handover');
-    return rows.map(entry => entry.value)
-      .filter(invitation => invitation.resource_ref.owner === ctx.node && invitation.state === 'pending');
+    await ctx.storage.transaction(async tx => {
+      const events = rowsOf(await tx.scan<ResourceEvent>(key('resource')), 'event');
+      for (const { value } of events) {
+        if (value.expired || utc(value.expires_at) > now) continue;
+        await tx.put(eventKey(value.resource_ref, value.event_id), { ...value, expired: true } satisfies ResourceEvent);
+      }
+    });
   }
 
   /** One event, filtered by the caller's rights (RFC 0006 §1 query semantics). */
   async function readEvent(auth: Auth, ref: ResourceRef, id: string): Promise<ResourceEvent> {
     ctx.owner(ref.owner);
     const resource = await live(ref);
-    const event = requireValue(await ctx.storage.transaction(async tx => tx.get<ResourceEvent>(eventKey(ref, id))));
-    if (!event.recipients.includes(auth.actor) && !mayRead(resource, auth.actor)) fail('not_found', 'The requested event is unavailable.');
-    return event;
+    if (!mayRead(resource, auth.actor)) fail('not_found', 'The requested resource is unavailable.');
+    return requireValue(await ctx.storage.transaction(async tx => tx.get<ResourceEvent>(eventKey(ref, id))));
   }
 
-  /** The resource's event stream, filtered by the caller's rights. */
-  async function listEvents(auth: Auth, ref: ResourceRef, options?: PageOptions): Promise<Page<ResourceEvent>> {
+  /** The append-only log, read by the current handler or a standing log reader (RFC 0006 §6). */
+  async function readLog(auth: Auth, ref: ResourceRef, options?: LogQuery): Promise<Page<ResourceEvent>> {
     ctx.owner(ref.owner);
     const resource = await live(ref);
+    if (!mayRead(resource, auth.actor)) fail('not_found', 'The requested resource is unavailable.');
+    const since = options?.since;
+    if (since !== undefined) decimal(since);
     const events = (await ctx.storage.transaction(async tx => tx.scan<ResourceEvent>(eventsPrefix(ref))))
       .map(entry => entry.value)
-      .filter(event => event.recipients.includes(auth.actor) || mayRead(resource, auth.actor));
-    // A previous handler keeps exactly the events it was first assigned, even after the binding moved (0006 §6).
-    if (!mayRead(resource, auth.actor) && events.length === 0) fail('not_found', 'The requested resource is unavailable.');
-    events.sort((a, b) => bySequence(a.event_id, b.event_id));
-    return page(events, options ?? {}, { kind: 'events', owner: ref.owner, id: ref.id, actor: auth.actor }, event => event.event_id, bySequence);
+      .filter(event => since === undefined || bySequence(event.event_id, since) > 0)
+      .sort((a, b) => bySequence(a.event_id, b.event_id));
+    return page(
+      events, options ?? {}, { kind: 'log', owner: ref.owner, id: ref.id, actor: auth.actor, since },
+      event => event.event_id, bySequence,
+    );
   }
 
   /**
@@ -407,251 +280,112 @@ export function createResourceService(ctx: Context): ResourceService {
       if (typeof eventId !== 'string' || eventId.length === 0) fail('invalid_request', 'read names the event_id to return.');
       return { operation_id: id, state: 'committed', data: wire(await readEvent(auth, ref, eventId)) };
     }
-    const options: PageOptions = {};
+    const options: LogQuery = {};
     if (typeof data.cursor === 'string') options.cursor = data.cursor;
     if (typeof data.page_size === 'number') options.page_size = data.page_size;
-    return { operation_id: id, state: 'committed', data: wire(await listEvents(auth, ref, options)) };
+    if (typeof data.since === 'string') options.since = data.since;
+    return { operation_id: id, state: 'committed', data: wire(await readLog(auth, ref, options)) };
   }
 
-  return {
-    /**
-     * The endpoint declares the resources it serves, so registration is its own action: the caller is this node and the
-     * resource is one this node owns. Repeating a registration returns the stored resource, never a second definition.
-     */
-    async register(auth, resource) {
-      requireEndpoint(auth);
-      if (resource.resource_ref.owner !== ctx.node) fail('forbidden', 'This node does not serve the requested owner.');
-      if (!Array.isArray(resource.readers) || !Array.isArray(resource.event_recipients) || !Array.isArray(resource.result_recipients) || !Array.isArray(resource.controllers)) {
-        fail('invalid_request', 'A resource registration carries its access lists.');
+  /**
+   * RFC 0006 §4.4: the single point where a handover takes effect. Deadline, revision and
+   * initiator are rechecked inside this transaction, so a binding that moved under the probe
+   * cannot be overwritten and only one of two racing handovers switches.
+   */
+  async function commitHandover(ref: ResourceRef, id: string, cursor: string): Promise<OperationResult> {
+    return ctx.storage.transaction(async tx => {
+      const intent = requireValue(await tx.get<HandoverIntent>(handoverKey(ref, id)), 'not_found');
+      if (intent.state !== 'open') return resultOf(tx, ref, id);
+      if (utc(intent.deadline) <= ctx.now()) return abortWith(tx, intent, 'deadline_passed');
+      const resource = requireValue(await tx.get<Resource>(resourceKey(ref)));
+      if (resource.revision !== intent.expected_revision) {
+        return abortWith(tx, intent, 'revision_changed', {
+          code: 'revision_conflict', message: 'The resource binding changed before the handover could commit.', retryable: false,
+          details: { current_revision: resource.revision },
+        });
       }
-      decimal(resource.event_seq);
-      const defined = normalize(resource);
-      return ctx.storage.transaction(async tx => {
-        const stored = await tx.get<Resource>(resourceKey(defined.resource_ref));
-        if (stored) {
-          if (!same(stored, defined)) fail('id_conflict', 'The resource is already registered with another definition.');
-          return stored;
-        }
-        await tx.put(resourceKey(defined.resource_ref), defined);
-        return defined;
-      });
-    },
-
-    async list(auth, options) {
-      const items = rowsOf(await ctx.storage.transaction(async tx => tx.scan<Resource>(key('resource'))), 'resource')
-        .map(entry => entry.value)
-        .filter(resource => resource.resource_ref.owner === ctx.node && visible(resource, auth.actor));
-      items.sort((a, b) => a.resource_ref.id < b.resource_ref.id ? -1 : a.resource_ref.id > b.resource_ref.id ? 1 : 0);
-      return page(items, options ?? {}, { kind: 'resources', owner: ctx.node, actor: auth.actor }, item => item.resource_ref.id);
-    },
-
-    async describe(auth, ref) {
-      ctx.owner(ref.owner);
-      const resource = await live(ref);
-      if (!visible(resource, auth.actor)) fail('not_found', 'The requested resource is unavailable.');
-      return resource;
-    },
-
-    async operate(auth, ref, request, signal) {
-      ctx.owner(ref.owner);
-      const prior = await intentOf(ref, request.operation_id);
-      if (prior !== undefined) return resume(ref, auth, request, prior.record);
-
-      const resource = await live(ref);
-      if (!visible(resource, auth.actor)) fail('not_found', 'The requested resource is unavailable.');
-      if (!resource.operations.includes(request.operation)) fail('unsupported_delivery', 'The resource does not declare this operation.');
-      if (!mayOperate(resource, auth.actor, request.operation)) fail('forbidden', 'The authenticated caller may not perform this operation.');
-      if (request.expected_revision !== undefined && request.expected_revision !== resource.revision) {
-        throw new OnlyneError('revision_conflict', 'The resource binding changed.', { current_revision: resource.revision });
+      if (resource.binding.handler !== intent.initiator) {
+        return abortWith(tx, intent, 'initiator_released', {
+          code: 'forbidden', message: 'The initiator no longer holds this resource.', retryable: false,
+        });
       }
-      if (RESERVED[request.operation]) return initiate(auth, ref, resource, request);
-      if (QUERY[request.operation]) return query(auth, ref, resource, request);
-      if (drivers === undefined) fail('unsupported_delivery', 'This node declares no resource driver, so it cannot validate or execute the operation.');
-      // Local validation runs before the claim: a request the driver rejects must not hold an operation ID.
-      await drivers.validate(resource, request.operation, request.data);
-      const claim = await claimOperation(ref, auth, request);
-      if (!claim.claimed) return resume(ref, auth, request, claim.record);
-      return execute(resource, request, signal);
-    },
+      // An ack during the freeze moved the cursor forward; the switch must not push it back,
+      // because a cursor that moves backwards re-delivers events the handler already consumed.
+      const position = bySequence(cursor, resource.binding.cursor) > 0 ? cursor : resource.binding.cursor;
+      const moved: Resource = { ...resource, binding: { handler: intent.target, cursor: position }, revision: nextRevision(resource) };
+      await tx.put(resourceKey(ref), moved);
+      await tx.put(handoverKey(ref, id), { ...intent, state: 'committed' } satisfies HandoverIntent);
+      const result: OperationResult = {
+        operation_id: id, state: 'committed',
+        data: { handler: moved.binding.handler, cursor: moved.binding.cursor, revision: moved.revision },
+      };
+      const record = requireValue(await tx.get<Intent>(operationKey(ref, id)), 'not_found');
+      await tx.put(operationKey(ref, id), { record: { ...record.record, result }, settle: false } satisfies Intent);
+      return result;
+    });
+  }
 
-    async operation(auth, ref, id) {
-      ctx.owner(ref.owner);
-      const resource = await live(ref);
-      const intent = requireValue(await intentOf(ref, id));
-      if (intent.record.actor !== auth.actor && !visible(resource, auth.actor) && !(await invitedTarget(ref, id, auth.actor))) {
-        fail('not_found', 'The requested operation is unavailable.');
-      }
-      return intent.record;
-    },
+  /** Aborting leaves the binding exactly as it was: the frozen events stay owed to the original handler. */
+  async function abortWith(tx: Transaction, intent: HandoverIntent, reason: string, error?: Failure): Promise<OperationResult> {
+    const ref = intent.resource_ref;
+    const id = intent.operation_id;
+    if (intent.state !== 'open') return resultOf(tx, ref, id);
+    await tx.put(handoverKey(ref, id), { ...intent, state: 'aborted' } satisfies HandoverIntent);
+    const record = requireValue(await tx.get<Intent>(operationKey(ref, id)), 'not_found');
+    const result: OperationResult = {
+      operation_id: id, state: 'aborted', data: { reason },
+      ...(error === undefined ? {} : { error }),
+    };
+    await tx.put(operationKey(ref, id), { record: { ...record.record, result }, settle: false } satisfies Intent);
+    return result;
+  }
 
-    async operations(auth, ref, options) {
-      ctx.owner(ref.owner);
-      const resource = await live(ref);
-      if (!mayRead(resource, auth.actor)) fail('not_found', 'The requested resource is unavailable.');
-      // An operation record carries its requester's request body, so the list is the caller's own history.
-      const records = (await ctx.storage.transaction(async tx => tx.scan<Intent>(operationsPrefix(ref))))
-        .map(entry => entry.value.record)
-        .filter(record => record.actor === auth.actor);
-      records.sort((a, b) => byAnchor(anchor(a), anchor(b)));
-      return page(records, options ?? {}, { kind: 'operations', owner: ref.owner, id: ref.id, actor: auth.actor }, anchor);
-    },
-
-    async receive(auth, ref, input) {
-      ctx.owner(ref.owner);
-      requireEndpoint(auth);
-      if (!input.source_id) fail('invalid_request', 'An inbound event needs its platform identifier.');
-      return ctx.storage.transaction(async tx => {
-        const resource = requireValue(await tx.get<Resource>(resourceKey(ref)));
-        // A platform event ID may repeat only within its own resource, so the source row is the deduplication point.
-        const duplicated = await tx.get<string>(sourceKey(ref, input.source_id));
-        if (duplicated) return requireValue(await tx.get<ResourceEvent>(eventKey(ref, duplicated)));
-        if (resource.event_recipients.length === 0) fail('conflict', 'This resource has no event recipients.');
-        // `event_seq` is the last assigned ID, so the next event is one past it and an ID is never reused (0006 §6).
-        const eventId = (decimal(resource.event_seq) + 1n).toString();
-        const event: ResourceEvent = {
-          resource_ref: ref, event_id: eventId, source_id: input.source_id,
-          recipients: resource.event_recipients.slice(), revision: resource.revision,
-          data: input.data, at: new Date(ctx.now()).toISOString(),
-          expires_at: input.expires_at ?? new Date(ctx.now() + resource.retention_ms).toISOString(),
-          acknowledged: [], expired: false,
-        };
-        utc(event.expires_at);
-        resource.event_seq = eventId;
-        await tx.put(resourceKey(ref), resource);
-        await tx.put(eventKey(ref, eventId), event);
-        await tx.put(sourceKey(ref, input.source_id), eventId);
-        const pending = (await tx.get<PendingEvent[]>(pendingKey(ref))) ?? [];
-        await tx.put(pendingKey(ref), [...pending, { event }]);
-        return event;
-      });
-    },
-
-    async events(auth, ref, options) {
-      return listEvents(auth, ref, options);
-    },
-
-    async event(auth, ref, id) {
-      return readEvent(auth, ref, id);
-    },
-
-    async ack(auth, ref, id, mutation) {
-      ctx.owner(ref.owner);
-      return ctx.mutate(auth, `resource_ack:${resourceScope(ref)}`, mutation, { id }, async tx => {
-        const resource = requireValue(await tx.get<Resource>(resourceKey(ref)));
-        const event = requireValue(await tx.get<ResourceEvent>(eventKey(ref, id)));
-        if (!event.recipients.includes(auth.actor) && !mayRead(resource, auth.actor)) fail('not_found', 'The requested event is unavailable.');
-        if (event.recipients[0] !== auth.actor) fail('forbidden', 'Only the first recipient acknowledges this event.');
-        const pending = await tx.get<PendingEvent[]>(pendingKey(ref));
-        // Expired is a terminal state written by the retention sweep. A first-recipient ack
-        // arriving afterwards keeps its receipt evidence and clears any leftover, but it
-        // never revives the obligation or writes a second removal (0006 §6, 0012 §5).
-        if (event.expired) {
-          if (pending) await tx.put(pendingKey(ref), pending.filter(item => item.event.event_id !== id));
-          if (event.acknowledged.includes(auth.actor)) return event;
-          const evidenced: ResourceEvent = { ...event, acknowledged: [...event.acknowledged, auth.actor] };
-          await tx.put(eventKey(ref, id), evidenced);
-          return evidenced;
-        }
-        if (event.acknowledged.includes(auth.actor)) return event;
-        const updated: ResourceEvent = { ...event, acknowledged: [...event.acknowledged, auth.actor] };
-        await tx.put(eventKey(ref, id), updated);
-        if (pending) await tx.put(pendingKey(ref), pending.filter(item => item.event.event_id !== id));
-        return updated;
-      });
-    },
-
-    async decideHandover(auth, ref, id, accepted, mutation) {
-      ctx.owner(ref.owner);
-      const invitation = requireValue(await ctx.storage.transaction(async tx => tx.get<HandoverInvitation>(handoverKey(ref, id))), 'not_found');
-      // Only the named target decides, and only on that invitation: being invited is not resource access (0006 §5).
-      if (auth.actor !== invitation.target) fail('forbidden', 'Only the named target decides the handover.');
-      if (invitation.state !== 'pending') return strip(invitation);
-      if (accepted && !invitation.accepted) await recheck(await live(ref), invitation, invitation.record);
-
-      // Rejection is terminal inside the transaction; acceptance is only a recorded fact and still needs the commit.
-      const decided = await ctx.mutate(auth, `handover_decide:${resourceScope(ref)}`, mutation, { id, accepted }, async tx => {
-        const current = requireValue(await tx.get<HandoverInvitation>(handoverKey(ref, id)), 'not_found');
-        if (current.state !== 'pending') return current;
-        if (!accepted) return abortWith(tx, ref, id);
-        const frozen = requireValue(await tx.get<Resource>(resourceKey(ref)));
-        const held: HandoverInvitation = { ...current, accepted: true, accepted_frozen: frozen };
-        await tx.put(handoverKey(ref, id), held);
-        return held;
-      });
-      if (decided.state !== 'pending' || !decided.accepted) return strip(decided);
-      if (utc(decided.decision_deadline) <= ctx.now()) return strip(await abort(ref, id));
-      if (mayHandover && !(await mayHandover(decided.accepted_frozen, decided.initiator, decided.target))) return strip(await abort(ref, id));
-      // The commit point runs while the caller waits. An expired prepare is settled; a live fence is reported so the
-      // caller can clear the backlog, and a revision that moved under the acceptance aborts the prepare.
-      try { return strip(await commit(ref, id)); } catch (error) {
-        if (utc(decided.decision_deadline) <= ctx.now()) return strip(await abort(ref, id));
-        if (error instanceof OnlyneError && (error.error.code === 'revision_conflict' || error.error.code === 'forbidden')) {
-          await abort(ref, id);
-        }
-        throw error;
-      }
-    },
-
-    async invitations(auth, options) {
-      const rows = (await loadPendingHints()).filter(invitation => invitation.target === auth.actor || invitation.initiator === auth.actor);
-      rows.sort((a, b) => byAnchor(a.operation_id, b.operation_id));
-      return page(rows, options ?? {}, { kind: 'invitations', owner: ctx.node, actor: auth.actor }, invitation => invitation.operation_id);
-    },
-
-    async recover() {
-      // Every record settles only while unresolved, so a repeated pass is harmless; a durable marker would leave a
-      // crash between two settlements permanently unrecovered.
-      await expireBacklog();
-      for (const hint of await loadPendingHints()) {
-        const ref = hint.resource_ref;
-        const current = await currentOr(ref, hint.operation_id);
-        if (current.state !== 'pending') continue;
-        // The deadline limits the commit, not the decision: an expired prepare is settled, never revived (0006 §5).
-        if (utc(current.decision_deadline) <= ctx.now()) { await abort(ref, hint.operation_id); continue; }
-        if (!current.accepted) continue;
-        const fresh = await fetchResource(ref);
-        if (!fresh || (mayHandover && !(await mayHandover(current.accepted_frozen, current.initiator, current.target)))) {
-          await abort(ref, hint.operation_id);
-          continue;
-        }
-        try { await commit(ref, hint.operation_id); } catch (error) {
-          // A revision that moved under the acceptance, or an initiator who lost the role, is terminal for the prepare.
-          if (error instanceof OnlyneError && (error.error.code === 'revision_conflict' || error.error.code === 'forbidden')) {
-            await abort(ref, hint.operation_id);
-          }
-          // A backlog fence stays pending until the backlog clears or the deadline passes.
-        }
-      }
-      const intents = rowsOf(await ctx.storage.transaction(async tx => tx.scan<Intent>(key('resource'))), 'operation');
-      for (const { row, value } of intents) {
-        if (!value.settle) continue;
-        const state = value.record.result.state;
-        if (state !== 'pending' && state !== 'unknown') continue;
-        const id = value.record.request.operation_id;
-        const resource = await fetchResource(row.ref);
-        const queried = resource === undefined ? undefined : await queryOutside(resource, id);
-        const late = state === 'unknown';
-        if (queried !== undefined && queried.state !== 'pending') await settle(row.ref, id, queried, late);
-        else if (resource === undefined) await settle(row.ref, id, { state: 'unknown', error: unknownOutcome }, late);
-      }
-    },
-  };
+  const abortHandover = (ref: ResourceRef, id: string, reason: string, error?: Failure) =>
+    ctx.storage.transaction(async tx => abortWith(tx, requireValue(await tx.get<HandoverIntent>(handoverKey(ref, id)), 'not_found'), reason, error));
 
   /**
-   * A retried operation never executes twice: the driver is asked for the admitted one's outcome, and silence keeps the
-   * recorded state instead of manufacturing a second effect or overwriting a live claim.
+   * Why a probe never reached its target. A request the transport refuses to sign is not an
+   * outage: this endpoint holds no usable pairing with that node, and only its holder can
+   * create one. Reporting that as `unreachable` sends the operator looking for a network fault
+   * that does not exist.
    */
-  async function resume(ref: ResourceRef, auth: Auth, request: OperationRequest, record: OperationRecord): Promise<OperationResult> {
-    if (record.digest !== digestOf(auth.actor, ref, request)) fail('id_conflict', 'The operation ID is bound to another request.');
-    if (record.result.state !== 'pending') return record.result;
-    if (RESERVED[request.operation]) {
-      const invitation = await currentOr(ref, request.operation_id);
-      return { operation_id: request.operation_id, state: invitation.state, data: handoverJson(invitation) };
+  function probeFailure(error: unknown): { reason: string; error?: Failure } {
+    if (!(error instanceof OnlyneError)) return { reason: 'unreachable' };
+    const details = error.error.details as { required_action?: unknown } | undefined;
+    return { reason: details?.required_action === undefined ? 'unreachable' : 'untrusted_target', error: error.error };
+  }
+
+  /** How long the caller waits on the probe: the local window, never past the handshake deadline. */
+  function waitWindow(deadline: string): number {
+    const window = ctx.options.wait_ms ?? DRIVER_WAIT_MS;
+    return Math.max(0, Math.min(window, utc(deadline) - ctx.now()));
+  }
+
+  /** The probe is a signed peer request like any other: it rides the node's transport, never a bare fetch. */
+  async function probeTarget(intent: HandoverIntent): Promise<ProbeReply> {
+    const body: HandoverProbe = {
+      operation_id: intent.operation_id, resource: intent.resource_ref, kind: intent.kind,
+      operations: intent.operations, ...(intent.metadata === undefined ? {} : { metadata: intent.metadata }),
+      initiator: intent.initiator, cursor: intent.cursor, deadline: intent.deadline,
+    };
+    const call = transport.request<unknown>(intent.target, 'POST', '/handover/probes', body);
+    const waited = await waitFor(call, waitWindow(intent.deadline));
+    if (waited.kind === 'timeout') return { kind: 'timeout' };
+    if (waited.kind === 'failed') return { kind: 'failed', error: waited.error };
+    try { return { kind: 'answer', value: probeAnswerOf(waited.value) }; } catch { return { kind: 'failed' }; }
+  }
+
+  /** The answer the target recorded, read back without creating one; `not_found` means the probe never landed. */
+  async function recordedAnswer(target: string, operationId: string, deadline: string): Promise<ProbeOutcome> {
+    const path = `/handover/probes/${encodeURIComponent(operationId)}`;
+    const waited = await waitFor(transport.request<unknown>(target, 'GET', path), waitWindow(deadline));
+    if (waited.kind === 'timeout') return { kind: 'timeout' };
+    // RFC 0006 §4.5: an answer the target never recorded ends the handover, while an unreachable
+    // target says nothing and leaves the intent open until its deadline.
+    if (waited.kind === 'failed') {
+      return waited.error instanceof OnlyneError && waited.error.error.code === 'not_found' ? { kind: 'missing' } : { kind: 'failed' };
     }
-    const resource = await live(ref);
-    const queried = await queryOutside(resource, request.operation_id);
-    if (queried !== undefined && queried.state !== 'pending') return settle(ref, request.operation_id, queried);
-    return (await intentOf(ref, request.operation_id))?.record.result ?? record.result;
+    try { return { kind: 'answer', value: probeAnswerOf(waited.value) }; } catch { return { kind: 'failed' }; }
   }
 
   /** A settlement that cannot be written is still answered; the record stays owed to `recover`. */
@@ -691,67 +425,297 @@ export function createResourceService(ctx: Context): ResourceService {
   }
 
   /**
-   * `handover` is the one declared operation the library runs itself (RFC 0006 §5): the target, scope, and deadline are
-   * validated here, the invitation is durable before the driver hears of it, and only the target's decision commits.
-   * The operation stays `pending`: the target's reply is a separate request, not part of this admission.
+   * RFC 0006 §4: acceptance writes the intent and freezes the cursor before the probe leaves.
+   * The probe decides, and its answer settles the operation in the same call; only a probe
+   * that outlives the local wait is left to `recover`.
    */
   async function initiate(auth: Auth, ref: ResourceRef, resource: Resource, request: OperationRequest): Promise<OperationResult> {
     const data = (request.data ?? {}) as Record<string, unknown>;
     const target = data.target;
-    const deadline = data.decision_deadline;
-    if (typeof target !== 'string' || !target) fail('invalid_request', 'A handover names its target.');
-    if (typeof deadline !== 'string') fail('invalid_request', 'A handover carries a decision_deadline.');
+    const deadline = data.handover_deadline;
+    if (typeof target !== 'string' || target.length === 0) fail('invalid_request', 'A handover names its target.');
+    if (typeof deadline !== 'string') fail('invalid_request', 'A handover carries a handover_deadline.');
     utc(deadline);
-    const scopes = handoverScopes(data.scope);
-    const resend = data.resend === true;
-    if (drivers === undefined) fail('unsupported_delivery', 'This node declares no resource driver, so it cannot deliver the invitation.');
-    if (resend) await drivers.validate(resource, 'handover', request.data);
+    const digest = digestOf(auth.actor, ref, request);
 
     const created = await ctx.storage.transaction(async tx => {
-      const existing = await tx.get<HandoverInvitation>(handoverKey(ref, request.operation_id));
+      const existing = await tx.get<HandoverIntent>(handoverKey(ref, request.operation_id));
       if (existing !== undefined) {
-        if (existing.record.digest !== digestOf(auth.actor, ref, request)) fail('id_conflict', 'The operation ID is bound to another request.');
-        return { invitation: existing, claimed: false };
+        if (existing.digest !== digest) fail('id_conflict', 'The operation ID is bound to another request.');
+        return { intent: existing, claimed: false };
       }
       ctx.deadline(request.retry_until);
       const fresh = requireValue(await tx.get<Resource>(resourceKey(ref)));
       if (fresh.revision !== resource.revision || (request.expected_revision !== undefined && request.expected_revision !== fresh.revision)) {
         throw new OnlyneError('revision_conflict', 'The resource binding changed.', { current_revision: fresh.revision });
       }
-      if (!mayOperate(fresh, auth.actor, 'handover')) fail('forbidden', 'The authenticated caller may not perform this operation.');
+      if (fresh.binding.handler !== auth.actor) fail('forbidden', 'Only the current handler starts a handover.');
       const record: OperationRecord = {
-        actor: auth.actor, request, digest: digestOf(auth.actor, ref, request),
-        result: { operation_id: request.operation_id, state: 'pending' },
+        actor: auth.actor, request, digest,
+        // There is no `pending` handover (RFC 0006 §4.5): until the probe answers, the caller
+        // has no certain outcome, and that is exactly what `unknown` records.
+        result: { operation_id: request.operation_id, state: 'unknown', error: probeWaitOutcome },
         resource_ref: ref, accepted_at: new Date(ctx.now()).toISOString(), authorized_revision: fresh.revision,
       };
-      const pending: HandoverInvitation = {
+      const intent: HandoverIntent = {
         operation_id: request.operation_id, resource_ref: ref, initiator: auth.actor, target,
-        expected_revision: fresh.revision, decision_deadline: deadline, accepted: false, state: 'pending',
-        cutoff_event_id: null, ...(data.scope === undefined ? {} : { scope: scopes }), record, accepted_frozen: fresh,
+        kind: fresh.kind, operations: fresh.operations.slice(),
+        ...(data.metadata === undefined ? {} : { metadata: data.metadata as Json }),
+        expected_revision: fresh.revision, deadline, cursor: fresh.binding.cursor, digest, state: 'open',
       };
-      await tx.put(operationKey(ref, request.operation_id), { record, settle: true } satisfies Intent);
-      await tx.put(handoverKey(ref, request.operation_id), pending);
-      return { invitation: pending, claimed: true };
+      await tx.put(operationKey(ref, request.operation_id), { record, settle: false } satisfies Intent);
+      await tx.put(handoverKey(ref, request.operation_id), intent);
+      return { intent, claimed: true };
     });
 
-    const invitation = created.invitation;
-    if (!created.claimed) return { operation_id: request.operation_id, state: invitation.state, data: handoverJson(invitation) };
-    if (mayHandover && !(await mayHandover(invitation.accepted_frozen, invitation.initiator, invitation.target))) {
-      await abort(ref, request.operation_id);
-      return { operation_id: request.operation_id, state: 'aborted', error: { code: 'forbidden', message: 'The resource driver refused this handover.', retryable: false } };
+    if (!created.claimed) return requireValue(await intentOf(ref, request.operation_id)).record.result;
+    const intent = created.intent;
+    if (utc(intent.deadline) <= ctx.now()) return abortHandover(ref, intent.operation_id, 'deadline_passed');
+
+    const answer = await probeTarget(intent);
+    if (answer.kind === 'timeout') return requireValue(await intentOf(ref, intent.operation_id)).record.result;
+    if (answer.kind === 'failed') {
+      const failure = probeFailure(answer.error);
+      return abortHandover(ref, intent.operation_id, failure.reason, failure.error);
     }
-    // The driver delivers the invitation to the target as a message; that send is evidence, never the invitation itself,
-    // so a refused or unknown delivery leaves the handover pending rather than aborting it.
-    if (resend) {
-      // Delivery settles nothing: the operation result describes the handover, not the message that announced it.
-      try { await waitFor(drivers.execute(resource, request), ctx.options.wait_ms ?? DRIVER_WAIT_MS); } catch { /* evidence only */ }
-    }
-    // Announced, not committed: the revision moves only when the named target accepts and the commit lands.
-    return { operation_id: request.operation_id, state: 'pending', data: handoverJson(invitation) };
+    if (answer.value.answer === 'reject') return abortHandover(ref, intent.operation_id, answer.value.reason);
+    return commitHandover(ref, intent.operation_id, answer.value.cursor);
   }
 
-  function handoverJson(invitation: HandoverInvitation): Json {
-    return JSON.parse(JSON.stringify(strip(invitation))) as Json;
+  return {
+    /**
+     * The endpoint declares the resources it serves, so registration is its own action: the caller is this node and the
+     * resource is one this node owns. Repeating a registration returns the stored resource, never a second definition.
+     */
+    async register(auth, resource) {
+      requireEndpoint(auth);
+      if (resource.resource_ref.owner !== ctx.node) fail('forbidden', 'This node does not serve the requested owner.');
+      const binding = resource.binding as unknown as { handler?: unknown; cursor?: unknown } | undefined;
+      if (typeof binding?.handler !== 'string' || binding.handler.length === 0) fail('invalid_request', 'A resource registration carries its handler.');
+      if (typeof binding.cursor !== 'string') fail('invalid_request', 'A resource registration carries its cursor.');
+      decimal(binding.cursor);
+      if (!Array.isArray(resource.log_readers)) fail('invalid_request', 'A resource registration carries its log readers.');
+      decimal(resource.event_seq);
+      if (!Number.isInteger(resource.retention_ms) || resource.retention_ms < 0) fail('invalid_request', 'retention_ms must be a non-negative integer.');
+      return ctx.storage.transaction(async tx => {
+        const stored = await tx.get<Resource>(resourceKey(resource.resource_ref));
+        if (stored) {
+          if (!same(stored, resource)) fail('id_conflict', 'The resource is already registered with another definition.');
+          return stored;
+        }
+        await tx.put(resourceKey(resource.resource_ref), resource);
+        return resource;
+      });
+    },
+
+    async list(auth, options) {
+      const items = rowsOf(await ctx.storage.transaction(async tx => tx.scan<Resource>(key('resource'))), 'resource')
+        .map(entry => entry.value)
+        .filter(resource => resource.resource_ref.owner === ctx.node && mayRead(resource, auth.actor));
+      items.sort((a, b) => a.resource_ref.id < b.resource_ref.id ? -1 : a.resource_ref.id > b.resource_ref.id ? 1 : 0);
+      return page(items, options ?? {}, { kind: 'resources', owner: ctx.node, actor: auth.actor }, item => item.resource_ref.id);
+    },
+
+    async describe(auth, ref) {
+      ctx.owner(ref.owner);
+      const resource = await live(ref);
+      if (!mayRead(resource, auth.actor)) fail('not_found', 'The requested resource is unavailable.');
+      return resource;
+    },
+
+    async operate(auth, ref, request, signal) {
+      ctx.owner(ref.owner);
+      const prior = await intentOf(ref, request.operation_id);
+      if (prior !== undefined) return resume(ref, auth, request, prior.record);
+
+      const resource = await live(ref);
+      if (!mayRead(resource, auth.actor)) fail('not_found', 'The requested resource is unavailable.');
+      if (!resource.operations.includes(request.operation)) fail('unsupported_delivery', 'The resource does not declare this operation.');
+      // RFC 0006 §4.1 names the initiator first: a handover belongs to the current handler alone.
+      const handover = request.operation === 'handover';
+      if (handover && resource.binding.handler !== auth.actor) fail('forbidden', 'Only the current handler starts a handover.');
+      // RFC 0006 §7: the revision is the send fence, so a former handler learns the binding moved
+      // instead of a generic refusal. A handover has already answered its initiator above.
+      if (request.expected_revision !== undefined && request.expected_revision !== resource.revision) {
+        throw new OnlyneError('revision_conflict', 'The resource binding changed.', { current_revision: resource.revision });
+      }
+      if (!handover && !mayOperate(resource, auth.actor, request.operation)) fail('forbidden', 'The authenticated caller may not perform this operation.');
+      if (handover) return initiate(auth, ref, resource, request);
+      if (QUERY[request.operation]) return query(auth, ref, resource, request);
+      if (drivers === undefined) fail('unsupported_delivery', 'This node declares no resource driver, so it cannot validate or execute the operation.');
+      // Local validation runs before the claim: a request the driver rejects must not hold an operation ID.
+      await drivers.validate(resource, request.operation, request.data);
+      const claim = await claimOperation(ref, auth, request);
+      if (!claim.claimed) return resume(ref, auth, request, claim.record);
+      return execute(resource, request, signal);
+    },
+
+    async operation(auth, ref, id) {
+      ctx.owner(ref.owner);
+      const resource = await live(ref);
+      const intent = requireValue(await intentOf(ref, id));
+      if (intent.record.actor !== auth.actor && !mayRead(resource, auth.actor)) fail('not_found', 'The requested operation is unavailable.');
+      return intent.record;
+    },
+
+    async operations(auth, ref, options) {
+      ctx.owner(ref.owner);
+      const resource = await live(ref);
+      if (!mayRead(resource, auth.actor)) fail('not_found', 'The requested resource is unavailable.');
+      // An operation record carries its requester's request body, so the list is the caller's own history.
+      const records = (await ctx.storage.transaction(async tx => tx.scan<Intent>(operationsPrefix(ref))))
+        .map(entry => entry.value.record)
+        .filter(record => record.actor === auth.actor);
+      records.sort((a, b) => byAnchor(anchor(a), anchor(b)));
+      return page(records, options ?? {}, { kind: 'operations', owner: ref.owner, id: ref.id, actor: auth.actor }, anchor);
+    },
+
+    async receive(auth, ref, input) {
+      ctx.owner(ref.owner);
+      requireEndpoint(auth);
+      if (!input.source_id) fail('invalid_request', 'An inbound event needs its platform identifier.');
+      return ctx.storage.transaction(async tx => {
+        const resource = requireValue(await tx.get<Resource>(resourceKey(ref)));
+        // A platform event ID may repeat only within its own resource, so the source row is the deduplication point.
+        const duplicated = await tx.get<string>(sourceKey(ref, input.source_id));
+        if (duplicated) return requireValue(await tx.get<ResourceEvent>(eventKey(ref, duplicated)));
+        // `event_seq` is the last assigned ID, so the next event is one past it and an ID is never reused (0006 §5).
+        const eventId = (decimal(resource.event_seq) + 1n).toString();
+        const event: ResourceEvent = {
+          resource_ref: ref, event_id: eventId, source_id: input.source_id,
+          data: input.data, at: new Date(ctx.now()).toISOString(),
+          expires_at: input.expires_at ?? new Date(ctx.now() + resource.retention_ms).toISOString(),
+          expired: false,
+        };
+        utc(event.expires_at);
+        await tx.put(resourceKey(ref), { ...resource, event_seq: eventId } satisfies Resource);
+        await tx.put(eventKey(ref, eventId), event);
+        await tx.put(sourceKey(ref, input.source_id), eventId);
+        return event;
+      });
+    },
+
+    async log(auth, ref, options) {
+      return readLog(auth, ref, options);
+    },
+
+    async event(auth, ref, id) {
+      return readEvent(auth, ref, id);
+    },
+
+    /**
+     * RFC 0006 §5: an ack advances the handler's cursor, nothing else. It is idempotent because
+     * the cursor only moves forward, and an id that is already behind it leaves the position alone.
+     */
+    async ack(auth, ref, id, mutation) {
+      ctx.owner(ref.owner);
+      return ctx.mutate(auth, `resource_ack:${resourceScope(ref)}`, mutation, { id }, async tx => {
+        const resource = requireValue(await tx.get<Resource>(resourceKey(ref)));
+        if (resource.binding.handler !== auth.actor) fail('forbidden', 'Only the current handler acknowledges events.');
+        requireValue(await tx.get<ResourceEvent>(eventKey(ref, id)));
+        if (bySequence(id, resource.binding.cursor) <= 0) return { resource_ref: ref, cursor: resource.binding.cursor } satisfies AckReceipt;
+        const moved: Resource = { ...resource, binding: { ...resource.binding, cursor: id } };
+        await tx.put(resourceKey(ref), moved);
+        return { resource_ref: ref, cursor: id } satisfies AckReceipt;
+      });
+    },
+
+    async probe(auth, probe) {
+      if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
+      if (!probe.operation_id) fail('invalid_request', 'A probe carries its operation id.');
+      if (typeof probe.resource?.owner !== 'string' || typeof probe.resource.id !== 'string') {
+        fail('invalid_request', 'A probe carries the resource reference.');
+      }
+      decimal(probe.cursor);
+      const deadline = utc(probe.deadline);
+      const digest = JSON.stringify(probe);
+      const existing = await ctx.storage.transaction(async tx => tx.get<ProbeRecord>(probeKey(probe.operation_id)));
+      if (existing) {
+        if (existing.sender !== auth.actor || existing.digest !== digest) fail('id_conflict', 'The operation ID is bound to another probe.');
+        return existing.answer;
+      }
+      // The policy runs outside the transaction: a host hook that reads storage would deadlock here.
+      const answer = await decideProbe(probe, deadline, auth.actor);
+      return ctx.storage.transaction(async tx => {
+        const raced = await tx.get<ProbeRecord>(probeKey(probe.operation_id));
+        if (raced) {
+          if (raced.sender !== auth.actor || raced.digest !== digest) fail('id_conflict', 'The operation ID is bound to another probe.');
+          return raced.answer;
+        }
+        await tx.put(probeKey(probe.operation_id), { sender: auth.actor, digest, answer } satisfies ProbeRecord);
+        return answer;
+      });
+    },
+
+    async probeAnswer(auth, operationId) {
+      const record = requireValue(await ctx.storage.transaction(async tx => tx.get<ProbeRecord>(probeKey(operationId))));
+      // A probe answer names a resource and its position: only the endpoint that asked may read it.
+      if (record.sender !== auth.actor) fail('not_found', 'The requested probe is unavailable.');
+      return record.answer;
+    },
+
+    async recover() {
+      // Every record settles only while unresolved, so a repeated pass is harmless; a durable marker would leave a
+      // crash between two settlements permanently unrecovered.
+      await expireEvents();
+      const handovers = rowsOf(await ctx.storage.transaction(async tx => tx.scan<HandoverIntent>(key('resource'))), 'handover');
+      for (const { row, value } of handovers) {
+        if (value.state !== 'open') continue;
+        const ref = row.ref;
+        // RFC 0006 §4.5: a handshake that outlived its deadline never commits.
+        if (utc(value.deadline) <= ctx.now()) { await abortHandover(ref, value.operation_id, 'deadline_passed'); continue; }
+        const asked = await recordedAnswer(value.target, value.operation_id, value.deadline);
+        if (asked.kind === 'missing') { await abortHandover(ref, value.operation_id, 'no_answer'); continue; }
+        // An unreachable target is not an answer: the intent stays open until the deadline or a later pass.
+        if (asked.kind !== 'answer') continue;
+        if (asked.value.answer === 'accept') await commitHandover(ref, value.operation_id, asked.value.cursor);
+        else await abortHandover(ref, value.operation_id, asked.value.reason);
+      }
+      const intents = rowsOf(await ctx.storage.transaction(async tx => tx.scan<Intent>(key('resource'))), 'operation');
+      for (const { row, value } of intents) {
+        if (!value.settle) continue;
+        const state = value.record.result.state;
+        if (state !== 'pending' && state !== 'unknown') continue;
+        const id = value.record.request.operation_id;
+        const resource = await fetchResource(row.ref);
+        const queried = resource === undefined ? undefined : await queryOutside(resource, id);
+        const late = state === 'unknown';
+        if (queried !== undefined && queried.state !== 'pending') await settle(row.ref, id, queried, late);
+        else if (resource === undefined) await settle(row.ref, id, { state: 'unknown', error: unknownOutcome }, late);
+      }
+    },
+  };
+
+  /**
+   * The target's own policy decides, and its answer is final for this operation id. A probe that
+   * arrives past its deadline is refused rather than accepted late (RFC 0006 §4.3).
+   */
+  async function decideProbe(probe: HandoverProbe, deadline: number, sender: string): Promise<ProbeAnswer> {
+    if (deadline <= ctx.now()) return { answer: 'reject', reason: 'deadline_passed' };
+    const policy = ctx.options.plugins.handoverProbe;
+    if (policy === undefined) return { answer: 'accept', cursor: probe.cursor };
+    const answer = await policy(probe, sender);
+    if (answer.answer === 'accept') {
+      decimal(answer.cursor);
+      return { answer: 'accept', cursor: answer.cursor };
+    }
+    if (answer.answer === 'reject' && typeof answer.reason === 'string' && answer.reason.length > 0) {
+      return { answer: 'reject', reason: answer.reason };
+    }
+    fail('internal', 'The handover policy returned an answer the protocol does not define.');
+  }
+
+  /**
+   * A retried operation never executes twice: the driver is asked for the admitted one's outcome, and silence keeps the
+   * recorded state instead of manufacturing a second effect or overwriting a live claim.
+   */
+  async function resume(ref: ResourceRef, auth: Auth, request: OperationRequest, record: OperationRecord): Promise<OperationResult> {
+    if (record.digest !== digestOf(auth.actor, ref, request)) fail('id_conflict', 'The operation ID is bound to another request.');
+    if (record.result.state !== 'pending') return record.result;
+    const resource = await live(ref);
+    const queried = await queryOutside(resource, request.operation_id);
+    if (queried !== undefined && queried.state !== 'pending') return settle(ref, request.operation_id, queried);
+    return (await intentOf(ref, request.operation_id))?.record.result ?? record.result;
   }
 }
 
@@ -763,15 +727,19 @@ const waitOutcome: Failure = {
   code: 'unavailable', message: 'The local wait for the resource driver expired; the external outcome is unknown.', retryable: true,
 };
 
-type Waiting<T> = { kind: 'value'; value: T } | { kind: 'timeout' } | { kind: 'failed' };
+const probeWaitOutcome: Failure = {
+  code: 'unavailable', message: 'The handover probe has not answered within the local wait; query the operation by id.', retryable: true,
+};
+
+type Waiting<T> = { kind: 'value'; value: T } | { kind: 'timeout' } | { kind: 'failed'; error: unknown };
 
 /** Bounded local wait: it answers, it never cancels the promise it stopped waiting for. */
 function waitFor<T>(work: Promise<T>, ms: number): Promise<Waiting<T>> {
-  return new Promise<Waiting<T>>(resolve => {
-    const timer = setTimeout(() => resolve({ kind: 'timeout' }), ms);
-    work.then(
-      value => { clearTimeout(timer); resolve({ kind: 'value', value }); },
-      () => { clearTimeout(timer); resolve({ kind: 'failed' }); },
-    );
-  });
+  const { promise, resolve } = Promise.withResolvers<Waiting<T>>();
+  const timer = setTimeout(() => resolve({ kind: 'timeout' }), ms);
+  work.then(
+    value => { clearTimeout(timer); resolve({ kind: 'value', value }); },
+    error => { clearTimeout(timer); resolve({ kind: 'failed', error }); },
+  );
+  return promise;
 }

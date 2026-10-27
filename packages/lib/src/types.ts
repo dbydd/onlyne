@@ -97,17 +97,34 @@ export interface ReplyPermit {
   message_ref: MessageRef; grantee: NodeId; landing: ThreadRef; expires_at: string;
   remaining: number; revoked: boolean; followup: boolean;
 }
+/**
+ * RFC 0006 §3: the resource's runtime state. `binding` is the one pointer events route
+ * through; `log_readers` is a separate authorization for the append-only log, and a
+ * handover never touches it (§6).
+ */
 export interface Resource {
-  resource_ref: ResourceRef; kind: 'im_conversation' | 'compute_job' | 'dataset' | 'mcp';
-  operations: string[]; assignee?: NodeId; revision: string;
-  readers: NodeId[]; controllers: NodeId[]; event_recipients: NodeId[]; result_recipients: NodeId[];
+  resource_ref: ResourceRef; kind: string; operations: string[];
+  binding: { handler: NodeId; cursor: string };
+  log_readers: NodeId[]; revision: string;
   event_seq: string; retention_ms: number; data?: Json;
 }
+/** RFC 0006 §5: an event belongs to the resource, never to a recipient list. */
 export interface ResourceEvent {
-  resource_ref: ResourceRef; event_id: string; source_id: string; recipients: NodeId[];
-  revision: string; data: Json; at: string; expires_at: string;
-  acknowledged: NodeId[]; expired: boolean;
+  resource_ref: ResourceRef; event_id: string; source_id: string;
+  data: Json; at: string; expires_at: string; expired: boolean;
 }
+/** RFC 0006 §6: the log query. `since` is exclusive, the same side of the cursor an ack names. */
+export interface LogQuery extends PageOptions { since?: string }
+/** What an ack answers: the handler's confirmed position, not the event it named. */
+export interface AckReceipt { resource_ref: ResourceRef; cursor: string }
+/** RFC 0006 §4.3: the probe an endpoint sends to the node it wants to become handler. */
+export interface HandoverProbe {
+  operation_id: string; resource: ResourceRef; kind: string; operations: string[];
+  metadata?: Json; initiator: NodeId; cursor: string; deadline: string;
+}
+export type ProbeAnswer =
+  | { answer: 'accept'; cursor: string }
+  | { answer: 'reject'; reason: string };
 export interface OperationRequest extends Mutation {
   operation_id: string; operation: string; expected_revision?: string; data?: Json;
 }
@@ -118,12 +135,6 @@ export interface OperationResult {
 export interface OperationRecord {
   actor: NodeId; request: OperationRequest; digest: string; result: OperationResult;
   resource_ref: ResourceRef; accepted_at: string; authorized_revision: string;
-}
-export interface Handover {
-  operation_id: string; resource_ref: ResourceRef; initiator: NodeId; target: NodeId;
-  expected_revision: string; decision_deadline: string; accepted: boolean;
-  state: 'pending' | 'committed' | 'aborted'; cutoff_event_id: string | null;
-  scope?: Array<'events' | 'results' | 'control'>;
 }
 export interface Outbound {
   request: SendRequest; expected_author: NodeId; state: 'pending' | 'accepted' | 'refused' | 'unknown';
@@ -155,10 +166,22 @@ export interface Transport {
 }
 export interface MsgInput { delivery_kind: string; msg: string; meta?: Record<string, Json> }
 export interface PreparedSend { to: NodeId; message: Message; plan: DeliveryPlan }
+export type ResourceReadQuery =
+  | ({ op: 'list'; owners?: NodeId[] } & PageOptions)
+  | { op: 'describe'; resource: ResourceRef }
+  | ({ op: 'log'; resource: ResourceRef } & LogQuery)
+  | { op: 'event'; resource: ResourceRef; event_id: string }
+  | ({ op: 'operations'; resource: ResourceRef } & PageOptions)
+  | { op: 'status'; resource: ResourceRef; operation_id: string };
+export interface ResourceInventory {
+  owners: Array<{ owner: NodeId; page: Page<Resource> } | { owner: NodeId; error: Failure }>;
+}
+export type ResourceReadResult = ResourceInventory | Resource | Page<ResourceEvent> | ResourceEvent | Page<OperationRecord> | OperationRecord;
 export type Action =
   | { kind: 'domain'; op: 'create' | 'join' | 'leave' | 'list' | 'describe' | 'discover'; domain_id?: DomainId; expected_revision?: string }
   | { kind: 'send'; to: NodeId; thread?: ThreadRef; context?: string; in_reply_to?: MessageRef; relation?: 'reply' | 'followup'; mentions?: NodeId[]; response: DeliveryPlan['response']; execution: DeliveryPlan['execution'] }
   | { kind: 'read'; scope: 'directory' | 'neighbors' | 'threads' | 'inbox' | 'messages' | 'message' | 'evidence'; thread?: ThreadRef; message?: MessageRef; seq?: string; cursor?: string; page_size?: number; attention?: 'inbox' | 'thread' }
+  | { kind: 'read'; scope: 'resources'; query: ResourceReadQuery }
   | { kind: 'thread'; op: 'create' | 'close' | 'list' | 'describe' | 'member_add' | 'member_remove'; thread?: ThreadRef; to?: NodeId; title?: string }
   | { kind: 'resource'; resource: ResourceRef; operation: string; data?: Json; expected_revision?: string };
 /**
@@ -290,6 +313,16 @@ export function trustPhase(entry: Pick<TrustEntry, 'local_approved' | 'remote_ap
   return entry.local_approved ? 'requested' : 'invited';
 }
 
+/**
+ * What an admission policy may read. The policy runs inside the admission transaction, so it
+ * MUST read through this view and MUST NOT open a storage transaction of its own: the outer
+ * transaction still holds the store, and a nested one waits on it forever.
+ */
+export interface AdmissionContext {
+  /** The peer's exchange stage, or undefined when the two nodes never exchanged keys. */
+  trust(node: NodeId): Promise<TrustPhase | undefined>;
+}
+
 export interface Plugins {
   storage: Storage;
   authenticate(request: Request): Promise<Auth | null>;
@@ -301,11 +334,19 @@ export interface Plugins {
   /** Supplied when the host wants the library to own the maintenance loop (RFC 0017 §6). */
   maintenanceClock?: MaintenanceClock;
   resources?: ResourceDriver;
+  /** The host may adopt a dynamic resource after HTTP authentication and request parsing. */
+  prepareResourceOperation?(auth: Auth, ref: ResourceRef, request: OperationRequest): Promise<void>;
   transport?: Transport;
-  mayAdmit?(actor: NodeId, thread: ThreadRef): Promise<boolean>;
+  mayAdmit?(actor: NodeId, thread: ThreadRef, context: AdmissionContext): Promise<boolean>;
   /** Owner policy permitting a first-contact thread and membership for this actor. */
-  inboundThread?(actor: NodeId): Promise<boolean>;
-  mayHandover?(resource: Resource, initiator: NodeId, target: NodeId): Promise<boolean>;
+  inboundThread?(actor: NodeId, context: AdmissionContext): Promise<boolean>;
+  /**
+   * Target-side handover policy (RFC 0006 §4.3): whether this node takes over the resource
+   * a probe names. The probe's `metadata` is what it judges from; `sender` is the endpoint
+   * whose signature the probe carried. A node without this hook accepts every well-formed
+   * probe from an authenticated peer.
+   */
+  handoverProbe?(probe: HandoverProbe, sender: NodeId): Promise<ProbeAnswer>;
   directory?(): Promise<Json>;
   executionContexts?(): Promise<Json>;
   domainCandidates?(domain_id: DomainId): Promise<NodeId[]>;

@@ -4,7 +4,8 @@
   "type": "module",
   "license": "MIT",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./storage": "./src/storage.ts"
   },
   "bin": "./src/main.ts",
   "files": ["src", "README.md", "LICENSE"],
@@ -15,7 +16,8 @@
   "dependencies": {
     "@onlyne/im-core": "workspace:*",
     "@onlyne/im-fake": "workspace:*",
-    "@onlyne/lib": "workspace:*"
+    "@onlyne/lib": "workspace:*",
+    "@onlyne/node-host": "workspace:*"
   },
   "devDependencies": {
     "@onlyne/im-lark": "workspace:*",

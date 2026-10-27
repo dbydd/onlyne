@@ -1,5 +1,5 @@
 import type {
-  Auth, Json, OperationRequest, OperationResult, Resource, ResourceDriver, ResourceRef,
+  Auth, Json, OperationRequest, OperationResult, Resource, ResourceDriver, ResourceEvent, ResourceRef,
 } from '@onlyne/lib';
 import { OnlyneError, type ResourceService } from '@onlyne/lib';
 import type { Connector, ImEvent, SendOutcome } from './index.js';
@@ -9,6 +9,34 @@ const SEND_TEXT_MAX = 100_000;
 /** Resource-event data is wire JSON: interfaces land as plain objects, never class instances. */
 const wire = (value: object): Json => JSON.parse(JSON.stringify(value)) as Json;
 
+/** A platform name is a resource-id prefix, so it cannot carry the separator that ends it. */
+const PLATFORM_NAME = /^[a-z0-9]+$/;
+
+/**
+ * RFC 0012 §2: a resource id is the connector's platform name plus the platform coordinate. The
+ * coordinate is percent-encoded because a resource id is one path segment, and the encoding is
+ * what makes the rule reversible for coordinates a plain name would not survive.
+ */
+export function resourceIdOf(platform: string, conversation: string): string {
+  if (!PLATFORM_NAME.test(platform)) {
+    throw new OnlyneError('invalid_request', `The platform name ${platform} cannot prefix a resource id.`);
+  }
+  return `${platform}-${encodeURIComponent(conversation)}`;
+}
+
+/** The inverse of `resourceIdOf`; undefined when the id was not derived from a coordinate. */
+export function coordinateOf(id: string): { platform: string; conversation: string } | undefined {
+  const separator = id.indexOf('-');
+  if (separator <= 0) return undefined;
+  const platform = id.slice(0, separator);
+  if (!PLATFORM_NAME.test(platform)) return undefined;
+  try {
+    return { platform, conversation: decodeURIComponent(id.slice(separator + 1)) };
+  } catch {
+    return undefined;
+  }
+}
+
 /** What the bridge records so a later `reply_to_event` resolves to a platform handle. */
 interface HandleRow {
   resource_ref: ResourceRef;
@@ -16,6 +44,13 @@ interface HandleRow {
   conversation: string;
   message_id: string;
   ref_handle: string;
+}
+
+/** The persisted coordinate → resource mapping (RFC 0012 §2): a restart resolves, never re-guesses. */
+interface CoordinateRow {
+  platform: string;
+  conversation: string;
+  resource_ref: ResourceRef;
 }
 
 export interface DriverBridgeOptions {
@@ -31,7 +66,12 @@ export interface DriverBridgeOptions {
     get<T>(key: string): Promise<T | undefined>;
     put<T>(key: string, value: T): Promise<void>;
   }) => Promise<T>): Promise<T> };
-  connectors: Array<{ ref: ResourceRef; connector: Connector }>;
+  connectors: Array<{ platform: string; connector: Connector }>;
+  /**
+   * The endpoint action that creates a conversation's resource and its thread (RFC 0012 §2). The
+   * bridge resolves coordinates; what a resource for a conversation looks like is the host's.
+   */
+  adopt: (ref: ResourceRef, conversation: string) => Promise<void>;
   /**
    * Stores inline attachment bytes and answers the path the connector can read. A host that
    * cannot write files omits it, and an inline attachment is then refused instead of dropped.
@@ -40,6 +80,8 @@ export interface DriverBridgeOptions {
 }
 
 const handleKey = (ref: ResourceRef, eventId: string) => `im/handle/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}/${encodeURIComponent(eventId)}`;
+const coordinateKey = (platform: string, conversation: string) =>
+  `im/conversation/${encodeURIComponent(platform)}/${encodeURIComponent(conversation)}`;
 
 function requireObject(value: Json | undefined, operation: string): Record<string, Json> {
   if (value === undefined || value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -91,16 +133,25 @@ function settleOutcome(outcome: SendOutcome): Omit<OperationResult, 'operation_i
 /**
  * The bridge between the library's resource operations and platform connectors. Deduplication,
  * event identity, and binding live in `ResourceService`; the bridge translates operation data to
- * platform handles and maps connector outcomes onto the operation's three-way result.
+ * platform handles and maps connector outcomes onto the operation's three-way result. It also owns
+ * the coordinate → resource rule: an inbound event names a platform conversation, and a
+ * conversation the endpoint has not served yet is adopted through the host's hook.
  */
 export function createDriverBridge(options: DriverBridgeOptions): ResourceDriver & {
-  receive: (event: ImEvent) => Promise<void>;
+  receive: (event: ImEvent) => Promise<ResourceEvent>;
+  resolve: (platform: string, conversation: string) => Promise<ResourceRef>;
   platformHandle: (ref: ResourceRef, eventId: string) => Promise<{ message_id: string; ref_handle: string } | undefined>;
 } {
   const { node, storage, connectors } = options;
   const resources = () => options.resources();
   const endpoint: Auth = { actor: node };
-  const byRef = new Map(connectors.map(entry => [`${entry.ref.owner}/${entry.ref.id}`, entry.connector]));
+  const byPlatform = new Map(connectors.map(entry => [entry.platform, entry.connector]));
+
+  /** The connector that serves a resource, resolved through the coordinate its id was derived from. */
+  function connectorOf(ref: ResourceRef): Connector | undefined {
+    const coordinate = coordinateOf(ref.id);
+    return coordinate === undefined ? undefined : byPlatform.get(coordinate.platform);
+  }
 
   async function recordHandle(row: HandleRow): Promise<void> {
     await storage.transaction(async tx => { await tx.put(handleKey(row.resource_ref, row.event_id), row); });
@@ -110,11 +161,30 @@ export function createDriverBridge(options: DriverBridgeOptions): ResourceDriver
     return storage.transaction(async tx => tx.get<HandleRow>(handleKey(ref, eventId)));
   }
 
-  async function receive(event: ImEvent): Promise<void> {
-    const ref = connectors.find(entry => entry.connector.platform === event.platform)?.ref;
-    if (ref === undefined) {
-      throw new OnlyneError('invalid_request', `No connector serves platform ${event.platform}.`);
+  /**
+   * RFC 0012 §2: a conversation's resource, adopted on first contact. Registration and thread
+   * creation are idempotent, so two concurrent first touches of one coordinate both adopt and both
+   * write the same mapping row; the second reuses the resource the first created.
+   */
+  async function resolve(platform: string, conversation: string): Promise<ResourceRef> {
+    if (!byPlatform.has(platform)) {
+      throw new OnlyneError('invalid_request', `No connector serves platform ${platform}.`);
     }
+    if (conversation.length === 0) {
+      throw new OnlyneError('invalid_request', 'A conversation coordinate is not empty.');
+    }
+    const known = await storage.transaction(async tx => tx.get<CoordinateRow>(coordinateKey(platform, conversation)));
+    if (known !== undefined) return known.resource_ref;
+    const resource_ref: ResourceRef = { owner: node, id: resourceIdOf(platform, conversation) };
+    await options.adopt(resource_ref, conversation);
+    await storage.transaction(async tx => {
+      await tx.put<CoordinateRow>(coordinateKey(platform, conversation), { platform, conversation, resource_ref });
+    });
+    return resource_ref;
+  }
+
+  async function receive(event: ImEvent): Promise<ResourceEvent> {
+    const ref = await resolve(event.platform, event.conversation);
     const data = wire({
       platform: event.platform,
       conversation: event.conversation,
@@ -129,12 +199,12 @@ export function createDriverBridge(options: DriverBridgeOptions): ResourceDriver
     });
     const stored = await resources().receive(endpoint, ref, { source_id: event.source_id, data });
     const existing = await handleOf(ref, stored.event_id);
-    if (existing !== undefined) return; // a redelivery of an event whose handles we already hold
+    if (existing !== undefined) return stored; // a redelivery of an event whose handles we already hold
     if (event.kind !== 'event' && event.message_handle === undefined) {
       throw new OnlyneError('invalid_request', 'An inbound message event carries its own platform message handle.');
     }
     // A lifecycle event (recall, reaction, bot added) has no message of its own to quote.
-    if (event.message_handle === undefined) return;
+    if (event.message_handle === undefined) return stored;
     // The event's own handles are the reply target for a later outbound message (v2 ImEvent.id
     // and the QQ second id carried over); without them a reply cannot quote this event.
     await recordHandle({
@@ -143,11 +213,12 @@ export function createDriverBridge(options: DriverBridgeOptions): ResourceDriver
       message_id: event.message_handle,
       ref_handle: event.ref_handle ?? event.message_handle,
     });
+    return stored;
   }
 
   return {
     async validate(resource: Resource, operation: string, data: Json | undefined): Promise<void> {
-      const connector = byRef.get(`${resource.resource_ref.owner}/${resource.resource_ref.id}`);
+      const connector = connectorOf(resource.resource_ref);
       if (operation === 'send') {
         const raw = requireObject(data, 'send');
         const card = raw.card;
@@ -201,8 +272,9 @@ export function createDriverBridge(options: DriverBridgeOptions): ResourceDriver
 
     async execute(resource: Resource, request: OperationRequest): Promise<Omit<OperationResult, 'operation_id'>> {
       const ref = resource.resource_ref;
-      const connector = byRef.get(`${ref.owner}/${ref.id}`);
-      if (connector === undefined) {
+      const coordinate = coordinateOf(ref.id);
+      const connector = connectorOf(ref);
+      if (coordinate === undefined || connector === undefined) {
         return { state: 'unknown', error: { code: 'unavailable', message: 'No connector serves this resource.', retryable: true } };
       }
       if (request.operation !== 'send') {
@@ -216,18 +288,17 @@ export function createDriverBridge(options: DriverBridgeOptions): ResourceDriver
         }
       }
       const raw = requireObject(request.data, 'send');
-      const data = (resource.data ?? {}) as Record<string, Json>;
-      const conversation = typeof data.conversation === 'string'
-        ? data.conversation
-        : undefined;
-      if (conversation === undefined) {
-        return { state: 'aborted', error: { code: 'invalid_request', message: 'The resource names no conversation coordinate.', retryable: false } };
-      }
+      // RFC 0012 §5: the send target is the resource's own coordinate, read from the identity that
+      // carries it, so a resource never needs a second copy of its own address.
+      const { conversation } = coordinate;
       let replyTo: string | undefined;
       if (typeof raw.reply_to_event === 'string') {
         const handle = await handleOf(ref, raw.reply_to_event);
         if (handle === undefined) {
-          return { state: 'aborted', error: { code: 'not_found', message: 'The reply references an event this node never received.', retryable: false } };
+          // Event ids are per resource (`1`, `2`, …), so an id this resource does not hold is
+          // either another conversation's or nobody's; RFC 0012 §5 refuses both as the same
+          // caller error instead of pretending the gateway can tell them apart.
+          return { state: 'aborted', error: { code: 'invalid_request', message: 'The reply references an event outside this resource.', retryable: false } };
         }
         replyTo = handle.ref_handle ?? handle.message_id;
       }
@@ -271,6 +342,7 @@ export function createDriverBridge(options: DriverBridgeOptions): ResourceDriver
     },
 
     receive,
+    resolve,
 
     /** The platform handles recorded for one inbound event, so a later reply can quote it. */
     async platformHandle(ref: ResourceRef, eventId: string): Promise<{ message_id: string; ref_handle: string } | undefined> {

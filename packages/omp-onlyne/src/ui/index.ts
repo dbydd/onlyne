@@ -5,17 +5,16 @@ import { detectTernSession } from "../tern.ts";
 import type { OnlyneConfig } from "../types.ts";
 import { OnlyneBootstrap, type BootstrapDefaults } from "./bootstrap.ts";
 import { OnlyneViewer } from "./viewer.ts";
+import { LOCALES, setLocale, type Locale } from "@onlyne/node-host/i18n";
+import { saveConfig } from "../config.ts";
+import { commandText as t } from "./command-text.ts";
+import { registerMsgTool } from "../tool.ts";
+import { refreshMailCards } from "./mail-message.ts";
 
 export { attachStatus, OnlyneStatus } from "./status.ts";
 
-const USAGE = "用法：/onlyne 或 /onlyne menu 打开界面 · /onlyne init 首次创建配置 · /onlyne config 修改配置（含节点密钥）。";
-
 /** The subcommands the slash command accepts, with the one-line hint the editor shows. */
-const SUBCOMMANDS: ReadonlyArray<{ label: string; description: string }> = [
-	{ label: "init", description: "首次创建项目配置（含节点密钥）；已配置时改用 config" },
-	{ label: "config", description: "修改项目配置：region、节点身份、密钥位置、种子地址" },
-	{ label: "menu", description: "打开 Onlyne 界面（与直接 /onlyne 相同）" },
-];
+const SUBCOMMANDS = ["init", "config", "menu", "language"] as const;
 
 export function registerUi(pi: ExtensionAPI): void {
 	let active: AbortController | undefined;
@@ -29,22 +28,37 @@ export function registerUi(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", cancel);
 
 	pi.registerCommand("onlyne", {
-		description: "Show the Onlyne queue and threads, or edit the project config",
+		description: t("description"),
 		getArgumentCompletions(argumentPrefix: string) {
 			const prefix = argumentPrefix.trim().toLowerCase();
-			const matches = SUBCOMMANDS.filter(item => item.label.startsWith(prefix));
-			return matches.length === 0 ? null : matches.map(item => ({ label: item.label, value: item.label, description: item.description }));
+			const matches = SUBCOMMANDS.filter(item => item.startsWith(prefix));
+			return matches.length === 0 ? null : matches.map(item => ({ label: item, value: item, description: t(item) }));
 		},
 		handler: async (args, ctx) => {
 			const command = args.trim();
+			if (command === "language" || command.startsWith("language ")) {
+				const language = command.slice("language".length).trim();
+				if (!LOCALES.includes(language as Locale)) { ctx.ui.notify(t("usage"), "warning"); return; }
+				try {
+					const runtime = getRuntime();
+					const config = runtime?.config ?? await loadConfig(ctx.cwd);
+					await saveConfig({ ...config, language: language as Locale });
+					if (runtime !== undefined) runtime.config.language = language as Locale;
+					setLocale(language as Locale);
+					registerMsgTool(pi);
+					refreshMailCards();
+					ctx.ui.notify(t("selected", { language }), "info");
+				} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
+				return;
+			}
 			if (command !== "" && command !== "init" && command !== "config" && command !== "menu" && command !== "settings") {
-				ctx.ui.notify(USAGE, "warning");
+				ctx.ui.notify(t("usage"), "warning");
 				return;
 			}
 			if (!ctx.hasUI) {
 				pi.sendMessage({
 					customType: "onlyne.ui-unavailable",
-					content: "Onlyne 的查看界面和配置面板需要交互式终端。请在交互式终端运行 /onlyne init 生成项目配置。",
+					content: t("unavailable"),
 					display: true,
 					attribution: "agent",
 				});
@@ -58,7 +72,7 @@ export function registerUi(pi: ExtensionAPI): void {
 				if (command === "init") {
 					const existing = runtime?.config ?? (await loadConfig(ctx.cwd).catch(() => undefined));
 					if (existing !== undefined) {
-						ctx.ui.notify("这个项目已经配置过，修改请用 /onlyne config。", "info");
+						ctx.ui.notify(t("configured"), "info");
 						return;
 					}
 				}
@@ -78,10 +92,10 @@ export function registerUi(pi: ExtensionAPI): void {
 					const current = runtime?.config ?? (await loadConfig(ctx.cwd).catch(() => undefined));
 					const savedRegion = current?.region;
 					const regionSource = savedRegion !== undefined
-						? "Region 来自当前配置"
+						? t("savedRegion")
 						: tern === undefined
-							? "未检测到 Tern session；请填写 region"
-							: `Region 建议值来自 Tern session "${tern}"，可修改`;
+							? t("noTern")
+							: t("ternRegion", { name: tern });
 					const defaults: BootstrapDefaults = {
 						region: savedRegion ?? tern ?? "",
 						regionSource,

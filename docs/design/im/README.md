@@ -33,10 +33,13 @@ flowchart LR
 
 | 边界 | 谁负责 | 依据 |
 |---|---|---|
-| 协议状态机（去重、event_id、绑定表、交接、积压） | lib `ResourceService`，gateway 进程内 | RFC 0012 §4-§6；`packages/lib/src/resources.ts:14-28` 已实现 |
+| 协议状态机（去重、event_id、绑定表、交接、日志读取） | lib `ResourceService`，gateway 进程内 | RFC 0012 §4-§6；`packages/lib/src/resources.ts` 已实现 |
 | 平台连接与翻译 | 平台连接器包，gateway 进程内 | RFC 0012 §4 入站路径；连接器是进程内模块，不是 v2 的必需子进程 |
 | 进程间交互 | 只有 HTTP `/onlyne/v3`，经 RFC 0017 签名 | RFC 0000 分层；agent 侧零平台耦合 |
 | 平台凭据 | gateway 宿主的凭据目录，agent 不接触 | RFC 0012 §8 |
+| 会话 thread 及其生命周期 | gateway，它是 chat bot service 界面的主体 | 本节 §4.1；协议层不规定 |
+
+一个连接器是一条连接，不是一条会话。gateway 同时服务该连接器上的全部平台会话，一条会话一个资源（RFC 0012 §2）。会话集合在运行时增减：机器人被拉进新群、有人私聊它，都由 adopt 建资源，不需要重启，也不需要预先写进配置。交接以会话为最小单位。
 
 选择独立进程而不是嵌进 omp 插件，理由有三：
 
@@ -45,6 +48,14 @@ flowchart LR
 3. **状态单一持有。** 去重、游标、绑定都在 gateway 的事务里，agent 侧没有第二份状态机可撞（调研报告对 Vercel Chat SDK 的否决理由，厂商自证：Lark vendor adapter 必须禁用 SDK 内置去重避免双份状态处理）。
 
 代价：多一个常驻进程要运维，凭据目录与发现记录跟着 gateway 走。换来上面三条，值得。
+
+### 1.1 网络发现与身份
+
+网关和 OMP 共用 `@onlyne/node-host` 的 DNS-SD 发布、浏览与密钥文件实现。文件访问留在宿主包，协议库接收密钥钩子。CLI 在 HTTP 服务就绪后发布实际端口，持续观察候选，每 30 秒刷新已知地址。进程退出时撤销发布并停止浏览。
+
+CLI 首次启动自动生成身份密钥，保存在用户的 Onlyne 密钥目录，重启沿用。网关的 HTTP 请求使用 RFC 0017 签名。发现只增加候选，用户在 OMP 指纹卡片和网关终端确认信任。网关终端是一张全屏信任界面：节点列表带交换阶段，选中项显示完整 id、端点与指纹，`t`/`a` 先展示指纹再等 `y`，`r` 撤销，`c` 输入地址。日志进界面底部的环形缓冲，同时写 `<storage 目录>/gateway.log`。用户无需编辑指纹或端口配置。
+
+节点行同时显示交换阶段与「投送」标记：前者是密钥配对，后者表示当前有资源绑定指向该节点。两者独立推导，界面不把任何一个当作另一个的证据。跨网络连接通过 OMP 的地址输入或网关界面里的 `c` 联系节点。启动种子与交互添加的地址使用同一发现路径。资源的 handler 权限继续由资源绑定判定。
 
 ## 2. 包结构
 
@@ -123,7 +134,7 @@ export interface SendOutcome {
 
 设计规则：
 
-- 连接器无状态。去重、游标推进、绑定判定都不在连接器里；它只做翻译（v2 `update.rs`/`render.rs` 的纯函数纪律）。
+- 连接器无状态。去重、游标推进、绑定判定都不在连接器里；它只做翻译（v2 `update.rs`/`render.rs` 的纯函数纪律）。一个连接器服务它这条连接上的全部平台会话：事件按 `conversation` 分流，发送按 `request.conversation` 寻址，连接器自己不记会话表。
 - `SendOutcome` 无 `aborted`：驱动层把「平台明确拒绝」判定为 `aborted` 并保留原文（`error` 字段），「结果不明」交给 `unknown`——三态的裁决在 driver 桥，不在连接器。
 - 生命周期事件（撤回、反应、入群）走 `kind: 'event'`，正文为空，载荷在 `event.data`；它们没有自己的消息句柄，不参与 `reply_to_event` 解析。
 - 凭据经构造注入（路径或值对象），连接器不读 argv、不自己落盘。「登录先写后验」的清理责任在 gateway 的登录流程，RFC 0012 §8 要求先验后写。
@@ -142,17 +153,21 @@ export interface SendOutcome {
 桥接的库侧事实（钉住设计的三条）：
 
 1. **操作幂等在 lib。** `claimOperation`（`resources.ts:201-223`）先落 intent 再产生外部效果；`execute` 超时返回 `unknown` 后外部调用继续，后续结果经 `report(ref, id, value, true)` 补记（`resources.ts:635-653`）。桥不需要自己的重试去重。
-2. **事件接收在 lib。** 桥把 `ImEvent` 交给 `resources.receive(endpoint_auth, ref, { source_id, data })`，`receive` 在一个事务里完成去重、event_id 分配、pending 队列追加（`resources.ts:449-476`）。桥对 `receive` 返回的重复事件静默吞掉（平台重投是常态）。
+2. **事件接收在 lib。** 桥把 `ImEvent` 交给 `resources.receive(endpoint_auth, ref, { source_id, data })`，`receive` 在一个事务里完成去重、event_id 分配与日志追加。桥对 `receive` 返回的重复事件静默吞掉（平台重投是常态）。
 3. **`reply_to_event` 翻译在桥。** 操作 `data.reply_to_event` 是应用层 event_id；桥从 gateway 的 `event_id → (平台 message_id, ref_handle)` 索引查出平台句柄再交给连接器。这个索引是 gateway 的本地状态，落在同一存储。
 
-### 4.1 会话 thread 与回复回流
+### 4.1 事件投影与回复回流
 
-lib 的 `receive` 只把事件放进 pending 队列，不推给 assignee（assignee 也可以自己拉 `GET /resources/{owner}/{id}/events` + `ack`）。RFC 0012 §4 第 4 条要求推送，RFC 0012 §1 要求 gateway 是会话的 thread owner——两件事由同一对组件实现：`pusher.ts` 把事件投影进会话 thread，`render.ts` 把 agent 的回复送出去。
+投影形状是插件行为，不是协议要求。RFC 0012 只规定 endpoint 交付资源操作与事件日志，把一条会话投影成 agent 侧的哪种形状由接入层自己定。
+
+飞书这一侧的取舍是：thread 投影留在网关里，网关自行维护 thread 的生命周期。网关是 IM chat bot service 这个界面的主体，是会话 thread 的 owner，负责建 thread、分配 seq、把 agent 回复渲染回平台。协议层不持有这个决定，也不依赖它。
+
+一条会话一个 thread。adopt 一条会话时建它的 thread，会话退役后 thread 保留为可读历史，id 不复用。
 
 | 步骤 | 实现 | 落点 |
 |---|---|---|
-| 会话 thread | 注册资源时建一次，id 取 `im-<资源 id>`，owner 是 gateway | `index.ts` 的 `ensureThread` |
-| 事件投影 | `receive` 后向 `recipients[0]` 发一条 `delivery_kind: 'notify'` 消息，`meta.thread` 指向会话 thread，正文是平台正文，`meta.data` 带 `{ resource_ref, event_id, source_id, platform, conversation, from, reply, attachments?, action?, event? }` | `pusher.ts` |
+| 会话 thread | adopt 资源时建一次，id 取 `im-<资源 id>`，owner 是 gateway | `index.ts` 的 `ensureThread` |
+| 事件投影 | `receive` 后向当前 handler 发一条 `delivery_kind: 'notify'` 消息，`meta.thread` 指向会话 thread，正文是平台正文，`meta.data` 带 `{ resource_ref, event_id, source_id, platform, conversation, from, reply, attachments?, action?, event? }` | `pusher.ts` |
 | 投影索引 | 记 `im/notify/<owner>/<资源>/<message id> → event_id`，供回复引用时反查平台句柄 | `pusher.ts` |
 | 回复回流 | 维护环按 `im/render/<owner>/<资源>` 游标读该 thread 的新条目，跳过 gateway 自己的投影，经连接器发回平台；条目若 `in_reply_to` 指向投影，则引用该事件对应的平台消息 | `render.ts` |
 | 送达状态 | 发送前写 `rendering`，成功写 `rendered` 并推进游标；平台明确拒绝则删除标记、游标不动，下一轮重试 | `render.ts` |
@@ -163,7 +178,7 @@ lib 的 `receive` 只把事件放进 pending 队列，不推给 assignee（assig
 
 ### 4.2 agent 视角：收发的两种形状
 
-assignee 看到的入站是一条普通消息，`msg` 是平台正文，`meta.data` 带坐标与平台载荷：
+handler 看到的入站是一条普通消息，`msg` 是平台正文，`meta.data` 带坐标与平台载荷：
 
 ```json
 {
@@ -204,6 +219,8 @@ assignee 看到的入站是一条普通消息，`msg` 是平台正文，`meta.da
   "reply_in_thread": true
 }
 ```
+
+`data` 不带 `conversation`：一条会话一个资源，发送目标就是该资源自己的会话坐标。寻址另一条会话，就操作另一个资源。`reply_to_event` 只接受本资源内的 `event_id`，跨资源引用返回 `invalid_request`。
 
 附件两条来源：`path` 是 endpoint 主机可读的路径（共享工作区）；`content` 是 base64 字节，由 gateway 落到 `media_dir/outbound/<资源>/<uuid>-<name>` 再交给连接器。二者只能给一个。请求体受 lib 的 `request_bytes`（默认 1 MiB）约束，base64 再膨胀三分之一，所以大文件走共享路径而不是内联。
 
@@ -251,13 +268,14 @@ assignee 看到的入站是一条普通消息，`msg` 是平台正文，`meta.da
 ## 6. 验收方法
 
 - `im-fake` 连接器提供脚本化事件流与发送应答，验收不连任何平台（v2 fake 后端的用法，`archive/crates/onlyne-im-backend-fake/src/main.rs` 语义）。
-- 冒烟场景：注册资源 → fake 注入两条同 `source_id` 事件 → 断言只产生一条 `event_id` → assignee `ack` → `send` 操作三态 → 交接五步含积压围栏。逐条对应 RFC 0012 §10。
+- 冒烟场景：注册资源 → fake 注入两条同 `source_id` 事件 → 断言只产生一条 `event_id` → handler 确认消费推进游标 → `send` 操作三态 → 三段式交接（探测成功换 handler，探测失败回到原 handler）。逐条对应 RFC 0012 §10。
+- 多会话场景：同一连接器注入两个不同 `conversation` 的事件 → 断言落进两个资源、两个 thread，各自分配事件 id → 交接其中一条，另一条的 handler 与游标不变。对应 RFC 0012 §10 的多会话条目。
 - 全仓 `bun run check` 与 `bun run test` 保持绿。
 - 真实平台冒烟：`bun tests/live.ts --env <env 文件>`（`packages/im-lark` 内执行）打印机器人身份、WS 状态与机器人可见会话；`--wait <ms>` 保持连接打印入站事件，`--send <chat_id>` 发一条测试消息。它缺凭据时自动跳过，不进默认 `bun run test`。平台侧前提：开发者后台把「事件与回调 → 订阅方式」设为长连接并订阅 `im.message.receive_v1`，且机器人已被拉进至少一个会话——否则连接成功但收不到事件、会话列表为空。
 
 ## 7. 开放项
 
-- 事件推送与回复回流（已决，见 §4.1）：投影消息进会话 thread，渲染环按游标把 agent 回复送出去。
+- 事件推送与回复回流（已决，见 §4.1）：投影消息进会话 thread，渲染环按游标把 agent 回复送出去。这一节是飞书侧选择，换平台时替换。
 - **意图判定（decider）属于 IM 节点的内部实现，不归 RFC。** 飞书暴露的能力面很宽（23 种消息类型、卡片、按钮、回应），把原始能力原样交给模型会造成很大的判断压力；节点需要时再引入自己的判定层（例如先收敛成少数几种动作），这与 v2 把 SystemOne 塞进网关的做法相反。目前不做，等实际遇到这种复杂度再加。
 - `event_id → 平台句柄` 索引的保留期：与资源事件共享 `retention_ms`，超期清理的扫描挂在维护环上。
 - QQ、Slack、Telegram 连接器未开工；每个接入前先核对社区调研报告对应小节的版本与平台事实。

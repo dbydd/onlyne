@@ -14,11 +14,13 @@
 
 库不主动访问文件系统。唯一的 Node 内置依赖是 `node:crypto`，用于 Ed25519 签名、SHA-256 摘要与随机标识。所有持久事实都写进宿主给的 `Storage`，并落在同一个事务里。
 
+HTTP 资源操作在认证并解析请求后调用宿主的 `prepareResourceOperation(auth, ref, request)`，供 IM 网关按会话坐标创建动态资源。库随后检查资源权限并执行操作。宿主通过这个钩子复用已验证身份，请求的签名与 nonce 只校验一次。
+
 ## 2. 模块布局
 
 | 文件 | 内容 | 对外符号 |
 |---|---|---|
-| `core.ts` | 上下文、错误码到 HTTP 状态的映射、持久键编码、规范序列化、摘要、分页 | `OnlyneError`、`fail`、`key`、`canonical`、`same`、`fingerprint`、`page`、`createContext` |
+| `core.ts` | 上下文、错误码到 HTTP 状态的映射、持久键编码、规范序列化、摘要、分页、接纳事务的只读视图 | `OnlyneError`、`fail`、`key`、`canonical`、`same`、`fingerprint`、`page`、`createContext`、`admissionView` |
 | `types.ts` | 协议类型、插槽接口、通知与追踪事件 | 全部数据类型；`trustPhase` |
 | `node.ts` | 把各服务装成一个节点，决定传输层是否启用签名 | `OnlyneNode`（`threads`、`messages`、`resources`、`domains`、`discovery`、`keys`、`trust`、`client`、`transport`、`fetch`、`auth`） |
 | `threads.ts` | thread 生命周期、成员与读写权限、授权通知、已知 thread 表 | `ThreadService`、`canRead`、`getThread` |
@@ -37,6 +39,8 @@
 ## 3. 存储与键空间
 
 `Storage.transaction` 提供一次原子提交：读到本事务已写入的值，`scan(prefix)` 返回匹配行。返回顺序由实现决定，库不依赖它，需要顺序的调用方自己排序。库不假设跨事务隔离级别，也不做乐观版本比较以外的并发控制；宿主的 SQLite 实现把事务串行化（`BEGIN IMMEDIATE` 加尾部队列），并按主键排序返回扫描结果。
+
+接纳策略插件（`mayAdmit`、`inboundThread`）在接纳事务内部执行，所以库通过 `AdmissionContext` 把该事务的只读视图交给它。策略 MUST 用它读信任阶段，MUST NOT 自己调用 `storage.transaction`：宿主的事务是串行的，嵌套事务要等外层释放，而外层正等着策略返回。
 
 所有键由 `key(...parts)` 生成：每段 `encodeURIComponent` 后用 `/` 连接。因此扫描前缀必须是完整的第一段或前几段，不能用编码后的片段猜行。
 

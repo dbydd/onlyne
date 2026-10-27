@@ -1,4 +1,4 @@
-import { fail, key, page, requireValue, utc } from './core.js';
+import { admissionView, fail, key, page, requireValue, utc } from './core.js';
 import type { Context } from './core.js';
 import type { Auth, Entry, Event, Grant, Json, Member, MessageRef, Mutation, Page, PageOptions, ReadScope, ReplyPermit, Thread, ThreadRef, Transaction } from './types.js';
 
@@ -206,7 +206,7 @@ export class ThreadService {
         if (current === undefined) {
           if (patch.state === 'revoked') fail('not_found', 'No membership record to withdraw.');
           if (thread.state === 'closed') fail('thread_closed', 'A closed thread does not accept joins.');
-          const admitted = (await this.ctx.options.plugins.mayAdmit?.(auth.actor, ref)) === true;
+          const admitted = (await this.ctx.options.plugins.mayAdmit?.(auth.actor, ref, admissionView(tx))) === true;
           next = { peer, state: admitted ? 'active' : 'requested', access: [...DEFAULT_ACCESS], read_scope: {}, revision: this.ctx.id() };
         } else if (patch.state === 'revoked') {
           if (current.state !== 'active' && current.state !== 'requested') fail('conflict', 'This membership is already stopped.');

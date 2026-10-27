@@ -2,8 +2,8 @@ import { OnlyneError, canonical, fail, same } from './core.js';
 import { createHash } from 'node:crypto';
 import type { Context } from './core.js';
 import type {
-  Auth, DeliveryPlan, DomainMutation, Event, Grant, Json, Member, Message, MessageQuery, Mutation, PageOptions,
-  OperationRequest, ReadScope, Resource, ResourceEvent, SendRequest,
+  Auth, DeliveryPlan, DomainMutation, Event, Grant, HandoverProbe, Json, LogQuery, Member, Message, MessageQuery,
+  Mutation, PageOptions, OperationRequest, ReadScope, Resource, ResourceEvent, SendRequest,
 } from './types.js';
 import type { ThreadService } from './threads.js';
 import type { MessageService } from './messages.js';
@@ -146,6 +146,20 @@ function pageOptions(params: URLSearchParams): PageOptions {
   return { ...(cursor === null ? {} : { cursor }), ...(size === null ? {} : { page_size: Number(size) }) };
 }
 
+/** RFC 0006 §6: `since` and `limit` are the log's own query names; `cursor` pages past the last page. */
+function logQuery(params: URLSearchParams): LogQuery {
+  const cursor = params.get('cursor');
+  const since = params.get('since');
+  const limit = params.get('limit');
+  if (since !== null && !/^(0|[1-9][0-9]*)$/.test(since)) fail('invalid_request', 'since must be a decimal sequence string.');
+  if (limit !== null && !/^([1-9][0-9]?|100)$/.test(limit)) fail('invalid_request', 'limit must be from 1 to 100.');
+  return {
+    ...(cursor === null ? {} : { cursor }),
+    ...(since === null ? {} : { since }),
+    ...(limit === null ? {} : { page_size: Number(limit) }),
+  };
+}
+
 function messageQuery(params: URLSearchParams): MessageQuery {
   const attention = params.get('attention');
   if (attention !== null && attention !== 'inbox' && attention !== 'thread') fail('invalid_request', 'attention must be inbox or thread.');
@@ -260,13 +274,11 @@ function grant(value: unknown): Grant {
 
 function resourceRecord(value: unknown): Resource {
   const raw = shape(value, 'resource', [
-    'resource_ref', 'kind', 'operations', 'assignee', 'revision', 'readers', 'controllers',
-    'event_recipients', 'result_recipients', 'event_seq', 'retention_ms', 'data',
+    'resource_ref', 'kind', 'operations', 'binding', 'log_readers', 'revision', 'event_seq', 'retention_ms', 'data',
   ]);
-  const kind = string(raw.kind, 'resource.kind');
-  if (kind !== 'im_conversation' && kind !== 'compute_job' && kind !== 'dataset' && kind !== 'mcp') {
-    fail('invalid_request', 'resource.kind must be im_conversation, compute_job, dataset or mcp.');
-  }
+  const binding = shape(raw.binding, 'resource.binding', ['handler', 'cursor']);
+  const cursor = string(binding.cursor, 'resource.binding.cursor');
+  if (!/^(0|[1-9][0-9]*)$/.test(cursor)) fail('invalid_request', 'resource.binding.cursor must be a decimal sequence string.');
   const nodes = (name: string) => list(raw[name] ?? [], `resource.${name}`, (entry, at) => string(entry, at));
   const eventSeq = optionalString(raw.event_seq, 'resource.event_seq');
   if (eventSeq !== undefined && !/^(0|[1-9][0-9]*)$/.test(eventSeq)) fail('invalid_request', 'resource.event_seq must be a decimal sequence string.');
@@ -275,17 +287,28 @@ function resourceRecord(value: unknown): Resource {
   }
   return {
     resource_ref: resourceRef(raw.resource_ref, 'resource.resource_ref'),
-    kind,
+    kind: string(raw.kind, 'resource.kind'),
     operations: list(raw.operations ?? [], 'resource.operations', (entry, at) => string(entry, at)),
-    ...(raw.assignee === undefined ? {} : { assignee: string(raw.assignee, 'resource.assignee') }),
+    binding: { handler: string(binding.handler, 'resource.binding.handler'), cursor },
+    log_readers: nodes('log_readers'),
     revision: string(raw.revision, 'resource.revision'),
-    readers: nodes('readers'),
-    controllers: nodes('controllers'),
-    event_recipients: nodes('event_recipients'),
-    result_recipients: nodes('result_recipients'),
     event_seq: eventSeq ?? '0',
     retention_ms: (raw.retention_ms as number | undefined) ?? 0,
     ...(raw.data === undefined ? {} : { data: raw.data as Resource['data'] }),
+  };
+}
+
+function probeBody(value: unknown): HandoverProbe {
+  const raw = shape(value, 'body', ['operation_id', 'resource', 'kind', 'operations', 'metadata', 'initiator', 'cursor', 'deadline']);
+  return {
+    operation_id: string(raw.operation_id, 'operation_id'),
+    resource: resourceRef(raw.resource, 'resource'),
+    kind: string(raw.kind, 'kind'),
+    operations: list(raw.operations, 'operations', (entry, at) => string(entry, at)),
+    ...(raw.metadata === undefined ? {} : { metadata: raw.metadata as Json }),
+    initiator: string(raw.initiator, 'initiator'),
+    cursor: string(raw.cursor, 'cursor'),
+    deadline: string(raw.deadline, 'deadline'),
   };
 }
 
@@ -386,7 +409,7 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
 
   /** RFC 0017: an authenticated answer to a signed request carries the responder's signature. */
   async function signed(request: Request, response: Response): Promise<Response> {
-    if (trust === undefined || request.headers.get(SIGNATURE_HEADER) === null) return response;
+    if (trust === undefined || keys?.enabled !== true || request.headers.get(SIGNATURE_HEADER) === null) return response;
     await trust.signResponse(request, response, await response.clone().text());
     return response;
   }
@@ -586,6 +609,20 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
         return respond(await messages.admit(auth, sendRequest(request, await json(request, limit, rawBody), undefined)), 201);
       }
 
+      // RFC 0006 §4.3: the target side of a handover. A probe is a peer request like any
+      // other, so it passes the same signature check before it is read.
+      if (path.length >= 2 && path[0] === 'handover' && path[1] === 'probes') {
+        if (path.length === 2) {
+          expect(request, 'POST');
+          return respond(await resources.probe(auth, probeBody(await json(request, limit, rawBody))), 201);
+        }
+        if (path.length === 3) {
+          expect(request, 'GET');
+          return respond(await resources.probeAnswer(auth, path[2]!));
+        }
+        fail('not_found', 'Unknown route.');
+      }
+
       if (path.length === 1 && path[0] === 'threads') {
         if (request.method === 'GET') return respond(await threads.list(auth, pageOptions(params)));
         if (request.method === 'POST') {
@@ -601,11 +638,6 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
           return respond(created, 201);
         }
         fail('not_found', 'Unknown route.');
-      }
-
-      if (path.length === 2 && path[0] === 'resources' && path[1] === 'invitations') {
-        expect(request, 'GET');
-        return respond(await resources.invitations(auth, pageOptions(params)));
       }
 
       if (path.length === 1 && path[0] === 'resources') {
@@ -751,7 +783,9 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
           if (path.length === 4) {
             if (request.method === 'GET') return respond(await resources.operations(auth, ref, pageOptions(params)));
             if (request.method === 'POST') {
-              return respond(await resources.operate(auth, ref, operationRequest(request, await json(request, limit, rawBody)), request.signal), 201);
+              const operation = operationRequest(request, await json(request, limit, rawBody));
+              await ctx.options.plugins.prepareResourceOperation?.(auth, ref, operation);
+              return respond(await resources.operate(auth, ref, operation, request.signal), 201);
             }
             fail('not_found', 'Unknown route.');
           }
@@ -762,18 +796,25 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
           fail('not_found', 'Unknown route.');
         }
 
-        if (tail === 'events') {
+        // RFC 0006 §6: the log is read on its own route, from the endpoint's storage and
+        // never through the binding, so it stays readable while the handler is away.
+        if (tail === 'log') {
           if (path.length === 4) {
-            if (request.method === 'GET') return respond(await resources.events(auth, ref, pageOptions(params)));
-            if (request.method === 'POST') {
-              const event: ResourceEvent = await resources.receive(auth, ref, eventBody(await json(request, limit, rawBody)));
-              return respond(event, 201);
-            }
-            fail('not_found', 'Unknown route.');
+            expect(request, 'GET');
+            return respond(await resources.log(auth, ref, logQuery(params)));
           }
           if (path.length === 5) {
             expect(request, 'GET');
             return respond(await resources.event(auth, ref, path[4]!));
+          }
+          fail('not_found', 'Unknown route.');
+        }
+
+        if (tail === 'events') {
+          if (path.length === 4) {
+            expect(request, 'POST');
+            const event: ResourceEvent = await resources.receive(auth, ref, eventBody(await json(request, limit, rawBody)));
+            return respond(event, 201);
           }
           if (path.length === 6 && path[5] === 'ack') {
             expect(request, 'POST');
@@ -781,14 +822,6 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
             return respond(await resources.ack(auth, ref, path[4]!, mutation(request, raw)));
           }
           fail('not_found', 'Unknown route.');
-        }
-
-        if (tail === 'handovers') {
-          if (path.length !== 6 || path[5] !== 'decision') fail('not_found', 'Unknown route.');
-          expect(request, 'POST');
-          const raw = shape(await json(request, limit, rawBody), 'body', ['idempotency_key', 'retry_until', 'accepted']);
-          if (typeof raw.accepted !== 'boolean') fail('invalid_request', 'accepted must be a boolean.');
-          return respond(await resources.decideHandover(auth, ref, path[4]!, raw.accepted, mutation(request, raw)));
         }
 
         fail('not_found', 'Unknown route.');
@@ -800,5 +833,9 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
     }
   }
 
-  return async (request: Request): Promise<Response> => signed(request, await handle(request));
+  return async (request: Request): Promise<Response> => {
+    const response = await handle(request);
+    try { return await signed(request, response); }
+    catch (error) { return failure(error); }
+  };
 }

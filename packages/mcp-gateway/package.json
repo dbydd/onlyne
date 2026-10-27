@@ -1,0 +1,25 @@
+{
+  "name": "@onlyne/mcp-gateway",
+  "version": "3.0.0",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": "./src/main.ts",
+  "files": ["src", "README.md", "LICENSE"],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun tests/verify.ts"
+  },
+  "dependencies": {
+    "@onlyne/im-gateway": "workspace:*",
+    "@onlyne/lib": "workspace:*",
+    "@onlyne/mcp-core": "workspace:*",
+    "@onlyne/node-host": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}

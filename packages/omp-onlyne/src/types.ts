@@ -1,4 +1,5 @@
 import type { MessageRef, NodeId, ThreadRef, TrustPhase, TrustSeed } from "@onlyne/lib";
+import type { Locale } from "@onlyne/node-host/i18n";
 
 /**
  * Project-scoped configuration in `<project>/.onlyne/config.toml`.
@@ -8,6 +9,7 @@ import type { MessageRef, NodeId, ThreadRef, TrustPhase, TrustSeed } from "@only
  */
 export interface OnlyneConfig {
 	path: string;
+	language?: Locale;
 	/** Protocol membership, independent from the node identity. */
 	region: string;
 	node: {

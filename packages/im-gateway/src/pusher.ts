@@ -1,4 +1,4 @@
-import type { Json, OnlyneClient, ResourceEvent, ResourceRef, Storage, ThreadRef } from '@onlyne/lib';
+import type { Json, NodeId, OnlyneClient, ResourceEvent, ResourceRef, Storage, ThreadRef } from '@onlyne/lib';
 
 /** One event whose notify message has not been confirmed delivered. */
 interface OwedPush {
@@ -27,17 +27,19 @@ function bodyOf(data: Record<string, Json>): string {
 }
 
 /**
- * The push loop. After each accepted `receive` the gateway sends the first recipient a message
- * into the conversation's own thread (RFC 0012 §1: one thread per platform conversation, owned
- * by the gateway), so the assignee reads the platform body in place and the thread's `seq` grows
- * with arrival order. The attempt is recorded before sending, so a failed push is retried by the
- * maintenance ring until the record is dropped.
+ * The push loop. After each accepted `receive` the gateway sends the resource's current handler a
+ * message into the conversation's own thread (RFC 0012 §1: one thread per platform conversation,
+ * owned by the gateway), so the handler reads the platform body in place and the thread's `seq`
+ * grows with arrival order. An event carries no recipient (RFC 0006 §5), so every attempt resolves
+ * the handler again and a handover moves the push target with the binding. The attempt is recorded
+ * before sending, so a failed push is retried by the maintenance ring until the record is dropped.
  */
 export class EventPusher {
   readonly #client: () => OnlyneClient;
   readonly #storage: Storage;
   readonly #sender: string;
   readonly #threadOf: (ref: ResourceRef) => ThreadRef | undefined;
+  readonly #handlerOf: (ref: ResourceRef) => Promise<NodeId | undefined>;
   readonly #log: (message: string, fields?: Record<string, unknown>) => void;
 
   constructor(options: {
@@ -45,25 +47,25 @@ export class EventPusher {
     storage: Storage;
     sender: string;
     threadOf?: (ref: ResourceRef) => ThreadRef | undefined;
+    handlerOf?: (ref: ResourceRef) => Promise<NodeId | undefined>;
     log?: (message: string, fields?: Record<string, unknown>) => void;
   }) {
     this.#client = options.client;
     this.#storage = options.storage;
     this.#sender = options.sender;
     this.#threadOf = options.threadOf ?? (() => undefined);
+    this.#handlerOf = options.handlerOf ?? (async () => undefined);
     this.#log = options.log ?? (() => undefined);
   }
 
   /** Records the owed push before sending, then attempts it. A failure stays owed for the ring. */
   async afterReceive(ref: ResourceRef, event: ResourceEvent): Promise<void> {
-    const recipient = event.recipients[0];
-    if (recipient === undefined) return;
     await this.#storage.transaction(async tx => { await tx.put(owedKey(ref, event.event_id), { ref, event }); });
-    await this.deliverOne(ref, event.event_id, recipient);
+    await this.deliverOne(ref, event.event_id);
   }
 
   /** One attempt; the owed row is deleted only when the notify message was accepted. */
-  async deliverOne(ref: ResourceRef, eventId: string, recipient: string): Promise<void> {
+  async deliverOne(ref: ResourceRef, eventId: string): Promise<void> {
     const client = this.#client();
     try {
       const stored = await this.#storage.transaction(async tx =>
@@ -73,6 +75,11 @@ export class EventPusher {
         // Registration creates the thread before connectors start, so this is a misconfigured
         // resource rather than a transient fault; the owed row stays and is retried.
         this.#log('im.push.no_thread', { ref: `${ref.owner}/${ref.id}`, event: eventId });
+        return;
+      }
+      const recipient = await this.#handlerOf(ref);
+      if (recipient === undefined) {
+        this.#log('im.push.no_handler', { ref: `${ref.owner}/${ref.id}`, event: eventId });
         return;
       }
       const data = (stored?.event.data ?? {}) as Record<string, Json>;
@@ -125,13 +132,6 @@ export class EventPusher {
     const rows = await this.#storage.transaction(async tx =>
       (await tx.scan<OwedPush>('im/push/')).map(row => row.value));
     rows.sort((a, b) => (a.event.at < b.event.at ? -1 : a.event.at > b.event.at ? 1 : 0));
-    for (const row of rows) {
-      const recipient = row.event.recipients[0];
-      if (recipient === undefined) {
-        await this.#storage.transaction(async tx => { await tx.delete(owedKey(row.ref, row.event.event_id)); });
-        continue;
-      }
-      await this.deliverOne(row.ref, row.event.event_id, recipient);
-    }
+    for (const row of rows) await this.deliverOne(row.ref, row.event.event_id);
   }
 }

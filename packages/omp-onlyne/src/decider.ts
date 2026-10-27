@@ -13,12 +13,15 @@ import {
 	type MsgInput,
 	type NodeId,
 	type Page,
+	type ResourceReadQuery,
 	type Thread,
 	type ThreadRef,
 	OnlyneError,
 } from "@onlyne/lib";
+import { getLocale } from "@onlyne/node-host/i18n";
 import type { ContextRecord, OnlyneConfig } from "./types.ts";
 import { canAnswer, type ContextRegistry } from "./store.ts";
+import { text } from "./decider-text.ts";
 
 type Row = Record<string, unknown>;
 
@@ -115,6 +118,7 @@ export interface DeciderDeps {
 	listPeers(): Promise<PeerRecord[]>;
 	/** Contexts the target node publishes for `execution: existing`. */
 	listReceiverContexts(nodeId: NodeId): Promise<ReceiverContext[]>;
+	resourceQuery?(meta: Record<string, Json>): Promise<ResourceReadQuery>;
 }
 
 const TODO_ENTRY = "mouriya.omp.todo-more";
@@ -218,14 +222,13 @@ export class JudgeDecider {
 			{
 				intent: {
 					type: "choice",
-					instructions:
-						"Choose the one action the model's message asks for. communicate: deliver a message, reply or progress note to another agent. inspect: look up local or network state. manage_thread: create, close, describe or change members of a local thread. manage_domain: manage this node's domain membership. operate_resource: operate a resource the message names explicitly.",
+					instructions: text("judge.o1.instructions"),
 					criteria: {
-						communicate: "The message is meant for another agent or node, including asking a peer something.",
-						inspect: "The message asks to see node-level state: who is online, the inbox, a thread's messages, one message, or delivery evidence. The thread registry and a thread's members are not this.",
-						manage_thread: "The message works on threads themselves: list the threads, describe one thread's members, create, close, add or remove a member. Reading a thread's messages is inspect.",
-						manage_domain: "The message changes or reads this node's domain membership: join, leave, list or describe the membership, or discover a domain's members.",
-						operate_resource: "meta.resource names an external resource to operate. Without meta.resource this intent cannot execute, so a message that merely mentions a directory or a file is not this.",
+						communicate: text("judge.o1.communicate"),
+						inspect: text("judge.o1.inspect"),
+						manage_thread: text("judge.o1.manage_thread"),
+						manage_domain: text("judge.o1.manage_domain"),
+						operate_resource: text("judge.o1.operate_resource"),
 					},
 				},
 			},
@@ -234,7 +237,7 @@ export class JudgeDecider {
 		const intent = choice(answers, "intent");
 		this.#record("outbound.o1", scope.input, answers, Date.now() - started);
 		if (intent !== "communicate" && intent !== "inspect" && intent !== "manage_thread" && intent !== "manage_domain" && intent !== "operate_resource") {
-			throw new OnlyneError("decision_unavailable", "The decision did not choose an outbound intent.");
+			throw new OnlyneError("decision_unavailable", text("error.outbound_intent"));
 		}
 		return intent;
 	}
@@ -247,7 +250,7 @@ export class JudgeDecider {
 			? explicitRelation ?? await this.#relationQuestion(scope, meta)
 			: undefined;
 		if (reply === undefined && (explicitRelation !== undefined || lockedRelation !== undefined)) {
-			throw new OnlyneError("invalid_request", "A relation needs an in_reply_to reference.");
+			throw new OnlyneError("invalid_request", text("error.relation_needs_reference"));
 		}
 		let to: NodeId;
 		if (reply !== undefined) {
@@ -257,14 +260,14 @@ export class JudgeDecider {
 			if (explicitTarget !== undefined && explicitTarget !== reply.authority) {
 				throw new OnlyneError(
 					"invalid_request",
-					`The reply must go to its original reply authority ${reply.authority}, not ${explicitTarget}.`,
+					text("error.reply_authority", { authority: reply.authority, target: explicitTarget }),
 				);
 			}
 			to = reply.authority;
 		} else {
 			to = await this.#target(meta) ?? await this.#targetQuestion(scope, meta);
 			if (to.length === 0) {
-				throw new OnlyneError("ambiguous_target", "The decision did not choose a delivery target.");
+				throw new OnlyneError("ambiguous_target", text("error.delivery_target"));
 			}
 		}
 
@@ -276,7 +279,7 @@ export class JudgeDecider {
 			// the sender's own plan a lie: the receipt said existing and the work started fresh.
 			throw new OnlyneError(
 				"ambiguous_target",
-				`${to} publishes no execution context this message continues. Send it with execution "new" to start one.`,
+				text("error.execution_context_missing", { to }),
 			);
 		}
 		const mentions = await this.#mentions(meta);
@@ -302,11 +305,10 @@ export class JudgeDecider {
 			{
 				relation: {
 					type: "choice",
-					instructions:
-						"The message references an earlier message. Is it a final reply or a progress supplement?",
+					instructions: text("judge.relation.instructions"),
 					criteria: {
-						reply: "A final answer that may release the original sender's wait.",
-						followup: "A supplement or progress note that does not release a wait.",
+						reply: text("judge.relation.reply"),
+						followup: text("judge.relation.followup"),
 					},
 				},
 			},
@@ -315,7 +317,7 @@ export class JudgeDecider {
 		this.#record("outbound.o2a", scope.input, answers, Date.now() - started);
 		const relation = choice(answers, "relation");
 		if (relation !== "reply" && relation !== "followup") {
-			throw new OnlyneError("decision_unavailable", "The decision did not choose a reply relation.");
+			throw new OnlyneError("decision_unavailable", text("error.reply_relation"));
 		}
 		return relation;
 	}
@@ -324,10 +326,10 @@ export class JudgeDecider {
 	async #targetQuestion(scope: DecisionScope, meta: Record<string, Json>): Promise<NodeId> {
 		const peers = await this.#peers();
 		if (!peers.available) {
-			throw new OnlyneError("unavailable", `The target cannot be resolved: ${peers.reason}`);
+			throw new OnlyneError("unavailable", text("error.target_unresolved", { reason: peers.reason }));
 		}
 		// One discovered peer is the answer; none means the caller must name a target.
-		if (peers.value.length === 0) throw new OnlyneError("not_found", "No discovered node can receive this message.");
+		if (peers.value.length === 0) throw new OnlyneError("not_found", text("error.no_receiver"));
 		if (peers.value.length === 1) return peers.value[0]!.node_id;
 		const started = Date.now();
 		const answers = await this.#judge(
@@ -344,11 +346,15 @@ export class JudgeDecider {
 			{
 				target: {
 					type: "choice",
-					instructions:
-						"Choose the node that should receive this message. Each candidate is named by its node id; the alias is its short name.",
+					instructions: text("judge.target.instructions"),
 					criteria: Object.fromEntries(peers.value.map(peer => [
 						peer.node_id,
-						`Discovered peer ${peer.node_id} at ${peer.base_url} (instance ${peer.instance_id}, last seen ${peer.last_seen}).`,
+						text("judge.target.peer", {
+							node: peer.node_id,
+							base_url: peer.base_url,
+							instance: peer.instance_id,
+							last_seen: peer.last_seen,
+						}),
 					])),
 				},
 			},
@@ -357,10 +363,10 @@ export class JudgeDecider {
 		this.#record("outbound.o2a", scope.input, answers, Date.now() - started);
 		const chosen = choice(answers, "target");
 		if (chosen === undefined || chosen === "none") {
-			throw new OnlyneError("ambiguous_target", "The decision did not choose a delivery target.");
+			throw new OnlyneError("ambiguous_target", text("error.delivery_target"));
 		}
 		if (!peers.value.some(peer => peer.node_id === chosen)) {
-			throw new OnlyneError("decision_unavailable", `The decision named ${chosen}, which discovery does not publish.`);
+			throw new OnlyneError("decision_unavailable", text("error.target_not_published", { chosen }));
 		}
 		return chosen;
 	}
@@ -386,12 +392,11 @@ export class JudgeDecider {
 					? {
 							response: {
 								type: "choice",
-								instructions:
-									"Two facts decide: does the receiver have to act, and can the sender continue without the answer?",
+								instructions: text("judge.response.instructions"),
 								criteria: {
-									none: "The receiver need not act at all: a notice, a status update, '不用回'.",
-									async: "The receiver must act, but the sender keeps working and picks the answer up later: a background dispatch, a supplement to running work, '有空再做', '结果稍后贴我'.",
-									await: "The receiver must act and the sender's next step cannot start without the answer: it is blocked on a question, a number it must have, or a conclusion it ships (等你回、数完回我、我要据此发版).",
+									none: text("judge.response.none"),
+									async: text("judge.response.async"),
+									await: text("judge.response.await"),
 								},
 							},
 						}
@@ -400,12 +405,12 @@ export class JudgeDecider {
 					? {
 							execution: {
 								type: "choice",
-								instructions: "Should the receiver handle this in one of its published execution contexts or in a new one?",
+								instructions: text("judge.execution.instructions"),
 								criteria: {
 									existing: isReply
-										? "The message continues work the receiver already knows from the referenced message."
-										: "The message belongs to work already running in one of the target's published contexts.",
-									new: "The message starts independent work and needs a new context the receiver creates.",
+										? text("judge.execution.existing.reply")
+										: text("judge.execution.existing.new"),
+									new: text("judge.execution.new"),
 								},
 							},
 						}
@@ -417,10 +422,10 @@ export class JudgeDecider {
 		const chosenResponse = response ?? choice(answers, "response");
 		const chosenExecution = execution ?? choice(answers, "execution");
 		if (chosenResponse !== "none" && chosenResponse !== "async" && chosenResponse !== "await") {
-			throw new OnlyneError("decision_unavailable", "The judge did not choose a valid response mode.");
+			throw new OnlyneError("decision_unavailable", text("error.response_mode"));
 		}
 		if (chosenExecution !== "existing" && chosenExecution !== "new") {
-			throw new OnlyneError("decision_unavailable", "The judge did not choose a valid execution mode.");
+			throw new OnlyneError("decision_unavailable", text("error.execution_mode"));
 		}
 		return { response: chosenResponse, execution: chosenExecution };
 	}
@@ -428,7 +433,7 @@ export class JudgeDecider {
 	#inherited(meta: Record<string, Json>, key: string): "await" | "async" | "none" | "existing" | "new" | undefined {
 		const value = meta[key];
 		if (value === "await" || value === "async" || value === "none" || value === "existing" || value === "new") return value;
-		if (value !== undefined) throw new OnlyneError("invalid_request", `meta.${key} must be await, async, none, existing or new.`);
+		if (value !== undefined) throw new OnlyneError("invalid_request", text("error.meta_mode", { key }));
 		return undefined;
 	}
 
@@ -442,12 +447,12 @@ export class JudgeDecider {
 		const explicit = stringField(meta, "context");
 		if (!receiver.available) {
 			if (explicit !== undefined) return explicit;
-			throw new OnlyneError("unavailable", `The target's published contexts cannot be read: ${receiver.reason}`);
+			throw new OnlyneError("unavailable", text("error.contexts_unreadable", { reason: receiver.reason }));
 		}
 		const published = receiver.value.filter(context => context.state !== "lost" && context.state !== "unbound");
 		if (explicit !== undefined) {
 			if (!published.some(context => context.alias === explicit)) {
-				throw new OnlyneError("invalid_request", `The target does not publish an execution context named ${explicit}.`);
+				throw new OnlyneError("invalid_request", text("error.context_not_published", { alias: explicit }));
 			}
 			return explicit;
 		}
@@ -463,10 +468,13 @@ export class JudgeDecider {
 			{
 				context: {
 					type: "choice",
-					instructions: "Choose the execution context the target should continue in, or none when this message does not continue one.",
+					instructions: text("judge.context.instructions"),
 					criteria: {
-						...Object.fromEntries(published.map(context => [context.alias, `${context.summary} (${context.state})`])),
-						none: "The message does not continue any published context and starts fresh work instead.",
+						...Object.fromEntries(published.map(context => [
+							context.alias,
+							text("judge.context.published", { summary: context.summary, state: context.state }),
+						])),
+						none: text("judge.context.none"),
 					},
 				},
 			},
@@ -493,10 +501,10 @@ export class JudgeDecider {
 			return this.#thread(meta);
 		}
 		if (typeof value !== "string" || value.length === 0) {
-			throw new OnlyneError("invalid_request", "meta.thread must be a thread alias or {owner,id}.");
+			throw new OnlyneError("invalid_request", text("error.thread_reference_shape"));
 		}
 		const matches = (await this.deps.listThreads()).filter(thread => thread.thread_ref.id === value || thread.title === value);
-		if (matches.length > 1) throw new OnlyneError("ambiguous_target", `More than one local thread is named ${value}.`);
+		if (matches.length > 1) throw new OnlyneError("ambiguous_target", text("error.ambiguous_local_thread", { value }));
 		if (matches.length === 1) return matches[0]!.thread_ref;
 		const slash = value.indexOf("/");
 		if (slash > 0 && slash < value.length - 1) {
@@ -550,12 +558,16 @@ export class JudgeDecider {
 				&& thread.owner === entry.thread_ref.owner && thread.id === entry.thread_ref.id;
 		};
 		const criteria: Record<string, string> = {
-			main_agent: "The message needs an answer, or no registered context's work matches it.",
+			main_agent: text("judge.inbound.main_agent"),
 			...Object.fromEntries(valid.map(row => [
 				String(row.alias),
-				`${String(row.summary)} (state: ${String(row.state)}, agent: ${String(row.agent_id)}${sameThread(row.thread_ref) ? ", same thread as this message" : ""})`,
+				text(sameThread(row.thread_ref) ? "judge.inbound.context_same_thread" : "judge.inbound.context", {
+					summary: String(row.summary),
+					state: String(row.state),
+					agent: String(row.agent_id),
+				}),
 			])),
-			...(needsAnswer ? {} : { new_subagent: "The message is a self-contained work item with its own background, and needs no answer. A status note, greeting, relay or summary is not this." }),
+			...(needsAnswer ? {} : { new_subagent: text("judge.inbound.new_subagent") }),
 		};
 		// A pruned candidate set can leave one route; asking would be a question with one answer.
 		const forced = Object.keys(criteria);
@@ -580,8 +592,7 @@ export class JudgeDecider {
 					{
 						routing_target: {
 							type: "choice",
-							instructions:
-								"Choose where this inbound message is handled. main_agent: the main session takes it. A context alias: the named execution context continues the work it was created for. new_subagent: fresh independent work in a new subagent.",
+							instructions: text("judge.inbound.instructions"),
 							criteria,
 						},
 					},
@@ -595,7 +606,7 @@ export class JudgeDecider {
 			return { action: "wake", insertion: "follow_up" };
 		};
 		const chosen = choice(answers, "routing_target");
-		if (chosen === undefined) throw new OnlyneError("decision_unavailable", "The decision did not choose a routing target.");
+		if (chosen === undefined) throw new OnlyneError("decision_unavailable", text("error.routing_target"));
 		if (chosen === "new_subagent") {
 			if (needsAnswer) return override(chosen, "a subagent cannot answer a message that needs a reply");
 			return { action: "new_subagent" };
@@ -632,11 +643,10 @@ export class JudgeDecider {
 			{
 				needs_answer: {
 					type: "choice",
-					instructions:
-						"Does the sender expect this node to answer? A reference to an earlier message does not by itself create that expectation.",
+					instructions: text("judge.needs_answer.instructions"),
 					criteria: {
-						yes: "The sender asks a question, greets and waits for an answer, requests work whose result must be reported back, or otherwise needs a reply from this node. plan.response await or async is consistent with this.",
-						no: "The sender expects nothing back: it completes a reply this node asked for, reports status, records a fact, or says no answer is needed. plan.response none is consistent with this.",
+						yes: text("judge.needs_answer.yes"),
+						no: text("judge.needs_answer.no"),
 					},
 				},
 			},
@@ -645,7 +655,7 @@ export class JudgeDecider {
 		this.#record("inbound.i0", { delivery_kind: entry.message.delivery_kind, msg: entry.message.msg, meta: entry.message.meta }, answers, Date.now() - started);
 		const answer = choice(answers, "needs_answer");
 		if (answer !== "yes" && answer !== "no") {
-			throw new OnlyneError("decision_unavailable", "The decision did not say whether this message needs an answer.");
+			throw new OnlyneError("decision_unavailable", text("error.needs_answer"));
 		}
 		return answer === "yes";
 	}
@@ -662,7 +672,7 @@ export class JudgeDecider {
 		try {
 			record = await this.deps.contexts.find(alias);
 		} catch (error) {
-			throw new OnlyneError("unavailable", `The context registry could not be read: ${message(error)}`);
+			throw new OnlyneError("unavailable", text("error.registry_unreadable", { error: message(error) }));
 		}
 		const dead = record === undefined || record.agent_id === undefined
 			|| record.state === "lost" || record.state === "unbound";
@@ -671,7 +681,7 @@ export class JudgeDecider {
 		if (record !== undefined && record.agent_id !== undefined && record.bound_at !== undefined && record.state !== "lost") {
 			await this.deps.contexts.updateState(alias, "lost").catch(() => undefined);
 		}
-		throw new OnlyneError("context_lost", `${alias} is no longer bound; it needs an explicit new decision`, { context: alias });
+		throw new OnlyneError("context_lost", text("error.context_lost", { alias }), { context: alias });
 	}
 
 	/** Node I-2: when a main-session delivery enters the agent's work. */
@@ -681,9 +691,9 @@ export class JudgeDecider {
 		// `fragment` never starts a turn, so a message that needs an answer can never be one;
 		// offering it would be an option whose choice guarantees the obligation is missed.
 		const criteria: Record<string, string> = {
-			steer: "Inject immediately after the current tool call: an urgent correction the running work must follow before it continues.",
-			follow_up: "Add when the current turn finishes and start a new turn: the session is expected to act on it, answer it, or use its result.",
-			...(needsAnswer ? {} : { fragment: "Record without starting a turn and expect nothing back: status syncs, log asides, version records and environment facts that say no action is needed (状态同步、日志旁路、版本记录、暂时不用管)." }),
+			steer: text("judge.insertion.steer"),
+			follow_up: text("judge.insertion.follow_up"),
+			...(needsAnswer ? {} : { fragment: text("judge.insertion.fragment") }),
 		};
 		const answers = await this.#judge(
 			scope,
@@ -695,7 +705,7 @@ export class JudgeDecider {
 			{
 				insertion_mode: {
 					type: "choice",
-					instructions: "The message goes to the main session. Choose when it should enter the agent's work.",
+					instructions: text("judge.insertion.instructions"),
 					criteria,
 				},
 			},
@@ -707,7 +717,7 @@ export class JudgeDecider {
 			return "follow_up";
 		}
 		if (mode !== "steer" && mode !== "follow_up" && mode !== "fragment") {
-			throw new OnlyneError("decision_unavailable", "The decision did not choose an insertion mode.");
+			throw new OnlyneError("decision_unavailable", text("error.insertion_mode"));
 		}
 		return mode;
 	}
@@ -726,10 +736,10 @@ export class JudgeDecider {
 		// Node T-1: what this message does to the list. Only viable actions are offered: an
 		// empty list has nothing to associate with, and an empty body has nothing to append.
 		const actionCriteria: Record<string, string> = {
-			none: "The message needs no persistent work item: it is informational, duplicate, or already covered.",
+			none: text("judge.todo.action.none"),
 		};
-		if (existing.length > 0) actionCriteria.associate = "The message continues or supplements an existing item.";
-		if (candidates.titles.length > 0) actionCriteria.append = "The message needs a new persistent work item that no existing item covers.";
+		if (existing.length > 0) actionCriteria.associate = text("judge.todo.action.associate");
+		if (candidates.titles.length > 0) actionCriteria.append = text("judge.todo.action.append");
 		const t1 = Date.now();
 		// With nothing to associate and nothing to append, `none` is the only answer.
 		const forcedActions = Object.keys(actionCriteria);
@@ -741,7 +751,7 @@ export class JudgeDecider {
 					{
 						action: {
 							type: "choice",
-							instructions: "Decide what this message should do to the session's todo list.",
+							instructions: text("judge.todo.action.instructions"),
 							criteria: actionCriteria,
 						},
 					},
@@ -760,15 +770,15 @@ export class JudgeDecider {
 						{
 							task: {
 								type: "choice",
-								instructions: "Choose the existing todo item this message continues.",
-								criteria: Object.fromEntries(existing.map(title => [title, "An existing todo item."])),
+								instructions: text("judge.todo.associate.instructions"),
+								criteria: Object.fromEntries(existing.map(title => [title, text("judge.todo.associate.item")])),
 							},
 						},
 					);
 			this.#record("todo.t2", input, follow, Date.now() - t2);
 			const title = choice(follow, "task");
 			if (title === undefined || title === "none" || !existing.includes(title)) {
-				throw new OnlyneError("decision_unavailable", "The decision chose to associate without naming an existing todo item.");
+				throw new OnlyneError("decision_unavailable", text("error.todo_associate"));
 			}
 			return { action: "associate", title };
 		}
@@ -782,8 +792,8 @@ export class JudgeDecider {
 					: {
 							title: {
 								type: "choice" as const,
-								instructions: "Choose the title for the new item from the message's own text.",
-								criteria: Object.fromEntries(candidates.titles.map(title => [title, "A title taken from the message."])),
+								instructions: text("judge.todo.title.instructions"),
+								criteria: Object.fromEntries(candidates.titles.map(title => [title, text("judge.todo.title.item")])),
 							},
 						}),
 				...(candidates.explanations.length === 0
@@ -791,10 +801,10 @@ export class JudgeDecider {
 					: {
 							explanation: {
 								type: "choice" as const,
-								instructions: "Choose the explanation for the new item from the message's own text, or none to leave it unwritten.",
+								instructions: text("judge.todo.explanation.instructions"),
 								criteria: {
-									...Object.fromEntries(candidates.explanations.map(text => [text, "An explanation taken from the message."])),
-									none: "Leave the explanation unwritten.",
+									...Object.fromEntries(candidates.explanations.map(explanation => [explanation, text("judge.todo.explanation.item")])),
+									none: text("judge.todo.explanation.none"),
 								},
 							},
 						}),
@@ -805,7 +815,7 @@ export class JudgeDecider {
 			this.#record("todo.t2", input, follow, Date.now() - t2);
 			const title = candidates.titles.length === 1 ? candidates.titles[0] : choice(follow, "title");
 			if (title === undefined || title === "none" || !candidates.titles.includes(title)) {
-				throw new OnlyneError("decision_unavailable", "The decision chose to append without naming one of the message's title candidates.");
+				throw new OnlyneError("decision_unavailable", text("error.todo_append"));
 			}
 			const explanation = choice(follow, "explanation");
 			const chosen = explanation !== undefined && explanation !== "none" && candidates.explanations.includes(explanation)
@@ -813,14 +823,14 @@ export class JudgeDecider {
 				: undefined;
 			return { action: "append", title, ...(chosen === undefined ? {} : { explanation: chosen }) };
 		}
-		throw new OnlyneError("decision_unavailable", "The decision did not choose a todo action.");
+		throw new OnlyneError("decision_unavailable", text("error.todo_action"));
 	}
 
 	async #judge(scope: ExtensionContext, state: unknown, questions: Questions, signal?: AbortSignal): Promise<Answers> {
 		try {
 			const { fitted, dropped, chars } = fitState(state as Row);
 			if (chars > STATE_BUDGET_CHARS) {
-				throw new OnlyneError("decision_unavailable", `The decision state needs ${String(chars)} characters; the judge prompt is capped near ${String(STATE_BUDGET_CHARS)}.`);
+				throw new OnlyneError("decision_unavailable", text("error.state_budget", { chars, cap: STATE_BUDGET_CHARS }));
 			}
 			if (dropped.length > 0) this.deps.log?.("onlyne.judge.trimmed", { dropped, chars });
 			const settings = (await Settings.current) ?? (await Settings.loadReadOnly({ cwd: scope.cwd }));
@@ -837,7 +847,7 @@ export class JudgeDecider {
 		} catch (error) {
 			throw new OnlyneError(
 				"decision_unavailable",
-				`The judge role could not decide this Onlyne message: ${error instanceof Error ? error.message : String(error)}`,
+				text("error.judge_failed", { error: error instanceof Error ? error.message : String(error) }),
 			);
 		}
 	}
@@ -858,17 +868,18 @@ export class JudgeDecider {
 	async #explicit(scope: DecisionScope): Promise<Action | undefined> {
 		const meta = scope.input.meta;
 		if (meta === undefined) return undefined;
+		if (meta.scope === "resources") return this.#read(scope, "resources");
 		const op = stringField(meta, "op");
 		if (op !== undefined && isThreadOp(op)) {
 			const thread = await this.#thread(meta);
 			const to = await this.#target(meta);
 			const title = stringField(meta, "title");
-			if (op === "create" && title === undefined) throw new OnlyneError("invalid_request", "thread create needs a title.");
+			if (op === "create" && title === undefined) throw new OnlyneError("invalid_request", text("error.thread_title_required"));
 			if (op !== "create" && op !== "list" && thread === undefined) {
-				throw new OnlyneError("invalid_request", `thread ${op} needs a thread reference.`);
+				throw new OnlyneError("invalid_request", text("error.thread_reference_required", { op }));
 			}
 			if ((op === "member_add" || op === "member_remove") && to === undefined) {
-				throw new OnlyneError("invalid_request", `thread ${op} needs a target.`);
+				throw new OnlyneError("invalid_request", text("error.thread_target_required", { op }));
 			}
 			return {
 				kind: "thread",
@@ -885,7 +896,7 @@ export class JudgeDecider {
 			const id = stringField(resource, "id");
 			const operation = stringField(meta, "operation");
 			if (owner === undefined || id === undefined || operation === undefined) {
-				throw new OnlyneError("invalid_request", "resource needs owner, id and operation.");
+				throw new OnlyneError("invalid_request", text("error.resource_fields"));
 			}
 			return {
 				kind: "resource",
@@ -909,6 +920,11 @@ export class JudgeDecider {
 
 	async #read(scope: DecisionScope, name: ActionReadScope): Promise<Action> {
 		const meta = scope.input.meta ?? {};
+		if (name === "resources") {
+			if (scope.readOnly === true) throw new OnlyneError("forbidden", text("error.resources_main_only"));
+			if (this.deps.resourceQuery === undefined) throw new OnlyneError("unavailable", text("error.resource_host_unavailable"));
+			return { kind: "read", scope: name, query: await this.deps.resourceQuery(meta) };
+		}
 		const thread = await this.#thread(meta);
 		const page_size = pageSize(meta);
 		const cursor = stringField(meta, "cursor");
@@ -926,7 +942,7 @@ export class JudgeDecider {
 			};
 		}
 		if (thread === undefined && name !== "message" && name !== "evidence") {
-			throw new OnlyneError("invalid_request", `read ${name} needs a thread reference.`);
+			throw new OnlyneError("invalid_request", text("error.read_thread_required", { name }));
 		}
 		if (name === "messages") {
 			return {
@@ -941,7 +957,7 @@ export class JudgeDecider {
 		}
 		const resolved = await this.#messageRef(meta, thread);
 		if (resolved === undefined) {
-			throw new OnlyneError("invalid_request", `read ${name} needs a message reference: meta.message {sender,id} or {thread,seq}.`);
+			throw new OnlyneError("invalid_request", text("error.read_message_required", { name }));
 		}
 		// The thread the message was read in travels with the action: a subagent's guard
 		// authorizes a thread slice, and `{thread,seq}` already names that slice.
@@ -963,13 +979,14 @@ export class JudgeDecider {
 			{
 				read_scope: {
 					type: "choice",
-					instructions: "Choose what this message asks to read.",
+					instructions: text("judge.read_scope.instructions"),
 					criteria: {
-						peers: "The nodes that are online and reachable: 'who is online', 'which nodes can I reach', 'list the nodes', 'show the participants', the contact list, or the neighbour/adjacency view.",
-						inbox: "The attention items waiting to be processed.",
-						messages: "The message history inside one thread.",
-						evidence: "This node's delivery and receipt evidence for one outbound message.",
-						none: "The message asks to read none of these channels.",
+						peers: text("judge.read_scope.peers"),
+						inbox: text("judge.read_scope.inbox"),
+						messages: text("judge.read_scope.messages"),
+						evidence: text("judge.read_scope.evidence"),
+						resources: text("judge.read_scope.resources"),
+						none: text("judge.read_scope.none"),
 					},
 				},
 			},
@@ -978,13 +995,14 @@ export class JudgeDecider {
 		this.#record("outbound.o2b", scope.input, answers, Date.now() - started);
 		const scopeName = choice(answers, "read_scope");
 		if (scopeName === undefined || scopeName === "none") {
-			throw new OnlyneError("decision_unavailable", "The decision named no read scope; the readable channels are peers, inbox, messages and evidence.");
+			throw new OnlyneError("decision_unavailable", text("error.read_scope_missing"));
 		}
 		// The design's `peers` is the library's `neighbors`: the nodes this one can address, the
 		// same rows onlyne://neighbors renders. A caller that names a library channel explicitly
 		// in meta.scope still gets it verbatim.
+		if (scopeName === "resources") return this.#read(scope, "resources");
 		if (scopeName !== "peers" && scopeName !== "inbox" && scopeName !== "messages" && scopeName !== "evidence") {
-			throw new OnlyneError("decision_unavailable", `No readable channel exists for ${scopeName}; the readable channels are peers, inbox, messages and evidence.`);
+			throw new OnlyneError("decision_unavailable", text("error.read_scope_unknown", { scope: scopeName }));
 		}
 		const name: ActionReadScope = scopeName === "peers" ? "neighbors" : scopeName;
 		const thread = await this.#thread(meta);
@@ -1003,7 +1021,7 @@ export class JudgeDecider {
 		if (name === "evidence") {
 			const resolved = await this.#messageRef(meta, thread);
 			if (resolved === undefined) {
-				throw new OnlyneError("invalid_request", `read ${name} needs a message reference: meta.message {sender,id} or {thread,seq}.`);
+				throw new OnlyneError("invalid_request", text("error.read_message_required", { name }));
 			}
 			const owner = resolved.thread ?? thread;
 			return { kind: "read", scope: name, ...(owner === undefined ? {} : { thread: owner }), message: resolved.ref };
@@ -1021,7 +1039,7 @@ export class JudgeDecider {
 	async #threadQuestion(scope: DecisionScope, node: string): Promise<ThreadRef> {
 		const threads = await this.deps.listThreads();
 		// A question needs a real choice: one local thread is the answer, none is an error.
-		if (threads.length === 0) throw new OnlyneError("not_found", "This node has no local thread to name.");
+		if (threads.length === 0) throw new OnlyneError("not_found", text("error.no_local_thread"));
 		if (threads.length === 1) return threads[0]!.thread_ref;
 		const started = Date.now();
 		const answers = await this.#judge(
@@ -1039,10 +1057,15 @@ export class JudgeDecider {
 			{
 				thread: {
 					type: "choice",
-					instructions: "Choose the local thread the message asks about.",
+					instructions: text("judge.thread.instructions"),
 					criteria: Object.fromEntries(threads.map(thread => [
 						thread.thread_ref.id,
-						`${thread.title} (${thread.thread_ref.owner}/${thread.thread_ref.id}, ${thread.state})`,
+						text("judge.thread.item", {
+							title: thread.title,
+							owner: thread.thread_ref.owner,
+							id: thread.thread_ref.id,
+							state: thread.state,
+						}),
 					])),
 				},
 			},
@@ -1051,7 +1074,7 @@ export class JudgeDecider {
 		this.#record(node, scope.input, answers, Date.now() - started);
 		const alias = choice(answers, "thread");
 		if (alias === undefined || alias === "none") {
-			throw new OnlyneError("decision_unavailable", "The decision did not choose a local thread.");
+			throw new OnlyneError("decision_unavailable", text("error.local_thread_choice"));
 		}
 		return this.#threadByAlias(alias);
 	}
@@ -1065,14 +1088,14 @@ export class JudgeDecider {
 			{
 				thread_op: {
 					type: "choice",
-					instructions: "Choose the local thread operation the message asks for.",
+					instructions: text("judge.thread_op.instructions"),
 					criteria: {
-						create: "Create a new local thread.",
-						close: "Close an existing local thread.",
-						list: "List the local threads.",
-						describe: "Describe one local thread.",
-						member_add: "Add a member to a local thread.",
-						member_remove: "Remove a member from a local thread.",
+						create: text("judge.thread_op.create"),
+						close: text("judge.thread_op.close"),
+						list: text("judge.thread_op.list"),
+						describe: text("judge.thread_op.describe"),
+						member_add: text("judge.thread_op.member_add"),
+						member_remove: text("judge.thread_op.member_remove"),
 					},
 				},
 			},
@@ -1081,7 +1104,7 @@ export class JudgeDecider {
 		this.#record("outbound.o2c", scope.input, answers, Date.now() - started);
 		const op = choice(answers, "thread_op");
 		if (op === undefined || !isThreadOp(op)) {
-			throw new OnlyneError("decision_unavailable", "The judge did not choose a thread operation.");
+			throw new OnlyneError("decision_unavailable", text("error.thread_op"));
 		}
 		// A dependent second call: which thread the operation names is only decidable once the
 		// operation is known, and meta.thread settles it without a call (design §4, stepwise).
@@ -1091,10 +1114,10 @@ export class JudgeDecider {
 		const to = await this.#target(meta);
 		const title = stringField(meta, "title");
 		if ((op === "member_add" || op === "member_remove") && to === undefined) {
-			throw new OnlyneError("decision_unavailable", `The judge chose thread ${op} without a target.`);
+			throw new OnlyneError("decision_unavailable", text("error.thread_op_target", { op }));
 		}
 		if (op === "create" && title === undefined) {
-			throw new OnlyneError("invalid_request", "thread create needs a title.");
+			throw new OnlyneError("invalid_request", text("error.thread_title_required"));
 		}
 		return {
 			kind: "thread",
@@ -1114,14 +1137,14 @@ export class JudgeDecider {
 			{
 				domain_op: {
 					type: "choice",
-					instructions: "Choose the domain operation the message asks for.",
+					instructions: text("judge.domain_op.instructions"),
 					criteria: {
-						create: "Create this node's domain membership.",
-						join: "Join a domain.",
-						leave: "Leave the current domain.",
-						list: "List this node's domain membership.",
-						describe: "Describe this node's membership.",
-						discover: "Discover a domain's declared members.",
+						create: text("judge.domain_op.create"),
+						join: text("judge.domain_op.join"),
+						leave: text("judge.domain_op.leave"),
+						list: text("judge.domain_op.list"),
+						describe: text("judge.domain_op.describe"),
+						discover: text("judge.domain_op.discover"),
 					},
 				},
 			},
@@ -1130,11 +1153,11 @@ export class JudgeDecider {
 		this.#record("outbound.o2d", scope.input, answers, Date.now() - started);
 		const op = choice(answers, "domain_op");
 		if (op === undefined || !isDomainOp(op)) {
-			throw new OnlyneError("decision_unavailable", "The judge did not choose a domain operation.");
+			throw new OnlyneError("decision_unavailable", text("error.domain_op"));
 		}
 		const domainId = stringField(meta, "domain_id");
 		if (op !== "create" && op !== "list" && domainId === undefined) {
-			throw new OnlyneError("invalid_request", `domain ${op} needs domain_id.`);
+			throw new OnlyneError("invalid_request", text("error.domain_id", { op }));
 		}
 		return {
 			kind: "domain",
@@ -1151,7 +1174,7 @@ export class JudgeDecider {
 		const id = resource === undefined ? undefined : stringField(resource, "id");
 		const operation = stringField(meta, "operation");
 		if (owner === undefined || id === undefined || operation === undefined) {
-			throw new OnlyneError("invalid_request", "A resource action needs meta.resource {owner,id} and meta.operation.");
+			throw new OnlyneError("invalid_request", text("error.resource_action_fields"));
 		}
 		return {
 			kind: "resource",
@@ -1220,19 +1243,19 @@ export class JudgeDecider {
 		const owner = record === undefined ? undefined : stringField(record, "owner");
 		const id = record === undefined ? undefined : stringField(record, "id");
 		if (owner !== undefined && id !== undefined) return { owner, id };
-		throw new OnlyneError("invalid_request", "meta.thread must be a thread alias or {owner,id}.");
+		throw new OnlyneError("invalid_request", text("error.thread_reference_shape"));
 	}
 
 	async #threadByAlias(alias: string): Promise<ThreadRef> {
 		const threads = await this.deps.listThreads();
 		const matches = threads.filter(thread => thread.thread_ref.id === alias || thread.title === alias);
 		if (matches.length === 1) return matches[0]!.thread_ref;
-		if (matches.length > 1) throw new OnlyneError("ambiguous_target", `More than one thread is named ${alias}.`);
+		if (matches.length > 1) throw new OnlyneError("ambiguous_target", text("error.ambiguous_thread", { alias }));
 		if (alias.includes("/")) {
 			const [owner, id] = alias.split("/", 2);
 			if (owner !== undefined && id !== undefined && owner.length > 0 && id.length > 0) return { owner, id };
 		}
-		throw new OnlyneError("not_found", `No local thread is named ${alias}.`);
+		throw new OnlyneError("not_found", text("error.thread_not_found", { alias }));
 	}
 
 	async #target(meta: Record<string, Json> | undefined): Promise<NodeId | undefined> {
@@ -1240,9 +1263,9 @@ export class JudgeDecider {
 		const value = meta.to;
 		if (value === undefined) return undefined;
 		if (typeof value !== "string") {
-			throw new OnlyneError("invalid_request", "meta.to names one target; pass an array to the tool for several, or send one call per peer.");
+			throw new OnlyneError("invalid_request", text("error.meta_to_single"));
 		}
-		if (value.length === 0) throw new OnlyneError("invalid_request", "meta.to must be a non-empty string.");
+		if (value.length === 0) throw new OnlyneError("invalid_request", text("error.meta_to_empty"));
 		return this.#peerId(value);
 	}
 
@@ -1253,7 +1276,7 @@ export class JudgeDecider {
 	async #peerId(alias: string): Promise<NodeId> {
 		const peers = await this.#peers();
 		if (!peers.available) {
-			throw new OnlyneError("unavailable", `The target cannot be resolved: ${peers.reason}`);
+			throw new OnlyneError("unavailable", text("error.target_unresolved", { reason: peers.reason }));
 		}
 		const ids = [this.deps.config.node.id, ...peers.value.map(peer => peer.node_id)];
 		if (alias === "self") return this.deps.config.node.id;
@@ -1261,20 +1284,20 @@ export class JudgeDecider {
 		const matches = ids.filter(id => lastSegment(id) === alias);
 		if (matches.length === 1) return matches[0]!;
 		if (matches.length > 1) {
-			throw new OnlyneError("ambiguous_target", `The alias ${alias} names more than one node: ${matches.join(", ")}.`);
+			throw new OnlyneError("ambiguous_target", text("error.alias_ambiguous", { alias, matches: matches.join(", ") }));
 		}
-		throw new OnlyneError("not_found", `No discovered node is named ${alias}.`);
+		throw new OnlyneError("not_found", text("error.alias_not_found", { alias }));
 	}
 
 	async #mentions(meta: Record<string, Json> | undefined): Promise<string[] | undefined> {
 		if (meta === undefined) return undefined;
 		const value = meta.mentions;
 		if (value === undefined) return undefined;
-		if (!Array.isArray(value)) throw new OnlyneError("invalid_request", "meta.mentions must be an array.");
+		if (!Array.isArray(value)) throw new OnlyneError("invalid_request", text("error.mentions_array"));
 		const resolved: string[] = [];
 		for (const item of value) {
 			if (typeof item !== "string" || item.length === 0) {
-				throw new OnlyneError("invalid_request", "Each mention must be a non-empty string.");
+				throw new OnlyneError("invalid_request", text("error.mention_empty"));
 			}
 			if (item === "@all") {
 				resolved.push(item);
@@ -1290,7 +1313,7 @@ export class JudgeDecider {
 		const value = meta.in_reply_to;
 		if (value === undefined) return undefined;
 		if (value === null || typeof value !== "object" || Array.isArray(value)) {
-			throw new OnlyneError("invalid_request", "meta.in_reply_to must be an object.");
+			throw new OnlyneError("invalid_request", text("error.in_reply_to_object"));
 		}
 		const record = value as Record<string, Json>;
 		const sender = stringField(record, "sender");
@@ -1306,14 +1329,14 @@ export class JudgeDecider {
 		const threadAlias = stringField(record, "thread");
 		const seq = seqField(record, "seq");
 		if (threadAlias === undefined) {
-			throw new OnlyneError("invalid_request", "meta.in_reply_to needs {thread,seq} or {sender,id}.");
+			throw new OnlyneError("invalid_request", text("error.in_reply_to_shape"));
 		}
 		if (seq === undefined) {
-			throw new OnlyneError("invalid_request", "meta.in_reply_to.seq must be a string or a number.");
+			throw new OnlyneError("invalid_request", text("error.in_reply_to_seq"));
 		}
 		const thread = await this.#threadByAlias(threadAlias);
 		const entry = await this.#entryAt(thread, seq);
-		if (entry === undefined) throw new OnlyneError("not_found", `No message at ${threadAlias}/${seq}.`);
+		if (entry === undefined) throw new OnlyneError("not_found", text("error.message_not_found", { thread: threadAlias, seq }));
 		return {
 			ref: { sender: entry.message.sender, id: entry.message.id },
 			authority: entry.reply_authority,
@@ -1344,7 +1367,7 @@ export class JudgeDecider {
 		if (thread !== undefined && embedded !== undefined && threadKey(thread) !== threadKey(embedded)) {
 			throw new OnlyneError(
 				"invalid_request",
-				`meta.thread names ${threadKey(thread)} but meta.message names ${threadKey(embedded)}; a message read names one thread.`,
+				text("error.message_thread_conflict", { thread: threadKey(thread), embedded: threadKey(embedded) }),
 			);
 		}
 		const scope = thread ?? embedded;
@@ -1352,7 +1375,7 @@ export class JudgeDecider {
 		const seq = (record === undefined ? undefined : seqField(record, "seq")) ?? seqField(meta, "seq");
 		if (seq === undefined) return undefined;
 		const entry = await this.#entryAt(scope, seq);
-		if (entry === undefined) throw new OnlyneError("not_found", `No message at ${scope.id}/${seq}.`);
+		if (entry === undefined) throw new OnlyneError("not_found", text("error.message_not_found", { thread: scope.id, seq }));
 		return { ref: { sender: entry.message.sender, id: entry.message.id }, thread: scope };
 	}
 
@@ -1377,13 +1400,14 @@ export class JudgeDecider {
 		if (action.kind !== "read") {
 			throw new OnlyneError(
 				"forbidden",
-				"A subagent session reads Onlyne state, it does not write it. Read your own slice through onlyne://threads, onlyne://inbox and onlyne://contexts, then return the result so the main agent can send it.",
+				text("error.guard_write"),
 			);
 		}
+		if (action.scope === "resources") throw new OnlyneError("forbidden", text("error.resources_main_only"));
 		if (action.scope === "directory" || action.scope === "neighbors" || action.scope === "threads" || action.scope === "inbox") {
 			throw new OnlyneError(
 				"forbidden",
-				"A subagent reads its own slice through onlyne://threads and onlyne://inbox; the whole node listing belongs to the main session.",
+				text("error.guard_node_listing"),
 			);
 		}
 		const records = await this.#authorizedRecords(scope.ctx.agent.id);
@@ -1393,7 +1417,7 @@ export class JudgeDecider {
 				record.source !== undefined && record.source.sender === ref.sender && record.source.id === ref.id,
 			);
 			if (!tied) {
-				throw new OnlyneError("forbidden", "A subagent may read outbound evidence only for a message its own context received.");
+				throw new OnlyneError("forbidden", text("error.guard_evidence"));
 			}
 			return;
 		}
@@ -1405,16 +1429,16 @@ export class JudgeDecider {
 				record.source !== undefined && record.source.sender === ref.sender && record.source.id === ref.id,
 			);
 			if (!tied) {
-				throw new OnlyneError("forbidden", "A subagent may read one message only when its own context received it.");
+				throw new OnlyneError("forbidden", text("error.guard_message"));
 			}
 			return;
 		}
 		if (action.thread === undefined) {
-			throw new OnlyneError("forbidden", "A subagent may read only a thread its own context record authorizes.");
+			throw new OnlyneError("forbidden", text("error.guard_thread_required"));
 		}
 		const key = threadKey(action.thread);
 		if (!records.some(record => record.thread_ref !== undefined && threadKey(record.thread_ref) === key)) {
-			throw new OnlyneError("forbidden", `This subagent holds no read slice for thread ${key}.`);
+			throw new OnlyneError("forbidden", text("error.guard_no_slice", { thread: key }));
 		}
 	}
 
@@ -1423,7 +1447,7 @@ export class JudgeDecider {
 		try {
 			records = await this.deps.contexts.list();
 		} catch (error) {
-			throw new OnlyneError("unavailable", `The context registry could not be read: ${message(error)}`);
+			throw new OnlyneError("unavailable", text("error.registry_unreadable", { error: message(error) }));
 		}
 		return records.filter(record =>
 			record.node_id === this.deps.config.node.id && record.agent_id === agentId && record.thread_ref !== undefined,
@@ -1455,7 +1479,7 @@ export class JudgeDecider {
 				};
 			}));
 		} catch (error) {
-			return none(`The context registry could not be read: ${message(error)}`);
+			return none(text("reason.registry_unreadable", { error: message(error) }));
 		}
 	}
 
@@ -1464,7 +1488,7 @@ export class JudgeDecider {
 		try {
 			return ok(await this.deps.listPeers());
 		} catch (error) {
-			return none(`Discovery records could not be read: ${message(error)}`);
+			return none(text("reason.discovery_unreadable", { error: message(error) }));
 		}
 	}
 
@@ -1472,7 +1496,7 @@ export class JudgeDecider {
 		try {
 			return ok(await this.deps.listReceiverContexts(nodeId));
 		} catch (error) {
-			return none(`The target's published contexts could not be read: ${message(error)}`);
+			return none(text("reason.receiver_contexts_unreadable", { error: message(error) }));
 		}
 	}
 
@@ -1497,12 +1521,12 @@ export class JudgeDecider {
 			const row = asRecord(branch[index]);
 			if (row?.type !== "custom" || row.customType !== TODO_ENTRY) continue;
 			const data = asRecord(row.data);
-			if (data === undefined) return none("The newest todo-more snapshot has no readable data.");
+			if (data === undefined) return none(text("reason.todo_no_data"));
 			const phases = data.phases;
-			if (!Array.isArray(phases)) return none("The newest todo-more snapshot has no phase list.");
+			if (!Array.isArray(phases)) return none(text("reason.todo_no_phases"));
 			return normalizeTodo({ goal: data.goal ?? null, phases });
 		}
-		return { present: false, reason: "No todo-more snapshot is on the active branch." };
+		return { present: false, reason: text("reason.todo_absent") };
 	}
 
 	async #threadEvidenceFor(refs: ThreadRef[]): Promise<Row[]> {
@@ -1552,7 +1576,7 @@ export class JudgeDecider {
 type ActionReadScope = Extract<Action, { kind: "read" }>["scope"];
 
 function isReadScope(value: string): value is ActionReadScope {
-	return value === "directory" || value === "neighbors" || value === "threads" || value === "inbox" || value === "messages" || value === "message" || value === "evidence";
+	return value === "directory" || value === "neighbors" || value === "threads" || value === "inbox" || value === "messages" || value === "message" || value === "evidence" || value === "resources";
 }
 
 function isThreadOp(value: string): value is Extract<Action, { kind: "thread" }>["op"] {
@@ -1580,6 +1604,7 @@ export function judgeRecord(
 		intent: input.delivery_kind,
 		msg: input.msg.length > 120 ? `${input.msg.slice(0, 120)}…` : input.msg,
 		answers: picked,
+		language: getLocale(),
 		ms,
 	};
 }
@@ -1631,7 +1656,7 @@ function pageSize(meta: Record<string, Json>): number | undefined {
 	const value = meta.page_size;
 	if (value === undefined) return undefined;
 	if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 100) {
-		throw new OnlyneError("invalid_request", "meta.page_size must be an integer from 1 to 100.");
+		throw new OnlyneError("invalid_request", text("error.page_size"));
 	}
 	return value;
 }
@@ -1640,7 +1665,7 @@ function attention(meta: Record<string, Json>): "inbox" | "thread" {
 	const value = meta.attention;
 	if (value === undefined) return "thread";
 	if (value === "inbox" || value === "thread") return value;
-	throw new OnlyneError("invalid_request", "meta.attention must be inbox or thread.");
+	throw new OnlyneError("invalid_request", text("error.attention"));
 }
 
 function relation(meta: Record<string, Json> | undefined): "reply" | "followup" | undefined {
@@ -1648,7 +1673,7 @@ function relation(meta: Record<string, Json> | undefined): "reply" | "followup" 
 	const value = meta.relation;
 	if (value === undefined) return undefined;
 	if (value === "reply" || value === "followup") return value;
-	throw new OnlyneError("invalid_request", "meta.relation must be reply or followup.");
+	throw new OnlyneError("invalid_request", text("error.relation_value"));
 }
 
 function asRecord(value: unknown): Row | undefined {
@@ -1780,24 +1805,24 @@ function entryRow(entry: SessionEntry): Row | undefined {
 }
 
 /** One pasted terminal dump must not become the whole decision prompt. */
-function boundText(text: string): string {
-	return cut(text, TEXT_CHARS);
+function boundText(value: string): string {
+	return cut(value, TEXT_CHARS);
 }
 
-function cut(text: string, limit: number): string {
-	return text.length <= limit ? text : `${text.slice(0, limit)}… [${String(text.length - limit)} more characters]`;
+function cut(value: string, limit: number): string {
+	return value.length <= limit ? value : `${value.slice(0, limit)}${text("prose.cut", { more: value.length - limit })}`;
 }
 
 /** One branch message as trigger material: its text, cut to the trigger budget. */
 function snippet(content: unknown): string | null {
 	if (typeof content === "string") return cut(content, TRIGGER_CHARS);
 	if (!Array.isArray(content)) return null;
-	const text = content
+	const joined = content
 		.map(part => asRecord(part))
 		.filter(part => typeof part?.text === "string")
 		.map(part => String(part!.text))
 		.join("\n");
-	return text.length === 0 ? null : cut(text, TRIGGER_CHARS);
+	return joined.length === 0 ? null : cut(joined, TRIGGER_CHARS);
 }
 
 /** Content parts keep their text; image bytes are not decision material and are named, not embedded. */
@@ -1811,7 +1836,7 @@ function contentOf(value: unknown): unknown {
 			return {
 				type: "image",
 				mime_type: row.mimeType ?? row.mime_type ?? null,
-				bytes: "omitted: image bytes are not decision input",
+				bytes: text("prose.image_omitted"),
 			};
 		}
 		if (typeof row.text === "string") return { ...row, text: boundText(row.text) };
@@ -1830,15 +1855,15 @@ interface TodoView {
  * reported, never read as an empty list.
  */
 function normalizeTodo(current: unknown): Source<TodoView> | { present: false; reason: string } {
-	if (current === undefined) return none("No todo snapshot was provided.");
+	if (current === undefined) return none(text("reason.todo_missing"));
 	const row = asRecord(current);
-	if (row === undefined) return none("The todo snapshot is not an object.");
+	if (row === undefined) return none(text("reason.todo_not_object"));
 	if (row.present === false) {
-		return { present: false, reason: typeof row.reason === "string" ? row.reason : "The todo source is absent." };
+		return { present: false, reason: typeof row.reason === "string" ? row.reason : text("reason.todo_source_absent") };
 	}
 	if (row.kind === "empty") return ok({ goal: null, phases: [] });
 	const phases = row.phases;
-	if (!Array.isArray(phases)) return none("The todo snapshot has no phase list.");
+	if (!Array.isArray(phases)) return none(text("reason.todo_phases_missing"));
 	const goal = asRecord(row.goal);
 	const goalValue = goal?.kind === "set"
 		? goal.goal ?? null
@@ -1850,12 +1875,12 @@ function normalizeTodo(current: unknown): Source<TodoView> | { present: false; r
 		const phaseRow = asRecord(phase);
 		const name = typeof phaseRow?.name === "string" ? phaseRow.name : undefined;
 		const items = phaseRow?.items;
-		if (name === undefined || !Array.isArray(items)) return none("A todo phase has no readable name or item list.");
+		if (name === undefined || !Array.isArray(items)) return none(text("reason.todo_phase_invalid"));
 		const rows: TodoView["phases"][number]["items"] = [];
 		for (const item of items) {
 			const itemRow = asRecord(item);
 			const title = typeof itemRow?.title === "string" ? itemRow.title : undefined;
-			if (title === undefined) return none("A todo item has no readable title.");
+			if (title === undefined) return none(text("reason.todo_item_title_missing"));
 			const explanationRow = asRecord(itemRow?.explanation);
 			const explanation = typeof itemRow?.explanation === "string"
 				? itemRow.explanation

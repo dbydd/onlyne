@@ -19,15 +19,20 @@ import { normalizeServiceUrl, shortNodeId } from "../config.ts";
 import { getRuntime } from "../runtime.ts";
 import type { OnlyneStatus, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "../types.ts";
 import { ageText, clockText, fit, oneLine, shortAlias, sinceText } from "./format.ts";
+import { type ViewerTextKey, t } from "./viewer-text.ts";
 
 const REGION_PREFIX = "urn:onlyne:region:";
+const NODE_PREFIX = "urn:onlyne:";
+/** Groups for peers that declare no region, keyed by the kind their node id carries. */
+const GATEWAY_KEY = "kind:gateway";
+const OTHER_KEY = "kind:other";
 
 /** The label column of a fact row: wide enough for the longest label (四格汉字), one gap before the value. */
 const FACT_LABEL = "10ch";
 
 /** A region URI is stored for stability; every label shows the short name the user typed. */
 function regionLabel(region: string | undefined): string {
-	if (region === undefined) return "未声明域";
+	if (region === undefined) return t("region.undeclared");
 	if (!region.startsWith(REGION_PREFIX)) return region;
 	const name = region.slice(REGION_PREFIX.length);
 	try {
@@ -35,6 +40,24 @@ function regionLabel(region: string | undefined): string {
 	} catch {
 		return name;
 	}
+}
+
+function nodeKind(id: string): string | undefined {
+	if (!id.startsWith(NODE_PREFIX)) return undefined;
+	const rest = id.slice(NODE_PREFIX.length);
+	const colon = rest.indexOf(":");
+	return colon > 0 ? rest.slice(0, colon) : undefined;
+}
+
+/** The group a peer belongs to: its declared region, else the kind its identity names. */
+function groupKeyOf(record: ViewerDiscovery): string {
+	if (record.region !== undefined) return record.region;
+	return nodeKind(record.node_id) === "gateway" ? GATEWAY_KEY : OTHER_KEY;
+}
+
+function groupLabelOf(record: ViewerDiscovery): string {
+	if (record.region !== undefined) return regionLabel(record.region);
+	return nodeKind(record.node_id) === "gateway" ? t("group.gateway") : regionLabel(undefined);
 }
 
 function errorText(error: unknown): string {
@@ -47,11 +70,11 @@ function plainAuthor(author: string): string {
 }
 
 /** The stage names, in the words the approval flow uses: we wait on `invited`, the peer on `requested`. */
-const PHASE_LABEL: Record<TrustPhase, string> = {
-	exchanged: "已认证",
-	requested: "等对方确认",
-	invited: "待你确认",
-	revoked: "已撤销",
+const PHASE_LABEL: Record<TrustPhase, ViewerTextKey> = {
+	exchanged: "trust.phase.exchanged",
+	requested: "trust.phase.requested",
+	invited: "trust.phase.invited",
+	revoked: "trust.phase.revoked",
 };
 
 const PHASE_TONE: Record<TrustPhase, string> = {
@@ -61,11 +84,11 @@ const PHASE_TONE: Record<TrustPhase, string> = {
 	revoked: "error",
 };
 
-const PHASE_SHORT: Record<TrustPhase, string> = {
-	exchanged: "已认证",
-	requested: "等对方",
-	invited: "待确认",
-	revoked: "已撤销",
+const PHASE_SHORT: Record<TrustPhase, ViewerTextKey> = {
+	exchanged: "trust.short.exchanged",
+	requested: "trust.short.requested",
+	invited: "trust.short.invited",
+	revoked: "trust.short.revoked",
 };
 
 interface Peer {
@@ -73,8 +96,12 @@ interface Peer {
 	trust?: { phase: TrustPhase; fingerprint: string };
 }
 
-/** One declared domain with the peers that claim it; `id` is undefined for peers that declare none. */
+/**
+ * One group in the rail. `key` is the selection handle and is always defined; `id` carries the
+ * region URI only when the peers declared one.
+ */
 interface DomainGroup {
+	key: string;
 	id?: string;
 	label: string;
 	peers: Peer[];
@@ -185,7 +212,7 @@ export class OnlyneViewer implements Component {
 			this.snapshot = undefined;
 			this.status = undefined;
 			this.loading = false;
-			this.error = "未配置 Onlyne。先运行 /onlyne init 填写项目配置。";
+			this.error = t("error.notConfigured");
 			this.changed();
 			return;
 		}
@@ -267,8 +294,13 @@ export class OnlyneViewer implements Component {
 		const groups = new Map<string, DomainGroup>();
 		for (const record of this.snapshot?.discovery ?? []) {
 			if (record.node_id === this.status?.node_id) continue;
-			const key = record.region ?? "";
-			const group = groups.get(key) ?? { ...(record.region === undefined ? {} : { id: record.region }), label: regionLabel(record.region), peers: [] };
+			const key = groupKeyOf(record);
+			const group = groups.get(key) ?? {
+				key,
+				...(record.region === undefined ? {} : { id: record.region }),
+				label: groupLabelOf(record),
+				peers: [],
+			};
 			groups.set(key, group);
 			const trust = this.snapshot?.trust?.find(entry => entry.node_id === record.node_id);
 			group.peers.push({
@@ -283,8 +315,8 @@ export class OnlyneViewer implements Component {
 			group.peers.sort((left, right) => left.record.node_id.localeCompare(right.record.node_id));
 		}
 		return [...groups.values()].sort((left, right) => {
-			if (left.id === own) return -1;
-			if (right.id === own) return 1;
+			if (left.key === own) return -1;
+			if (right.key === own) return 1;
 			return left.label.localeCompare(right.label);
 		});
 	}
@@ -292,10 +324,10 @@ export class OnlyneViewer implements Component {
 	private currentDomain(): DomainGroup | undefined {
 		const groups = this.domainGroups();
 		if (this.domainKey !== undefined) {
-			const picked = groups.find(group => group.id === this.domainKey);
+			const picked = groups.find(group => group.key === this.domainKey);
 			if (picked !== undefined) return picked;
 		}
-		return groups.find(group => group.id === this.snapshot?.region) ?? groups[0];
+		return groups.find(group => group.key === this.snapshot?.region) ?? groups[0];
 	}
 
 	private peers(): Peer[] {
@@ -304,9 +336,9 @@ export class OnlyneViewer implements Component {
 
 	private sendBlocked(): string | undefined {
 		if (this.error !== undefined) return this.error;
-		if (this.draft.trim() === "") return "输入内容后发送";
+		if (this.draft.trim() === "") return t("send.blocked.empty");
 		if (this.target === undefined && this.replyTo === undefined && this.selectedThread() === undefined) {
-			return "先打开线程，或选择收件人";
+			return t("send.blocked.noTarget");
 		}
 		return undefined;
 	}
@@ -372,7 +404,7 @@ export class OnlyneViewer implements Component {
 		const current = this.currentDomain();
 		const rows: NativeChild[] = groups.map(group => {
 			const waiting = group.peers.filter(peer => peer.trust?.phase === "invited").length;
-			const open = current?.id === group.id;
+			const open = current?.key === group.key;
 			return node(
 				"item",
 				{
@@ -381,10 +413,10 @@ export class OnlyneViewer implements Component {
 					label: [span(group.label, open ? "strong" : "muted")],
 					...(waiting === 0 ? {} : { value: [span(String(waiting), "error")] }),
 					...(open ? { tone: "accent" } : {}),
-					title: `${group.label} · ${group.peers.length} 节点`,
+					title: t("rail.domain.title", { label: group.label, count: group.peers.length }),
 				},
 				undefined,
-				`domain:${group.id ?? ""}`,
+				`domain:${group.key}`,
 			);
 		});
 		return node(
@@ -399,8 +431,8 @@ export class OnlyneViewer implements Component {
 						role: "onlyne.rail.list",
 						grow: 1,
 						basis: 0,
-						selected: current === undefined ? null : `domain:${current.id ?? ""}`,
-						empty: [span("无域", "muted")],
+						selected: current === undefined ? null : `domain:${current.key}`,
+						empty: [span(t("rail.empty"), "muted")],
 					},
 					rows,
 					"domains",
@@ -423,7 +455,7 @@ export class OnlyneViewer implements Component {
 		const selected = this.selectedThread();
 		const rows: NativeChild[] = [];
 
-		rows.push(this.heading("待你确认", invites.length));
+		rows.push(this.heading(t("sidebar.pending"), invites.length));
 		for (const invite of invites) {
 			rows.push(
 				node(
@@ -432,7 +464,7 @@ export class OnlyneViewer implements Component {
 						label: [span("▢ ", "warning"), span(shortNodeId(invite.node_id), "strong")],
 						value: [span(invite.fingerprint.slice(0, 8), "dim")],
 						tone: "warning",
-						title: `${invite.node_id}\n点击核对指纹`,
+						title: t("sidebar.invite.title", { node: invite.node_id }),
 					},
 					undefined,
 					`invite:${invite.node_id}`,
@@ -440,19 +472,23 @@ export class OnlyneViewer implements Component {
 			);
 		}
 
-		rows.push(this.heading("线程", threads.length));
+		rows.push(this.heading(t("sidebar.threads"), threads.length));
 		for (const thread of threads) {
 			const open = selected?.alias === thread.alias && this.view?.kind !== "inbox";
 			rows.push(
 				node(
 					"item",
 					{
-						label: [span(`# ${thread.title}`, open ? "strong" : undefined), ...(thread.state === "closed" ? [span(" 已关闭", "dim")] : [])],
+						label: [span(`# ${thread.title}`, open ? "strong" : undefined), ...(thread.state === "closed" ? [span(` ${t("thread.closed")}`, "dim")] : [])],
 						// One number per row, always the same number: the unread count. A row that
 						// showed the message total once everything was read made two rows of equal
 						// width mean different things.
 						value: thread.unread > 0 ? [span(String(thread.unread), "info")] : [],
-						title: `${thread.title} · ${thread.messages.length} 条消息 · ${shortAlias(thread.alias)}`,
+						title: t("sidebar.thread.title", {
+							title: thread.title,
+							count: thread.messages.length,
+							alias: shortAlias(thread.alias),
+						}),
 					},
 					undefined,
 					`thread:${thread.alias}`,
@@ -460,7 +496,7 @@ export class OnlyneViewer implements Component {
 			);
 		}
 		if (threads.length === 0) {
-			rows.push(node("item", { label: [span("还没有线程", "muted")], disabled: true }, undefined, "head:empty-threads"));
+			rows.push(node("item", { label: [span(t("sidebar.empty"), "muted")], disabled: true }, undefined, "head:empty-threads"));
 		}
 
 		// The queue is its own section, so it needs no heading: the row names it and counts
@@ -469,7 +505,7 @@ export class OnlyneViewer implements Component {
 			node(
 				"item",
 				{
-					label: [span("✉ 收件箱", "muted")],
+					label: [span(t("sidebar.inbox"), "muted")],
 					value: [span(String(queue), queue === 0 ? "dim" : "info")],
 				},
 				undefined,
@@ -487,7 +523,7 @@ export class OnlyneViewer implements Component {
 					[
 						textNode([span(regionLabel(domain?.id ?? this.snapshot?.region), "dim")], { truncate: "end" }),
 						textNode([span(shortNodeId(this.status?.node_id ?? ""), "strong")], { truncate: "end" }),
-						textNode([span(fingerprint ?? "无节点密钥", "dim")], { truncate: "end" }),
+						textNode([span(fingerprint ?? t("sidebar.noKey"), "dim")], { truncate: "end" }),
 					],
 					"head",
 				),
@@ -498,7 +534,7 @@ export class OnlyneViewer implements Component {
 						grow: 1,
 						basis: 0,
 						selected: this.view?.kind === "inbox" ? "inbox" : selected === undefined ? null : `thread:${selected.alias}`,
-						empty: [span("还没有线程", "muted")],
+						empty: [span(t("sidebar.empty"), "muted")],
 					},
 					rows,
 					"rows",
@@ -512,28 +548,28 @@ export class OnlyneViewer implements Component {
 	private approvalsCard(): NativeChild[] {
 		const invites = this.invites();
 		if (invites.length === 0) return [];
-		const mine = this.snapshot?.identity?.fingerprint ?? "本节点没有密钥";
+		const mine = this.snapshot?.identity?.fingerprint ?? t("key.missing");
 		return invites.map(invite =>
 			node(
 				"card",
 				{
 					role: "onlyne.approval",
 					tone: "warning",
-					head: [span(`${shortNodeId(invite.node_id)} 请求与你交换密钥`, "strong")],
+					head: [span(t("approvals.head", { node: shortNodeId(invite.node_id) }), "strong")],
 				},
 				[
 					this.facts([
-						{ k: "对方指纹", v: invite.fingerprint },
-						{ k: "本机指纹", v: mine },
-						{ k: "端点", v: invite.base_url },
+						{ k: t("field.peerFingerprint"), v: invite.fingerprint },
+						{ k: t("field.ownFingerprint"), v: mine },
+						{ k: t("field.endpoint"), v: invite.base_url },
 					]),
 					node(
 						"row",
 						{ gap: "sm", align: "center" },
 						[
-							this.button("同意", `onlyne.accept:${invite.node_id}`, { tone: "accent", title: "双方指纹一致，批准这次交换" }),
-							this.button("拒绝", `onlyne.reject:${invite.node_id}`, { title: "不批准这次申请" }),
-							this.button("查看详情", `onlyne.member:${invite.node_id}`, { title: "在成员栏打开这位节点" }),
+							this.button(t("action.accept"), `onlyne.accept:${invite.node_id}`, { tone: "accent", title: t("approvals.accept.title") }),
+							this.button(t("action.reject"), `onlyne.reject:${invite.node_id}`, { title: t("approvals.reject.title") }),
+							this.button(t("action.details"), `onlyne.member:${invite.node_id}`, { title: t("approvals.details.title") }),
 						],
 						"acts",
 					),
@@ -561,7 +597,7 @@ export class OnlyneViewer implements Component {
 					span(`  ${clockText(message.at) || "—"}`, "dim"),
 					...(message.relation === undefined ? [] : [span(`  ${message.relation}`, "dim")]),
 				],
-				title: `#${message.seq} · 点击回复这一条`,
+				title: t("message.reply.title", { seq: message.seq }),
 				actions: { click: `onlyne.message:${messageKey}` },
 			},
 			[textNode(message.text, { wrap: "word" })],
@@ -582,10 +618,12 @@ export class OnlyneViewer implements Component {
 		// One caret at a time: the address card owns it while it is open.
 		this.composer.focused = this.focused && !this.addressOpen;
 		const where = this.replyTo !== undefined
-			? `回复 ${shortNodeId(this.replyTo.sender)} · ${this.replyTo.id}`
+			? t("composer.reply", { node: shortNodeId(this.replyTo.sender), id: this.replyTo.id })
 			: this.target !== undefined
-				? `新消息发送到 ${shortNodeId(this.target)}`
-				: thread === undefined ? "先打开线程，或选择收件人" : `发言到 # ${thread.title} · ${shortNodeId(thread.ref.owner)} 托管`;
+				? t("composer.new", { node: shortNodeId(this.target) })
+				: thread === undefined
+					? t("send.blocked.noTarget")
+					: t("composer.thread", { title: thread.title, owner: shortNodeId(thread.ref.owner) });
 		return node(
 			"card",
 			// `bare` keeps the head-over-body grouping without a ring: the editor draws its own
@@ -598,17 +636,17 @@ export class OnlyneViewer implements Component {
 					{ gap: "md", align: "center", justify: "between" },
 					[
 						textNode([span(where, blocked === undefined ? "dim" : "warning")], { wrap: "word", grow: 1 }),
-						...(this.replyTo === undefined ? [] : [this.button("取消回复", "onlyne.reply.clear", { title: "不再引用这一条" })]),
-						...(this.target === undefined ? [] : [this.button("改回线程发言", "onlyne.target:", { title: "清除手动指定的收件人" })]),
+						...(this.replyTo === undefined ? [] : [this.button(t("composer.cancelReply"), "onlyne.reply.clear", { title: t("composer.cancelReply.title") })]),
+						...(this.target === undefined ? [] : [this.button(t("composer.back"), "onlyne.target:", { title: t("composer.back.title") })]),
 						node(
 							"row",
 							{
 								role: "omp.btn",
 								align: "center",
 								actions: { click: "onlyne.send" },
-								title: blocked ?? "发送这条消息",
+								title: blocked ?? t("composer.send.title"),
 							},
-							[textNode([span(this.sending ? "发送中…" : "发送", blocked === undefined ? "accent strong" : "muted")])],
+							[textNode([span(this.sending ? t("composer.sending") : t("composer.send"), blocked === undefined ? "accent strong" : "muted")])],
 							"send",
 						),
 					],
@@ -623,7 +661,12 @@ export class OnlyneViewer implements Component {
 	private inboxRows(): NativeNode {
 		const queue = this.snapshot?.queue ?? [];
 		const rows: NativeChild[] = [];
-		for (const [head, kind] of [["来信", "inbound"], ["出站", "outbound"], ["本地上下文", "context"], ["判定", "decision"]] as const) {
+		for (const [head, kind] of [
+			[t("inbox.heading.inbound"), "inbound"],
+			[t("inbox.heading.outbound"), "outbound"],
+			[t("inbox.heading.context"), "context"],
+			[t("inbox.heading.decision"), "decision"],
+		] as const) {
 			const items = queue.filter(entry => entry.kind === kind);
 			if (items.length === 0) continue;
 			rows.push(this.heading(head, items.length));
@@ -649,7 +692,7 @@ export class OnlyneViewer implements Component {
 				role: "onlyne.inbox.list",
 				grow: 1,
 				basis: 0,
-				empty: [span("队列是空的。", "muted")],
+				empty: [span(t("inbox.empty"), "muted")],
 			},
 			rows,
 			"queue",
@@ -661,7 +704,7 @@ export class OnlyneViewer implements Component {
 		const children: NativeChild[] = [];
 		if (this.error !== undefined) {
 			children.push(textNode([span(this.error, "error")], { wrap: "word" }));
-			children.push(this.button("重新读取", "onlyne.reload"));
+			children.push(this.button(t("action.reload"), "onlyne.reload"));
 		}
 		if (this.notice !== undefined) {
 			children.push(textNode([span(this.notice.text, this.notice.error ? "error" : "info")], { wrap: "word" }));
@@ -670,16 +713,16 @@ export class OnlyneViewer implements Component {
 			children.push(
 				node(
 					"card",
-					{ role: "onlyne.exchange", tone: "warning", head: [span(`与 ${shortNodeId(this.exchange.node_id)} 交换密钥`, "strong")] },
+					{ role: "onlyne.exchange", tone: "warning", head: [span(t("exchange.head", { node: shortNodeId(this.exchange.node_id) }), "strong")] },
 					[
 						this.facts([
-							{ k: "对方节点", v: this.exchange.node_id },
-							{ k: "对方指纹", v: this.exchange.fingerprint },
-							{ k: "本机指纹", v: this.snapshot?.identity?.fingerprint ?? "本节点没有密钥" },
+							{ k: t("field.peerNode"), v: this.exchange.node_id },
+							{ k: t("field.peerFingerprint"), v: this.exchange.fingerprint },
+							{ k: t("field.ownFingerprint"), v: this.snapshot?.identity?.fingerprint ?? t("key.missing") },
 						]),
 						node("row", { gap: "sm", align: "center" }, [
-							this.button("确认并发送申请", "onlyne.exchange.confirm", { tone: "accent" }),
-							this.button("取消", "onlyne.exchange.cancel"),
+							this.button(t("action.confirmExchange"), "onlyne.exchange.confirm", { tone: "accent" }),
+							this.button(t("action.cancel"), "onlyne.exchange.cancel"),
 						], "acts"),
 					],
 					"exchange",
@@ -691,8 +734,8 @@ export class OnlyneViewer implements Component {
 			children.push(
 				node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
 					node("col", { gap: "none", grow: 1 }, [
-						textNode([span("✉ 收件箱", "strong")], { truncate: "end" }),
-						textNode([span(`${this.snapshot?.queue.length ?? 0} 条待处理`, "dim")], { truncate: "end" }),
+						textNode([span(t("inbox.title"), "strong")], { truncate: "end" }),
+						textNode([span(t("inbox.pending", { count: this.snapshot?.queue.length ?? 0 }), "dim")], { truncate: "end" }),
 					]),
 				], "thread-head"),
 				this.inboxRows(),
@@ -700,15 +743,23 @@ export class OnlyneViewer implements Component {
 		} else {
 			const thread = this.selectedThread();
 			if (thread === undefined) {
-				children.push(textNode([span("从左边打开一个线程，或在成员栏选一位节点发起对话。", "muted")], { wrap: "word", lines: 3 }));
+				children.push(textNode([span(t("flow.empty"), "muted")], { wrap: "word", lines: 3 }));
 			} else {
 				const messages = thread.messages;
 				const last = messages.at(-1);
+				const lastLine = last === undefined
+					? ""
+					: t("thread.meta.last", { age: sinceText(last.at) || t("time.unknown") });
 				children.push(
 					node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
 						node("col", { gap: "none", grow: 1 }, [
-							textNode([span(`# ${thread.title}`, "strong"), ...(thread.state === "closed" ? [span(" · 已关闭", "dim")] : [])], { truncate: "end" }),
-							textNode([span(`${messages.length} 条消息 · ${new Set(messages.map(message => message.author)).size} 位发言者 · ${shortNodeId(thread.ref.owner)} 托管${last === undefined ? "" : ` · 最近一条 ${sinceText(last.at) || "时间未知"}`}`, "dim")], { truncate: "end" }),
+							textNode([span(`# ${thread.title}`, "strong"), ...(thread.state === "closed" ? [span(` · ${t("thread.closed")}`, "dim")] : [])], { truncate: "end" }),
+							textNode([span(t("thread.meta", {
+								messages: messages.length,
+								speakers: new Set(messages.map(message => message.author)).size,
+								owner: shortNodeId(thread.ref.owner),
+								last: lastLine,
+							}), "dim")], { truncate: "end" }),
 						]),
 					], "thread-head"),
 					...this.approvalsCard(),
@@ -719,7 +770,7 @@ export class OnlyneViewer implements Component {
 								role: "onlyne.messages",
 								grow: 1,
 								basis: 0,
-								empty: [span("这个线程还没有消息。", "muted")],
+								empty: [span(t("thread.empty"), "muted")],
 							},
 							messages.map(message => this.messageCard(message)),
 							"messages",
@@ -730,7 +781,7 @@ export class OnlyneViewer implements Component {
 				);
 			}
 		}
-		if (this.loading) children.push(node("spinner", { label: [span("读取 Onlyne 状态…", "muted")] }, undefined, "loading"));
+		if (this.loading) children.push(node("spinner", { label: [span(t("loading"), "muted")] }, undefined, "loading"));
 		return node(
 			"col",
 			{ role: "onlyne.flow", gap: "sm", grow: 1, shrink: 1, align: "stretch", min: { w: 0 } },
@@ -760,19 +811,22 @@ export class OnlyneViewer implements Component {
 		this.address.focused = this.focused;
 		return node(
 			"card",
-			{ role: "onlyne.connect", inset: true, head: [span("连接一个节点", "strong")] },
+			{ role: "onlyne.connect", inset: true, head: [span(t("connect.head"), "strong")] },
 			[
 				this.address,
 				textNode(
-					[span("origin（http://host:7801）或服务地址（http://host:7801/onlyne/v3）都可以；连上后保存为种子，下次启动自动联系。", "dim")],
+					[span(t("connect.hint"), "dim")],
 					{ wrap: "word" },
 				),
 				node(
 					"row",
 					{ gap: "sm", align: "center", wrap: true },
 					[
-						this.button(this.connecting ? "连接中…" : "连接", "onlyne.connect.submit", { tone: "accent", title: "读取这个地址并保存为种子" }),
-						this.button("取消", "onlyne.connect.cancel", { title: "关掉地址输入" }),
+						this.button(this.connecting ? t("connect.connecting") : t("connect.submit"), "onlyne.connect.submit", {
+							tone: "accent",
+							title: t("connect.submit.title"),
+						}),
+						this.button(t("action.cancel"), "onlyne.connect.cancel", { title: t("connect.cancel.title") }),
 					],
 					"acts",
 				),
@@ -792,7 +846,7 @@ export class OnlyneViewer implements Component {
 					label: [span("● ", phase === undefined ? "muted" : PHASE_TONE[phase]), span(shortNodeId(peer.record.node_id), "strong")],
 					// Every row here belongs to the selected domain, so the region would repeat
 					// the column head and truncate the id it sits next to.
-					value: [span(phase === undefined ? "无认证" : PHASE_SHORT[phase], phase === undefined ? "dim" : PHASE_TONE[phase])],
+					value: [span(phase === undefined ? t("trust.none") : t(PHASE_SHORT[phase]), phase === undefined ? "dim" : PHASE_TONE[phase])],
 					title: `${peer.record.node_id}\n${peer.record.base_url}`,
 				},
 				undefined,
@@ -801,13 +855,13 @@ export class OnlyneViewer implements Component {
 		});
 		const children: NativeChild[] = [
 			node("row", { gap: "sm", align: "center", justify: "between" }, [
-				textNode([span(`域内节点 · ${peers.length}`, "dim")]),
+				textNode([span(t("members.head", { count: peers.length }), "dim")]),
 				node(
 					"row",
 					{ gap: "xs", align: "center" },
 					[
-						...(this.addressOpen ? [] : [this.button("添加地址", "onlyne.connect.open", { title: "按地址连接一个发现不到的节点" })]),
-						this.button("刷新", "onlyne.discovery.refresh", { title: "重新观察一轮发现" }),
+						...(this.addressOpen ? [] : [this.button(t("members.add"), "onlyne.connect.open", { title: t("members.add.title") })]),
+						this.button(t("members.refresh"), "onlyne.discovery.refresh", { title: t("members.refresh.title") }),
 					],
 					"acts",
 				),
@@ -820,7 +874,7 @@ export class OnlyneViewer implements Component {
 					grow: 1,
 					basis: 0,
 					selected: this.memberKey === undefined ? null : `peer:${this.memberKey}`,
-					empty: [span("这个域还没有可达节点。", "muted")],
+					empty: [span(t("members.empty"), "muted")],
 				},
 				rows,
 				"roster",
@@ -835,22 +889,27 @@ export class OnlyneViewer implements Component {
 					"card",
 					{
 						role: "onlyne.member-detail",
-						head: [span(shortNodeId(peer.record.node_id), "strong"), ...(phase === undefined ? [] : [span(` · ${PHASE_LABEL[phase]}`, PHASE_TONE[phase])])],
+						head: [span(shortNodeId(peer.record.node_id), "strong"), ...(phase === undefined ? [] : [span(` · ${t(PHASE_LABEL[phase])}`, PHASE_TONE[phase])])],
 					},
 					[
 						this.facts([
-							{ k: "指纹", v: peer.trust?.fingerprint ?? "未交换" },
-							{ k: "域", v: regionLabel(peer.record.region) },
-							{ k: "状态", v: phase === undefined ? "无认证" : PHASE_LABEL[phase] },
-							{ k: "端点", v: peer.record.base_url },
-							{ k: "来源", v: peer.record.source === "bootstrap" ? "按地址连接（已存为种子）" : peer.record.source },
-							{ k: "最后可见", v: `${sinceText(peer.record.last_seen) || "时间未知"}${stale ? " · 记录已过期" : ""}` },
+							{ k: t("field.fingerprint"), v: peer.trust?.fingerprint ?? t("member.fingerprint.none") },
+							{ k: t("field.domain"), v: regionLabel(peer.record.region) },
+							{ k: t("field.status"), v: phase === undefined ? t("trust.none") : t(PHASE_LABEL[phase]) },
+							{ k: t("field.endpoint"), v: peer.record.base_url },
+							{ k: t("field.source"), v: peer.record.source === "bootstrap" ? t("member.source.seed") : peer.record.source },
+							{
+								k: t("field.lastSeen"),
+								v: `${sinceText(peer.record.last_seen) || t("time.unknown")}${stale ? t("member.lastSeen.stale") : ""}`,
+							},
 						]),
 						node("row", { gap: "sm", align: "center", wrap: true }, [
-							this.button("用作发送目标", `onlyne.target:${peer.record.node_id}`, { title: "把消息发给这位节点" }),
-							...(phase === "invited" ? [this.button("同意交换", `onlyne.accept:${peer.record.node_id}`, { tone: "accent" })] : []),
-							...(phase === undefined || phase === "revoked" ? [this.button("请求交换密钥", `onlyne.request:${peer.record.node_id}`, { title: "读取对方指纹，核对后发送申请" })] : []),
-							...(phase === "exchanged" || phase === "requested" ? [this.button("撤销信任", `onlyne.revoke:${peer.record.node_id}`, { tone: "error" })] : []),
+							this.button(t("action.useTarget"), `onlyne.target:${peer.record.node_id}`, { title: t("member.target.title") }),
+							...(phase === "invited" ? [this.button(t("action.acceptExchange"), `onlyne.accept:${peer.record.node_id}`, { tone: "accent" })] : []),
+							...(phase === undefined || phase === "revoked"
+								? [this.button(t("action.requestExchange"), `onlyne.request:${peer.record.node_id}`, { title: t("member.request.title") })]
+								: []),
+							...(phase === "exchanged" || phase === "requested" ? [this.button(t("action.revoke"), `onlyne.revoke:${peer.record.node_id}`, { tone: "error" })] : []),
 						], "acts"),
 					],
 					"member-detail",
@@ -897,7 +956,7 @@ export class OnlyneViewer implements Component {
 		} else if (id.startsWith("invite:")) {
 			this.memberKey = id.slice("invite:".length);
 		} else if (id.startsWith("domain:")) {
-			this.domainKey = id.slice("domain:".length) || undefined;
+			this.domainKey = id.slice("domain:".length);
 			this.memberKey = undefined;
 		} else if (id.startsWith("peer:")) {
 			const peer = id.slice("peer:".length);
@@ -977,7 +1036,7 @@ export class OnlyneViewer implements Component {
 			return;
 		}
 		if (act.startsWith("onlyne.domain:")) {
-			this.domainKey = act.slice("onlyne.domain:".length) || undefined;
+			this.domainKey = act.slice("onlyne.domain:".length);
 			this.memberKey = undefined;
 			this.changed();
 			return;
@@ -1013,7 +1072,7 @@ export class OnlyneViewer implements Component {
 		}
 		if (act.startsWith("onlyne.reject:")) {
 			// The runtime's only refusal is a revocation, which leaves the peer able to ask again.
-			void this.revoke(act.slice("onlyne.reject:".length), "拒绝");
+			void this.revoke(act.slice("onlyne.reject:".length), true);
 			return;
 		}
 		if (act.startsWith("onlyne.revoke:")) {
@@ -1067,12 +1126,12 @@ export class OnlyneViewer implements Component {
 	private async refreshDiscovery(): Promise<void> {
 		const runtime = getRuntime();
 		if (runtime === undefined) return;
-		this.setNotice("正在刷新发现…");
+		this.setNotice(t("notice.refreshing"));
 		try {
 			await runtime.refreshDiscovery();
-			this.setNotice("发现已刷新。");
+			this.setNotice(t("notice.refreshed"));
 		} catch (error) {
-			this.setNotice(`刷新失败：${errorText(error)}`, true);
+			this.setNotice(t("notice.refreshFailed", { error: errorText(error) }), true);
 		}
 		await this.reload();
 	}
@@ -1093,12 +1152,12 @@ export class OnlyneViewer implements Component {
 		if (this.connecting) return;
 		const runtime = getRuntime();
 		if (runtime === undefined) {
-			this.setNotice("Onlyne 还没启动，先运行 /onlyne init。", true);
+			this.setNotice(t("notice.notRunning"), true);
 			return;
 		}
 		const typed = this.addressText.trim();
 		if (typed.length === 0) {
-			this.setNotice("先填写地址，例如 http://127.0.0.1:7801/onlyne/v3", true);
+			this.setNotice(t("notice.addressEmpty"), true);
 			return;
 		}
 		this.connecting = true;
@@ -1107,11 +1166,11 @@ export class OnlyneViewer implements Component {
 		try {
 			seed = normalizeServiceUrl(typed);
 			await runtime.contact(typed);
-			this.setNotice(`已连接 ${seed}，并保存为种子；下次启动会自动联系。`);
+			this.setNotice(t("notice.connected", { seed }));
 			this.closeAddress();
 		} catch (error) {
 			seed = undefined;
-			this.setNotice(`连接失败：${errorText(error)}`, true);
+			this.setNotice(t("notice.connectFailed", { error: errorText(error) }), true);
 		} finally {
 			this.connecting = false;
 			await this.reload();
@@ -1121,7 +1180,7 @@ export class OnlyneViewer implements Component {
 		const target = seed;
 		const record = this.snapshot?.discovery.find(entry => entry.base_url === target);
 		if (record === undefined) return;
-		this.domainKey = record.region;
+		this.domainKey = groupKeyOf(record);
 		this.memberKey = record.node_id;
 		this.changed();
 	}
@@ -1132,25 +1191,24 @@ export class OnlyneViewer implements Component {
 		if (runtime === undefined || invite === undefined) return;
 		try {
 			await runtime.trustAccept(nodeId, invite.fingerprint);
-			this.setNotice(`已批准 ${shortNodeId(nodeId)} 的密钥。`);
+			this.setNotice(t("notice.accepted", { node: shortNodeId(nodeId) }));
 		} catch (error) {
-			this.setNotice(`批准失败：${errorText(error)}`, true);
+			this.setNotice(t("notice.acceptFailed", { error: errorText(error) }), true);
 		}
 		await this.reload();
 	}
 
-	private async revoke(nodeId: string, verb = "撤销"): Promise<void> {
+	/** `refused` distinguishes a rejection of the peer's request from a revocation of trust. */
+	private async revoke(nodeId: string, refused = false): Promise<void> {
 		const runtime = getRuntime();
 		if (runtime === undefined) return;
 		try {
 			await runtime.trustRevoke(nodeId);
-			this.setNotice(
-				verb === "拒绝"
-					? `已拒绝 ${shortNodeId(nodeId)} 的这次申请；对方再次申请时会重新出现。`
-					: `已撤销 ${shortNodeId(nodeId)} 的信任。`,
-			);
+			this.setNotice(refused
+				? t("notice.rejected", { node: shortNodeId(nodeId) })
+				: t("notice.revoked", { node: shortNodeId(nodeId) }));
 		} catch (error) {
-			this.setNotice(`${verb}失败：${errorText(error)}`, true);
+			this.setNotice(t("notice.failed", { verb: t(refused ? "verb.reject" : "verb.revoke"), error: errorText(error) }), true);
 		}
 		await this.reload();
 	}
@@ -1168,7 +1226,7 @@ export class OnlyneViewer implements Component {
 			this.changed();
 		} catch (error) {
 			if (token !== this.exchangeToken) return;
-			this.setNotice(`请求失败：${errorText(error)}`, true);
+			this.setNotice(t("notice.requestFailed", { error: errorText(error) }), true);
 		}
 	}
 
@@ -1179,9 +1237,9 @@ export class OnlyneViewer implements Component {
 		this.changed();
 		try {
 			await session.confirm(session.fingerprint);
-			this.setNotice(`已提交与 ${shortNodeId(session.node_id)} 的密钥交换，双方批准状态见成员栏。`);
+			this.setNotice(t("notice.exchangeSent", { node: shortNodeId(session.node_id) }));
 		} catch (error) {
-			this.setNotice(`请求失败：${errorText(error)}`, true);
+			this.setNotice(t("notice.requestFailed", { error: errorText(error) }), true);
 		}
 		await this.reload();
 	}
@@ -1214,10 +1272,10 @@ export class OnlyneViewer implements Component {
 		}
 		const input: MsgInput = {
 			delivery_kind: this.replyTo !== undefined
-				? `回复 ${shortNodeId(this.replyTo.sender)}`
+				? t("delivery.reply", { node: shortNodeId(this.replyTo.sender) })
 				: thread === undefined
-					? `给 ${shortNodeId(this.target ?? "")} 发一条消息`
-					: `在 ${thread.title} 里发一条消息`,
+					? t("delivery.to", { node: shortNodeId(this.target ?? "") })
+					: t("delivery.thread", { title: thread.title }),
 			msg: this.draft.trim(),
 			...(Object.keys(meta).length === 0 ? {} : { meta }),
 		};
@@ -1234,7 +1292,7 @@ export class OnlyneViewer implements Component {
 				this.messageScroll++;
 			}
 		} catch (error) {
-			this.setNotice(`发送失败：${errorText(error)}`, true);
+			this.setNotice(t("notice.sendFailed", { error: errorText(error) }), true);
 		} finally {
 			this.sending = false;
 			await this.reload();
@@ -1242,11 +1300,13 @@ export class OnlyneViewer implements Component {
 	}
 
 	private describeOutcome(outcome: SendOutcome): string {
-		if (outcome.admission === "refused") return `未送达：${outcome.error?.message ?? "对方拒绝"}`;
+		if (outcome.admission === "refused") {
+			return t("outcome.refused", { error: outcome.error?.message ?? t("outcome.refused.peer") });
+		}
 		const reply = outcome.reply?.message.msg;
-		if (reply !== undefined) return `已送达，对方回了：${oneLine(reply) || "（空）"}`;
-		if (outcome.admission === "accepted") return "已送达。";
-		return "投递结果未知，会在重试窗口内继续。";
+		if (reply !== undefined) return t("outcome.replied", { reply: oneLine(reply) || t("outcome.reply.empty") });
+		if (outcome.admission === "accepted") return t("outcome.accepted");
+		return t("outcome.unknown");
 	}
 
 	/** The ANSI fallback for a terminal without the native surface: a listing, no interaction. */
@@ -1256,7 +1316,13 @@ export class OnlyneViewer implements Component {
 		const status = this.status;
 		const lines: string[] = [
 			fit(
-				`Onlyne · ${regionLabel(status?.region)} · 节点 ${status?.nodes ?? "…"} · 邻居 ${status?.neighbors ?? "…"} · 告警 ${status?.alerts ?? 0} · 未读 ${status?.unread ?? 0}`,
+				t("fallback.status", {
+					region: regionLabel(status?.region),
+					nodes: status?.nodes ?? "…",
+					neighbors: status?.neighbors ?? "…",
+					alerts: status?.alerts ?? 0,
+					unread: status?.unread ?? 0,
+				}),
 				width,
 			),
 		];
@@ -1270,22 +1336,32 @@ export class OnlyneViewer implements Component {
 		const lines: string[] = [];
 		const short = (text: string): string => fit(text, width);
 		if (this.view?.kind === "inbox") {
-			lines.push(short(`收件箱 · ${this.snapshot?.queue.length ?? 0} 条待处理`));
+			lines.push(short(t("fallback.inbox", { count: this.snapshot?.queue.length ?? 0 })));
 			for (const entry of this.snapshot?.queue ?? []) {
 				lines.push(short(`  ${entry.kind} ${entry.label} · ${oneLine(entry.detail)}`));
 			}
 			return lines;
 		}
 		const thread = this.selectedThread();
-		lines.push(short(`线程 ${this.threads().length} · ${thread === undefined ? "未选择" : thread.title}`));
-		for (const invite of this.invites()) lines.push(short(`待确认 · ${shortNodeId(invite.node_id)} · ${invite.fingerprint}`));
+		lines.push(short(t("fallback.threads", {
+			count: this.threads().length,
+			title: thread === undefined ? t("fallback.none") : thread.title,
+		})));
+		for (const invite of this.invites()) {
+			lines.push(short(t("fallback.invite", { node: shortNodeId(invite.node_id), fingerprint: invite.fingerprint })));
+		}
 		for (const message of thread?.messages ?? []) {
 			lines.push(short(`${message.direction === "out" ? "→" : "←"} [${message.seq}] ${plainAuthor(message.author)} ${clockText(message.at)}`));
 			for (const line of message.text.split("\n").slice(0, 6)) lines.push(short(`  ${line}`));
 		}
-		if (this.addressOpen) lines.push(short(`连接地址：${oneLine(this.addressText) || "（空）"} · Enter 连接`));
+		if (this.addressOpen) {
+			lines.push(short(t("fallback.address", { address: oneLine(this.addressText) || t("fallback.empty") })));
+		}
 		const blocked = this.sendBlocked();
-		lines.push(short(`传入：${oneLine(this.draft) || "（空）"}${blocked === undefined ? "" : ` · ${blocked}`}`));
+		lines.push(short(t("fallback.draft", {
+			text: oneLine(this.draft) || t("fallback.empty"),
+			blocked: blocked === undefined ? "" : ` · ${blocked}`,
+		})));
 		return lines;
 	}
 

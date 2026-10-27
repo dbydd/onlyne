@@ -15,6 +15,8 @@ separate identities. `/onlyne init` creates it; no file is required before the
 first run.
 
 ```toml
+language = "en"
+
 [node]
 region = "urn:onlyne:region:research-chamber"
 id = "urn:onlyne:agent:lazuli"
@@ -64,6 +66,13 @@ separate security proposal; leave both at their defaults for the first E2E.
   `onlyne://outbound`, `onlyne://neighbors` — read-only views. List views accept
   `page_size` (or `limit`) and `cursor`; a conversation holds both directions of one
   exchange.
+- `onlyne://resources` reads the local node and peers whose key exchange is complete.
+  Each owner returns its authorized resources or an explicit failure. Select
+  `onlyne://resources/<encoded-owner>` for one owner's inventory and pagination.
+  A resource lives at `onlyne://resources/<encoded-owner>/<encoded-id>`, with
+  `/log`, `/log/<event-id>`, `/operations`, and `/operations/<operation-id>` reads.
+  Log pages accept an exclusive `since` event id. Resource reads belong to the
+  main OMP session because context records contain no resource grants.
 - Inbound messages arrive as `onlyne.inbound` custom messages. A supplement for
   an existing context uses `onlyne.supplement` and `sendCustomMessage`.
 - Tern renders these messages as mailing-list letters: an `[onlyne]` subject,
@@ -84,6 +93,21 @@ separate security proposal; leave both at their defaults for the first E2E.
 Subagent sessions may read only the context slice attached to their own agent
 identity and may not send; the main agent owns the node identity and the reply
 path.
+
+The equivalent `msg` query uses `meta: { scope: "resources", op: "list" }`.
+An optional `owner` selects one inventory. The `describe`, `log`, `event`,
+`operations`, and `status` queries name `resource: { owner, id }`.
+`event` requires `event_id`; `status` requires `operation_id`.
+Paged queries accept `page_size` and `cursor`. A resource cursor requires one owner.
+
+## Language
+
+`/onlyne language en` and `/onlyne language zh-CN` save the project language.
+The command changes rendered text, judge prompts, and the registered `msg`
+description in the current session. Configuration forms preserve this setting.
+The optional top-level `language` setting takes precedence over `ONLYNE_LANG`,
+then `LC_ALL` or `LANG`. The default is English. Route names, protocol fields,
+error codes, diagnostic event names, and user messages keep their original values.
 
 `AGENTS.sample.md` is the agent-facing half of that surface. Copy it into the
 host project's `AGENTS.md`: it states that `msg` is the only entry, that a send's

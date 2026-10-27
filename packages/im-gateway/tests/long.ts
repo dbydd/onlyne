@@ -103,7 +103,7 @@ const config: GatewayConfig = {
   server: { bind: '127.0.0.1', port: 39873 },
   storage_path: join(dir, 'store.json'),
   connectors: [{
-    platform: 'lark', resource_ref: { id: RESOURCE }, conversation: chat, assignee: AGENT_A,
+    platform: 'lark', conversation: chat, assignee: AGENT_A,
     credential: secret,
   }],
 };

@@ -1,6 +1,6 @@
 import { OnlyneNode, type Auth, type Json, type Plugins, type ResourceDriver, type ResourceRef } from '@onlyne/lib';
 import { MemoryStorage } from '@onlyne/lib/memory';
-import { createDriverBridge, type Connector, type ImEvent, type SendOutcome, type SendRequest } from '../src/index.js';
+import { coordinateOf, createDriverBridge, resourceIdOf, type Connector, type ImEvent, type SendOutcome, type SendRequest } from '../src/index.js';
 
 let failures = 0;
 const ok = (label: string, condition: boolean) => {
@@ -35,7 +35,11 @@ class ScriptedConnector implements Connector {
 
 const NODE = 'urn:onlyne:gateway:im';
 const ASSIGNEE = 'urn:onlyne:agent:lazuli';
-const REF: ResourceRef = { owner: NODE, id: 'chat-01' };
+const PLATFORM = 'lark';
+const CONVERSATION = 'oc_test';
+// RFC 0012 §2: the resource id is the platform name plus the platform coordinate, and the rule
+// is reversible, so the test never hard-codes an id the bridge could not resolve.
+const REF: ResourceRef = { owner: NODE, id: resourceIdOf(PLATFORM, CONVERSATION) };
 
 const plugins: Omit<Plugins, 'storage' | 'resources'> = {
   authenticate: async () => null,
@@ -50,19 +54,37 @@ const plugins: Omit<Plugins, 'storage' | 'resources'> = {
 const connector = new ScriptedConnector('lark');
 const storage = new MemoryStorage();
 const stored: Array<{ name: string; text: string }> = [];
+let node: OnlyneNode;
+let adoptions = 0;
+/** The host's adopt: one resource per conversation, bound to the assignee (RFC 0012 §2). */
+const adopt = async (ref: ResourceRef, conversation: string): Promise<void> => {
+  adoptions += 1;
+  await node.resources.register({ actor: NODE } satisfies Auth, {
+    resource_ref: ref,
+    kind: 'im_conversation',
+    operations: ['read', 'send', 'list_events', 'handover', 'describe'],
+    binding: { handler: ASSIGNEE, cursor: '0' },
+    log_readers: [ASSIGNEE],
+    revision: 'rev-a',
+    event_seq: '0',
+    retention_ms: 3_600_000,
+    data: { platform: PLATFORM, conversation },
+  });
+};
 // The bridge resolves the resource service lazily: the library captures the driver when the
 // service is constructed (resources.ts:159), so the host builds the bridge first.
 const bridge = createDriverBridge({
   node: NODE,
   resources: () => node.resources,
   storage: { transaction: work => storage.transaction(work) },
-  connectors: [{ ref: REF, connector }],
+  connectors: [{ platform: PLATFORM, connector }],
+  adopt,
   writeAttachment: async (_ref, name, bytes) => {
     stored.push({ name, text: new TextDecoder().decode(bytes) });
     return `/tmp/${name}`;
   },
 });
-const node = new OnlyneNode({
+node = new OnlyneNode({
   node_id: NODE,
   base_url: 'http://127.0.0.1:3999/onlyne/v3',
   plugins: { ...plugins, storage, resources: bridge },
@@ -70,37 +92,38 @@ const node = new OnlyneNode({
   id: () => Math.random().toString(36).slice(2),
 });
 
-const resource = await node.resources.register({ actor: NODE } satisfies Auth, {
-  resource_ref: REF,
-  kind: 'im_conversation',
-  operations: ['read', 'send', 'list_events', 'handover', 'describe'],
-  assignee: ASSIGNEE,
-  revision: 'rev-a',
-  readers: [],
-  controllers: [],
-  event_recipients: [ASSIGNEE],
-  result_recipients: [ASSIGNEE],
-  event_seq: '0',
-  retention_ms: 3_600_000,
-  data: { conversation: 'oc_test' },
-});
-ok('register returns the normalized resource', resource.assignee === ASSIGNEE && resource.readers.includes(ASSIGNEE));
+ok('the resource id round-trips through the coordinate rule',
+  REF.id === 'lark-oc_test'
+  && coordinateOf(REF.id)?.platform === PLATFORM && coordinateOf(REF.id)?.conversation === CONVERSATION
+  && coordinateOf('chat_01') === undefined);
 
-const event = (id: string, text: string): ImEvent => ({
-  platform: 'lark', source_id: id, conversation: 'oc_test', kind: 'message',
+const event = (id: string, text: string, conversation: string = CONVERSATION): ImEvent => ({
+  platform: PLATFORM, source_id: id, conversation, kind: 'message',
   from: 'ou_sender', text, attachments: [], message_handle: `om_${id}`, at: '2026-10-26T12:00:00Z',
 });
 
 await bridge.receive(event('p-1', '第一条'));
-const first = await node.resources.events({ actor: ASSIGNEE }, REF, {});
+const resource = await node.resources.describe({ actor: ASSIGNEE }, REF);
+const resourceData: unknown = resource.data;
+const adoptedConversation = resourceData !== null && typeof resourceData === 'object' && 'conversation' in resourceData
+  ? resourceData.conversation
+  : undefined;
+ok('the first event adopts the resource with its binding and log reader',
+  resource.binding.handler === ASSIGNEE && resource.log_readers.includes(ASSIGNEE)
+  && adoptedConversation === CONVERSATION);
+const first = await node.resources.log({ actor: ASSIGNEE }, REF, {});
 ok('one event lands', first.items.length === 1 && first.items[0]!.source_id === 'p-1');
 
 await bridge.receive(event('p-1', '第一条'));
-const afterDuplicate = await node.resources.events({ actor: ASSIGNEE }, REF, {});
+const afterDuplicate = await node.resources.log({ actor: ASSIGNEE }, REF, {});
 ok('duplicate source_id produces no second event', afterDuplicate.items.length === 1);
+ok('a repeated first touch reuses the adopted resource', adoptions === 1);
+
+const sameRef = await bridge.resolve(PLATFORM, CONVERSATION);
+ok('resolving a known conversation answers the stored resource', sameRef.id === REF.id && adoptions === 1);
 
 await bridge.receive(event('p-2', '回复目标'));
-const second = await node.resources.events({ actor: ASSIGNEE }, REF, {});
+const second = await node.resources.log({ actor: ASSIGNEE }, REF, {});
 const secondId = second.items[1]!.event_id;
 ok('second event gets the next event_id', secondId === '2');
 
@@ -119,6 +142,27 @@ const committed = await node.resources.operate(assignee, REF, {
 });
 ok('send commits with the platform message id', committed.state === 'committed' && (committed.data as Record<string, string>).message_id === 'om_1');
 ok('the connector received the platform reply handle', connector.sends[0]?.reply_to === 'om_p-2');
+ok('the send target is the resource\'s own coordinate', connector.sends[0]?.conversation === CONVERSATION);
+
+// RFC 0012 §5: `reply_to_event` names an event of the operated resource. Event ids are
+// resource-local, so an id another resource holds is a caller error, not a missing event.
+const other = await bridge.resolve(PLATFORM, 'oc_other');
+const crossed = await node.resources.operate(assignee, other, {
+  operation_id: 'op-cross', operation: 'send',
+  data: { text: '跨资源引用', reply_to_event: secondId },
+  ...mutation(),
+});
+ok('a reply naming another resource\'s event is refused', crossed.state === 'aborted'
+  && crossed.error?.code === 'invalid_request');
+await bridge.receive(event('q-1', '别的会话', 'oc_other'));
+connector.answers.push({ state: 'committed', message_id: 'om_other_local' });
+const localReply = await node.resources.operate(assignee, other, {
+  operation_id: 'op-local', operation: 'send',
+  data: { text: '本资源引用', reply_to_event: '1' },
+  ...mutation(),
+});
+ok('the other resource quotes its own first event', localReply.state === 'committed'
+  && connector.sends.at(-1)?.conversation === 'oc_other' && connector.sends.at(-1)?.reply_to === 'om_q-1');
 
 connector.answers.push({ state: 'committed', error: 'platform said no' });
 const rejected = await node.resources.operate(assignee, REF, {
@@ -137,6 +181,7 @@ const unclear = await node.resources.operate(assignee, REF, {
 });
 ok('an unclear outcome reports unknown', unclear.state === 'unknown');
 
+const sendsBeforeEmpty = connector.sends.length;
 try {
   await node.resources.operate(assignee, REF, {
     operation_id: 'op-4', operation: 'send',
@@ -146,7 +191,7 @@ try {
   ok('empty text is rejected before the connector', false);
 } catch (error) {
   ok('empty text is rejected before the connector', (error as { error?: { code?: string } }).error?.code === 'invalid_request');
-  ok('the connector saw no fourth send', connector.sends.length === 3);
+  ok('the connector saw no send for the empty text', connector.sends.length === sendsBeforeEmpty);
 }
 
 // `reply_in_thread` and attachments survive the bridge; inline bytes become a host path.
@@ -186,7 +231,8 @@ const hookless = createDriverBridge({
   node: NODE,
   resources: () => node.resources,
   storage: { transaction: work => storage.transaction(work) },
-  connectors: [{ ref: REF, connector }],
+  connectors: [{ platform: PLATFORM, connector }],
+  adopt,
 });
 const unhooked = await hookless.execute(resource, {
   operation_id: 'op-10', operation: 'send', ...mutation(),
@@ -195,35 +241,56 @@ const unhooked = await hookless.execute(resource, {
 ok('inline content without a host hook is refused', unhooked.state === 'aborted'
   && unhooked.error?.code === 'unsupported_delivery');
 
-// Backlog fence: an unacknowledged event blocks the handover commit.
+// The handler's cursor is the delivery position (RFC 0006 §5): an ack moves it forward, an ack
+// naming an event already behind it leaves it alone, and no other node may acknowledge.
 await bridge.receive(event('p-3', '积压'));
-const initiate = await node.resources.operate(assignee, REF, {
-  operation_id: 'op-5', operation: 'handover',
-  data: { target: 'urn:onlyne:agent:next', decision_deadline: deadline() },
-  ...mutation(),
-});
-ok('handover initiates pending', initiate.state === 'pending');
-const events = await node.resources.events(assignee, REF, {});
-const backlogId = events.items[2]!.event_id;
-// The target accepts; the commit hits the backlog fence and the error surfaces as `conflict`.
-let fenced = false;
+const events = await node.resources.log(assignee, REF, {});
+ok('the log lists every event in id order', events.items.map(item => item.event_id).join(',') === '1,2,3');
+const acked = await node.resources.ack(assignee, REF, '3', mutation());
+ok('an ack advances the handler cursor', acked.cursor === '3');
+const repeated = await node.resources.ack(assignee, REF, '1', mutation());
+ok('an ack behind the cursor leaves it alone', repeated.cursor === '3');
+let foreignAck = false;
 try {
-  await node.resources.decideHandover({ actor: 'urn:onlyne:agent:next' }, REF, 'op-5', true, mutation());
+  await node.resources.ack({ actor: 'urn:onlyne:agent:next' }, REF, '3', mutation());
 } catch (error) {
-  fenced = (error as { error?: { code?: string } }).error?.code === 'conflict';
+  foreignAck = (error as { error?: { code?: string } }).error?.code === 'forbidden';
 }
-ok('the backlog fence refuses the commit with conflict', fenced);
-// Clearing the whole backlog lets a fresh handover commit: events 1 and 2 are unacked too.
-for (const item of events.items) {
-  await node.resources.ack(assignee, REF, item.event_id, mutation());
+ok('only the handler acknowledges events', foreignAck);
+
+// The target side of a handover (RFC 0006 §4.3): a probe is answered once per operation id, and
+// only the node that sent it may read the answer back.
+const NEXT = 'urn:onlyne:agent:next';
+const probe = {
+  operation_id: 'probe-1', resource: REF, kind: 'im_conversation',
+  operations: ['read', 'send', 'handover'], initiator: NEXT,
+  cursor: '3', deadline: deadline(),
+};
+const answer = await node.resources.probe({ actor: NEXT }, probe);
+ok('the default probe policy accepts at the offered cursor', answer.answer === 'accept' && answer.cursor === '3');
+const replayed = await node.resources.probe({ actor: NEXT }, probe);
+ok('a replayed probe returns the recorded answer', JSON.stringify(replayed) === JSON.stringify(answer));
+const recorded = await node.resources.probeAnswer({ actor: NEXT }, 'probe-1');
+ok('the initiator reads its recorded answer back', recorded.answer === 'accept');
+let foreignProbe = false;
+try {
+  await node.resources.probeAnswer({ actor: 'urn:onlyne:agent:stranger' }, 'probe-1');
+} catch (error) {
+  foreignProbe = (error as { error?: { code?: string } }).error?.code === 'not_found';
 }
-const fresh = await node.resources.operate(assignee, REF, {
-  operation_id: 'op-6', operation: 'handover',
-  data: { target: 'urn:onlyne:agent:next', decision_deadline: deadline() },
+ok('a probe answer is readable only by its initiator', foreignProbe);
+
+// The initiator side: a target this node cannot reach aborts the handover and leaves the binding alone.
+const initiated = await node.resources.operate(assignee, REF, {
+  operation_id: 'op-5', operation: 'handover',
+  data: { target: NEXT, handover_deadline: deadline() },
   ...mutation(),
 });
-const decided = await node.resources.decideHandover({ actor: 'urn:onlyne:agent:next' }, REF, 'op-6', true, mutation());
-ok('a cleared backlog lets the handover commit', decided.state === 'committed' && fresh.state === 'pending');
+ok('an unreachable target aborts the handover', initiated.state === 'aborted'
+  && (initiated.data as Record<string, string> | undefined)?.reason === 'unreachable');
+const unchanged = await node.resources.describe(assignee, REF);
+ok('an aborted handover leaves the handler and cursor alone',
+  unchanged.binding.handler === ASSIGNEE && unchanged.binding.cursor === '3');
 
 if (failures > 0) {
   console.error(`${failures} failure(s)`);

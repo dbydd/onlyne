@@ -177,4 +177,34 @@ describe("onlyne:// routes", () => {
 		setRuntime(x.a);
 		await expect(readView("onlyne://nowhere")).rejects.toThrow(/lists the available views/);
 	});
+
+	test("onlyne://resources lists owner inventories and describe reads JSON", async () => {
+		const x = await exchange();
+		setRuntime(x.a);
+		await x.a.node.resources.register(x.a.node.auth, {
+			resource_ref: { owner: "urn:onlyne:agent:a", id: "camera" },
+			kind: "device",
+			operations: ["capture"],
+			binding: { handler: "urn:onlyne:agent:a", cursor: "0" },
+			log_readers: [],
+			revision: "rev-1",
+			event_seq: "0",
+			retention_ms: 10_000,
+		});
+		const root = await readView("onlyne://");
+		expect(root).toContain("onlyne://resources");
+		const list = await readView("onlyne://resources");
+		expect(list).toContain("urn:onlyne:agent:a");
+		expect(list).toContain("camera");
+		const item = JSON.parse(await readView("onlyne://resources/urn%3Aonlyne%3Aagent%3Aa/camera")) as { kind?: string };
+		expect(item.kind).toBe("device");
+	});
+
+	test("onlyne://resources denies subagents", async () => {
+		const x = await exchange();
+		setRuntime(x.a);
+		registerOnlyneUrls();
+		const subcaller = { session: { getAgentId: () => "Subagent" } } as unknown as ResolveContext;
+		await expect(InternalUrlRouter.instance().resolve("onlyne://resources", subcaller)).rejects.toThrow(/main OMP session/);
+	});
 });

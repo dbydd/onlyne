@@ -33,7 +33,6 @@ export class OnlyneNode {
     this.threads = new ThreadService(ctx);
     this.messages = new MessageService(ctx);
     this.history = new HistoryService(ctx);
-    this.resources = createResourceService(ctx);
     this.keys = new KeyService(ctx);
     this.trust = new TrustService(ctx, this.keys);
     const transport = options.plugins.transport ?? new FetchTransport(
@@ -41,6 +40,9 @@ export class OnlyneNode {
       fetch,
       options.plugins.keys === undefined ? undefined : { trust: this.trust },
     );
+    // A handover probe is a signed peer request, so the resource service shares the node's
+    // transport instead of reaching the network on its own.
+    this.resources = createResourceService(ctx, transport);
     this.domains = new DomainService(ctx);
     this.discovery = new DiscoveryService(ctx);
     this.transport = transport;

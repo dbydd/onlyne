@@ -9,11 +9,11 @@
  * Storage instance, never a crash.
  */
 import { CLOCK_SKEW_MS, EXCHANGE_RETRY_MS, REFUSED_RETRY_MS, FetchTransport, MemoryStorage, OnlyneError, OnlyneNode, generateKeyMaterial, trustPhase } from '../src/index.js';
-import { canonical } from '../src/core.js';
+import { canonical, key } from '../src/core.js';
 import { createPrivateKey, sign } from 'node:crypto';
 import type {
-  Auth, DeliveryPlan, Entry, ErrorCode, KeyMaterial, Mutation, NodeOptions, Plugins, Resource, ResourceDriver,
-  SendRequest, Target, TrustSeed,
+  Auth, DeliveryPlan, Entry, ErrorCode, HandoverProbe, Json, KeyMaterial, Mutation, NodeOptions, Plugins, Resource,
+  ResourceDriver, ResourceRef, SendRequest, Target, TrustEntry, TrustSeed,
 } from '../src/types.js';
 
 const lazuliNode = 'urn:onlyne:agent:lazuli';
@@ -49,6 +49,11 @@ function codeOf(error: unknown): string {
   return error instanceof OnlyneError ? error.error.code : `not-an-onlyne-error(${text(error)})`;
 }
 
+/** One field of a wire JSON value, read only when the value really carries it. */
+function field(value: Json | undefined, name: string): unknown {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && name in value ? value[name] : undefined;
+}
+
 /** Expects the call to be refused with exactly this code. */
 async function refusal(code: string, run: () => Promise<unknown>): Promise<string> {
   try { await run(); return `expected ${code}, got success`; } catch (error) {
@@ -80,7 +85,7 @@ interface Rig {
   recreate(): OnlyneNode;
 }
 
-function rig(node_id: string, base_url: string, extra: Partial<Plugins> = {}): Rig {
+function rig(node_id: string, base_url: string, extra: Partial<Plugins> = {}, wait_ms = 5_000): Rig {
   const storage = new MemoryStorage();
   const shared: Shared = { injected: [], allow: true };
   const base: Plugins = {
@@ -105,7 +110,7 @@ function rig(node_id: string, base_url: string, extra: Partial<Plugins> = {}): R
   };
   // The exported transport is what a real host injects; a caller-supplied one wins.
   const plugins: Plugins = { ...base, transport: base.transport ?? new FetchTransport(base.resolve) };
-  const options: NodeOptions = { node_id, base_url, plugins, now: () => clock.value, id: () => crypto.randomUUID(), wait_ms: 5_000 };
+  const options: NodeOptions = { node_id, base_url, plugins, now: () => clock.value, id: () => crypto.randomUUID(), wait_ms };
   const node = new OnlyneNode(options);
   return {
     node,
@@ -567,7 +572,7 @@ async function phaseExpiry(): Promise<void> {
 }
 
 // =============================================================================
-// 5. resources: handover, revision fence, old events, backlog expiry, replay
+// 5. resources: binding, append-only log, cursor ack, probe handover, recovery
 // =============================================================================
 async function phaseResources(): Promise<void> {
   const executions = new Map<string, number>();
@@ -580,46 +585,70 @@ async function phaseResources(): Promise<void> {
       return { state: 'committed', data: { operation: request.operation, revision: resource.revision } };
     },
   };
-  const keeper = serve(keeperNode, base_url => rig(keeperNode, base_url, { resources: driver, mayHandover: async () => true }));
+
+  // The target answers from its own policy. The flags let one scenario refuse a probe, and one
+  // write an event while the endpoint is frozen — exactly the window the handshake must cover.
+  const probe = { refuse: false, during: undefined as undefined | (() => Promise<void>), seen: undefined as Json | undefined };
+  const keeper = serve(keeperNode, base_url => rig(keeperNode, base_url, {
+    resources: driver,
+    // One peer is unreachable: its handover must abort without moving the binding.
+    resolve: async (node: string): Promise<Target> => (node === caeruliaNode
+      ? { node_id: node, base_url: 'http://127.0.0.1:1/onlyne/v3' }
+      : { node_id: node, base_url: urls[node] ?? base_url, headers: { 'x-onlyne-actor': keeperNode } }),
+  }));
+  const target = serve(dpdpNode, base_url => rig(dpdpNode, base_url, {
+    handoverProbe: async value => {
+      probe.seen = value.metadata;
+      if (probe.during !== undefined) await probe.during();
+      return probe.refuse
+        ? { answer: 'reject', reason: 'capability_mismatch' }
+        : { answer: 'accept', cursor: value.cursor };
+    },
+  }));
   const node = keeper.node;
   const authK: Auth = { actor: keeperNode };
   const authD: Auth = { actor: dpdpNode };
+  const authC: Auth = { actor: caeruliaNode };
 
   const resource: Resource = {
     resource_ref: { owner: keeperNode, id: 'chat-01' }, kind: 'im_conversation',
     operations: ['read', 'send', 'list_events', 'describe', 'handover'],
-    assignee: keeperNode, readers: [keeperNode, dpdpNode], controllers: [keeperNode],
-    event_recipients: [keeperNode], result_recipients: [keeperNode],
+    binding: { handler: keeperNode, cursor: '0' },
+    log_readers: [keeperNode, dpdpNode],
     event_seq: '0', revision: 'rev-a', retention_ms: 60_000,
   };
   const ref = resource.resource_ref;
   const registered = await node.resources.register(authK, resource);
-  check('resources.register', registered.revision === 'rev-a' ? '' : 'the resource did not register');
+  check('resources.register', registered.revision === 'rev-a' && registered.binding.handler === keeperNode
+    ? '' : `the resource did not register: ${JSON.stringify(registered)}`);
 
   const event = await node.resources.receive(authK, ref, { source_id: 'platform-1', data: { text: '图里的单位是什么' } });
-  const firstEventId = event.event_id;
-  check('resources.receive', firstEventId === '1' && event.recipients[0] === keeperNode
-    ? '' : `unexpected event id ${firstEventId} for a fresh resource`);
+  check('resources.receive', event.event_id === '1'
+    && Object.keys(event).sort().join(',') === 'at,data,event_id,expired,expires_at,resource_ref,source_id'
+    ? '' : `unexpected event ${JSON.stringify(event)}`);
+  const duplicate = await node.resources.receive(authK, ref, { source_id: 'platform-1', data: { text: '重复' } });
+  check('resources.receive.deduplicate', duplicate.event_id === '1' ? '' : `a duplicate source got ${duplicate.event_id}`);
+  await node.resources.receive(authK, ref, { source_id: 'platform-2', data: { text: '第二条' } });
 
   // RFC 0006 §1: the query operations answer from the endpoint's own state, never the driver.
   const queryRead = await node.resources.operate(authK, ref, {
-    ...mut(), operation_id: crypto.randomUUID(), operation: 'read', data: { event_id: firstEventId },
+    ...mut(), operation_id: crypto.randomUUID(), operation: 'read', data: { event_id: '1' },
   });
   check('resources.query.read', queryRead.state === 'committed'
-    && (queryRead.data as { event_id?: string }).event_id === firstEventId
+    && field(queryRead.data, 'event_id') === '1'
     ? '' : `read answered ${JSON.stringify(queryRead)}`);
   const queryList = await node.resources.operate(authK, ref, {
     ...mut(), operation_id: crypto.randomUUID(), operation: 'list_events', data: { page_size: 10 },
   });
-  const listed = (queryList.data as { items?: unknown[] } | undefined)?.items;
+  const listed = field(queryList.data, 'items');
   check('resources.query.list_events', queryList.state === 'committed'
-    && Array.isArray(listed) && listed.length === 1
+    && Array.isArray(listed) && listed.length === 2
     ? '' : `list_events answered ${JSON.stringify(queryList)}`);
   const queryDescribe = await node.resources.operate(authK, ref, {
     ...mut(), operation_id: crypto.randomUUID(), operation: 'describe',
   });
   check('resources.query.describe', queryDescribe.state === 'committed'
-    && (queryDescribe.data as { revision?: string }).revision === 'rev-a'
+    && field(queryDescribe.data, 'revision') === 'rev-a'
     ? '' : `describe answered ${JSON.stringify(queryDescribe)}`);
   const queryRecord = await node.resources.operation(authK, ref, queryRead.operation_id)
     .then(() => 'recorded', () => 'absent');
@@ -628,81 +657,30 @@ async function phaseResources(): Promise<void> {
     ...mut(), operation_id: crypto.randomUUID(), operation: 'read',
   })));
 
-  const handover = await node.resources.operate(authK, ref, {
-    ...mut(), operation_id: crypto.randomUUID(),
-    operation: 'handover', expected_revision: 'rev-a',
-    data: { target: dpdpNode, decision_deadline: future() },
-  });
-  const operationId = handover.operation_id;
-  check('resources.handover.initiate', handover.state === 'pending'
-    ? '' : `initiation reported ${handover.state} instead of pending`);
+  // RFC 0006 §6: the log is readable by the handler and by the standing readers, nobody else.
+  const handlerLog = await node.resources.log(authK, ref, {});
+  check('resources.log.handler', handlerLog.items.length === 2 ? '' : `the handler read ${handlerLog.items.length} events`);
+  const readerLog = await node.resources.log(authD, ref, {});
+  check('resources.log.reader', readerLog.items.length === 2 ? '' : `a log reader read ${readerLog.items.length} events`);
+  check('resources.log.stranger', await refusal('not_found', () => node.resources.log(authC, ref, {})));
+  const sinceLog = await node.resources.log(authK, ref, { since: '1' });
+  check('resources.log.since', sinceLog.items.map(item => item.event_id).join(',') === '2'
+    ? '' : `since=1 returned ${JSON.stringify(sinceLog.items.map(item => item.event_id))}`);
+  const single = await node.resources.event(authD, ref, '1');
+  check('resources.log.event', single.event_id === '1' && single.source_id === 'platform-1'
+    ? '' : `a single log read answered ${JSON.stringify(single)}`);
+  check('resources.log.unknown_event', await refusal('not_found', () => node.resources.event(authK, ref, '9')));
 
-  // Backlog blocks the commit: the target accepts while an event is undelivered.
-  let blocked: string | null = null;
-  try {
-    await node.resources.decideHandover(authD, ref, operationId, true, mut());
-  } catch (error) {
-    blocked = codeOf(error);
-  }
-  const held = await node.resources.describe(authK, ref);
-  check('resources.handover.backlog', held.assignee === keeperNode && held.revision === 'rev-a'
-    ? (blocked === null || blocked === 'conflict' ? '' : `an accept behind backlog failed with ${blocked} instead of conflict`)
-    : `backlog did not block the commit: ${JSON.stringify(held)}`);
-
-  const acknowledged = await node.resources.ack(authK, ref, firstEventId, mut());
-  check('resources.ack', acknowledged.acknowledged.includes(keeperNode) ? '' : 'the event stayed in the backlog');
-
-  const committed = await node.resources.decideHandover(authD, ref, operationId, true, mut());
-  check('resources.handover.commit', committed.state === 'committed' && committed.cutoff_event_id === firstEventId
-    ? '' : `unexpected commit ${JSON.stringify(committed)}`);
-
-  const moved = await node.resources.describe(authK, ref);
-  check('resources.handover.assignee', moved.assignee === dpdpNode ? '' : 'the assignee did not move');
-  check('resources.handover.revision', moved.revision !== 'rev-a' ? '' : 'the commit did not move the revision');
-
-  const old = await node.resources.event(authK, ref, firstEventId);
-  check('resources.event.old_read', old.event_id === firstEventId && old.revision === 'rev-a'
-    && old.recipients.includes(keeperNode) ? '' : 'the former assignee lost its first-attribution read');
-
-  check('resources.fence.revision', await refusal('revision_conflict', () => node.resources.operate(authD, ref, {
-    ...mut(), operation_id: crypto.randomUUID(),
-    operation: 'send', expected_revision: 'rev-a', data: { text: '旧版本发送' },
-  })));
-
-  // A backlog event past its retention gets an explicit expiry and stops blocking handover.
-  const late = await node.resources.receive(authK, ref, {
-    source_id: 'platform-2', data: { text: '第二条' }, expires_at: new Date(clock.value - 1_000).toISOString(),
-  });
-  await node.resources.recover();
-  const swept = await node.resources.event(authK, ref, late.event_id);
-  check('resources.recover.expiry', swept.expired === true
-    ? '' : `the retention sweep left event ${late.event_id} without a terminal disposition`);
-
-  const back = await node.resources.operate(authD, ref, {
-    ...mut(), operation_id: crypto.randomUUID(),
-    operation: 'handover', expected_revision: moved.revision,
-    data: { target: keeperNode, decision_deadline: future() },
-  });
-  const returned = await node.resources.decideHandover(authK, ref, back.operation_id, true, mut());
-  check('resources.handover.after_expiry', returned.state === 'committed'
-    && (await node.resources.describe(authK, ref)).assignee === keeperNode
-    ? '' : `handover after an expiry sweep did not commit: ${JSON.stringify(returned)}`);
-
-  // RFC 0006 §6 / 0012 §5: a first-recipient ack arriving after retention expiry keeps its
-  // receipt evidence, clears any leftover once, and never revives the expired obligation.
-  const afterExpiry = await node.resources.receive(authK, ref, {
-    source_id: 'platform-3', data: { text: '过期之后到达的确认' }, expires_at: new Date(clock.value - 1_000).toISOString(),
-  });
-  await node.resources.recover();
-  const terminal = await node.resources.event(authK, ref, afterExpiry.event_id);
-  check('resources.expire.terminal', terminal.expired === true ? '' : 'retention left the obligation without a terminal disposition');
-  const lateAck = await node.resources.ack(authK, ref, afterExpiry.event_id, mut());
-  check('resources.expire.late_ack_evidence', lateAck.expired === true && lateAck.acknowledged.includes(keeperNode)
-    ? '' : `a late ack lost its receipt evidence: ${JSON.stringify(lateAck)}`);
-  const repeat = await node.resources.ack(authK, ref, afterExpiry.event_id, mut());
-  check('resources.expire.late_ack_idempotent',
-    repeat.acknowledged.filter(actor => actor === keeperNode).length === 1
-      ? '' : `a repeated ack recorded the receipt twice: ${JSON.stringify(repeat.acknowledged)}`);
+  // RFC 0006 §5: an ack moves the handler's cursor forward and nothing else.
+  const acked = await node.resources.ack(authK, ref, '1', mut());
+  check('resources.ack.cursor', acked.cursor === '1' && acked.resource_ref.id === 'chat-01'
+    ? '' : `the ack answered ${JSON.stringify(acked)}`);
+  const ackedAgain = await node.resources.ack(authK, ref, '2', mut());
+  const behind = await node.resources.ack(authK, ref, '1', mut());
+  check('resources.ack.forward', ackedAgain.cursor === '2' && behind.cursor === '2'
+    ? '' : `the cursor went ${ackedAgain.cursor} then ${behind.cursor}`);
+  check('resources.ack.reader_forbidden', await refusal('forbidden', () => node.resources.ack(authD, ref, '2', mut())));
+  check('resources.ack.unknown_event', await refusal('not_found', () => node.resources.ack(authK, ref, '9', mut())));
 
   // One operation id executes once; the replay reads back the recorded result.
   const request = { ...mut(), operation_id: crypto.randomUUID(), operation: 'send' };
@@ -715,8 +693,6 @@ async function phaseResources(): Promise<void> {
   const record = await node.resources.operation(authK, ref, request.operation_id);
   check('resources.operation.record', record.result.state === 'committed' && record.actor === keeperNode
     ? '' : `the operation record reported ${record.result.state}`);
-
-  // Two callers race on one operation id: at most one external effect, no third state.
   const raced = { ...mut(), operation_id: crypto.randomUUID(), operation: 'send' };
   const [left, right] = await Promise.all([
     node.resources.operate(authK, ref, raced),
@@ -728,6 +704,200 @@ async function phaseResources(): Promise<void> {
     && settled.every(state => state === 'committed' || state === 'unknown')
     && settled.includes('committed')
     ? '' : `one operation id executed ${races} times and settled as ${settled.join('/')}`);
+
+  // RFC 0006 §4.2/§4.4: an unacked event does not block a handover, and an event written while
+  // the endpoint is frozen stays behind the frozen cursor, so the new handler inherits it.
+  const pending = await node.resources.receive(authK, ref, { source_id: 'platform-3', data: { text: '交接前未确认' } });
+  check('resources.handover.unacked', pending.event_id === '3' ? '' : 'the unacked event was not appended');
+  probe.during = async () => { await node.resources.receive(authK, ref, { source_id: 'freeze-1', data: { text: '冻结期到达' } }); };
+  const handoverId = crypto.randomUUID();
+  const deadline = future();
+  const committed = await node.resources.operate(authK, ref, {
+    ...mut(), operation_id: handoverId, operation: 'handover', expected_revision: 'rev-a',
+    data: { target: dpdpNode, handover_deadline: deadline, metadata: { reason: '转交技术专家' } },
+  });
+  probe.during = undefined;
+  check('resources.handover.commit', committed.state === 'committed' ? '' : `the handover reported ${JSON.stringify(committed)}`);
+  check('resources.handover.metadata', JSON.stringify(probe.seen) === JSON.stringify({ reason: '转交技术专家' })
+    ? '' : `the target read ${JSON.stringify(probe.seen)}`);
+  const moved = await node.resources.describe(authD, ref);
+  check('resources.handover.handler', moved.binding.handler === dpdpNode ? '' : 'the binding did not move');
+  check('resources.handover.revision', moved.revision !== 'rev-a' ? '' : 'the commit did not move the revision');
+  check('resources.freeze.success', moved.binding.cursor === '2'
+    ? '' : `the new handler starts at ${moved.binding.cursor} instead of the frozen position`);
+  const inherited = await node.resources.log(authD, ref, { since: moved.binding.cursor });
+  check('resources.freeze.inherited', inherited.items.map(item => item.event_id).join(',') === '3,4'
+    ? '' : `the new handler sees ${inherited.items.map(item => item.event_id).join(',')}`);
+
+  // RFC 0006 §7: the revision is the send fence, so the former handler learns the binding moved.
+  check('resources.fence.old_handler', await refusal('revision_conflict', () => node.resources.operate(authK, ref, {
+    ...mut(), operation_id: crypto.randomUUID(), operation: 'send', expected_revision: 'rev-a', data: { text: '旧版本发送' },
+  })));
+  const sent = await node.resources.operate(authD, ref, {
+    ...mut(), operation_id: crypto.randomUUID(), operation: 'send', expected_revision: moved.revision, data: { text: '新处理者发送' },
+  });
+  check('resources.handover.new_handler_sends', sent.state === 'committed' ? '' : `the new handler's send answered ${sent.state}`);
+
+  // RFC 0006 §6: the switch never edits log_readers. The former handler keeps its history only
+  // while the table names it; the handler itself reads without being in the table.
+  const retained = await node.resources.log(authK, ref, {});
+  check('resources.log.former_handler', retained.items.length === 4 ? '' : `the former handler read ${retained.items.length} events`);
+  await keeper.storage.transaction(async tx => {
+    const stored = await tx.get<Resource>(key('resource', keeperNode, 'chat-01'));
+    await tx.put(key('resource', keeperNode, 'chat-01'), { ...stored!, log_readers: [caeruliaNode] } satisfies Resource);
+  });
+  check('resources.log.reader_removed', await refusal('not_found', () => node.resources.log(authK, ref, {})));
+  const detached = await node.resources.log(authC, ref, {});
+  check('resources.log.detached', detached.items.length === 4
+    ? '' : `a log reader outside the binding read ${detached.items.length} events`);
+  const handlerStill = await node.resources.log(authD, ref, {});
+  check('resources.log.handler_not_reader', handlerStill.items.length === 4
+    ? '' : 'the handler lost its own log while not being a reader');
+
+  // RFC 0006 §4.5: the same operation id answers with its original result; a different target or
+  // metadata under that id is another request.
+  const replay = await node.resources.operate(authK, ref, {
+    ...mut(), operation_id: handoverId, operation: 'handover', expected_revision: 'rev-a',
+    data: { target: dpdpNode, handover_deadline: deadline, metadata: { reason: '转交技术专家' } },
+  });
+  check('resources.handover.replay', replay.state === 'committed'
+    && JSON.stringify(replay.data) === JSON.stringify(committed.data)
+    ? '' : `the replay answered ${JSON.stringify(replay)}`);
+  check('resources.handover.id_conflict', await refusal('id_conflict', () => node.resources.operate(authK, ref, {
+    ...mut(), operation_id: handoverId, operation: 'handover', expected_revision: 'rev-a',
+    data: { target: keeperNode, handover_deadline: deadline, metadata: { reason: '转交技术专家' } },
+  })));
+
+  // RFC 0006 §4.5: two handovers on one revision — only the first switches, the other is told the
+  // binding moved and reports the current revision.
+  const raceDeadline = future();
+  const race = (id: string) => node.resources.operate(authD, ref, {
+    ...mut(), operation_id: id, operation: 'handover', expected_revision: moved.revision,
+    data: { target: keeperNode, handover_deadline: raceDeadline },
+  });
+  const [firstRace, secondRace] = await Promise.all([race(crypto.randomUUID()), race(crypto.randomUUID())]);
+  const outcomes = [firstRace.state, secondRace.state].sort().join(',');
+  const loser = [firstRace, secondRace].find(result => result.state === 'aborted');
+  check('resources.handover.race', outcomes === 'aborted,committed'
+    && loser?.error?.code === 'revision_conflict'
+    ? '' : `two handovers on one revision settled as ${outcomes}/${JSON.stringify(loser?.error)}`);
+  const racedBinding = await node.resources.describe(authK, ref);
+  check('resources.handover.race_binding', racedBinding.binding.handler === keeperNode
+    ? '' : 'the race left another handler in place');
+
+  // RFC 0006 §4.3: a refusal and an unreachable target both leave the binding and revision alone,
+  // and the event written during the freeze stays owed to the original handler.
+  const failingRef: ResourceRef = { owner: keeperNode, id: 'chat-02' };
+  const failingRevision = 'rev-b';
+  await node.resources.register(authK, {
+    resource_ref: failingRef, kind: 'im_conversation',
+    operations: ['read', 'send', 'list_events', 'describe', 'handover'],
+    binding: { handler: keeperNode, cursor: '0' },
+    log_readers: [keeperNode],
+    event_seq: '0', revision: failingRevision, retention_ms: 60_000,
+  });
+  await node.resources.receive(authK, failingRef, { source_id: 'p-1', data: { text: '第一条' } });
+  await node.resources.ack(authK, failingRef, '1', mut());
+  probe.refuse = true;
+  probe.during = async () => { await node.resources.receive(authK, failingRef, { source_id: 'freeze-2', data: { text: '冻结期到达' } }); };
+  const rejectedId = crypto.randomUUID();
+  const rejected = await node.resources.operate(authK, failingRef, {
+    ...mut(), operation_id: rejectedId, operation: 'handover', expected_revision: failingRevision,
+    data: { target: dpdpNode, handover_deadline: future() },
+  });
+  probe.during = undefined;
+  probe.refuse = false;
+  check('resources.handover.rejected', rejected.state === 'aborted'
+    && field(rejected.data, 'reason') === 'capability_mismatch'
+    ? '' : `a refused probe answered ${JSON.stringify(rejected)}`);
+  const rejectedRecord = await node.resources.operation(authK, failingRef, rejectedId);
+  check('resources.handover.rejected_record', rejectedRecord.result.state === 'aborted'
+    ? '' : `the refused handover recorded ${rejectedRecord.result.state}`);
+  const unmoved = await node.resources.describe(authK, failingRef);
+  check('resources.freeze.abort', unmoved.binding.handler === keeperNode && unmoved.revision === failingRevision
+    && unmoved.binding.cursor === '1'
+    ? '' : `a failed handover moved the binding: ${JSON.stringify(unmoved)}`);
+  const owed = await node.resources.log(authK, failingRef, { since: unmoved.binding.cursor });
+  check('resources.freeze.returned', owed.items.map(item => item.event_id).join(',') === '2'
+    ? '' : `the original handler sees ${owed.items.map(item => item.event_id).join(',')}`);
+
+  const unreachable = await node.resources.operate(authK, failingRef, {
+    ...mut(), operation_id: crypto.randomUUID(), operation: 'handover', expected_revision: failingRevision,
+    data: { target: caeruliaNode, handover_deadline: future() },
+  });
+  check('resources.handover.unreachable', unreachable.state === 'aborted'
+    && field(unreachable.data, 'reason') === 'unreachable'
+    ? '' : `an unreachable target answered ${JSON.stringify(unreachable)}`);
+  const stillHeld = await node.resources.describe(authK, failingRef);
+  check('resources.handover.unreachable_binding', stillHeld.binding.handler === keeperNode && stillHeld.revision === failingRevision
+    ? '' : 'an unreachable target moved the binding');
+
+  // Retention writes a terminal disposition onto the event; the id is never reused.
+  const expiring = await node.resources.receive(authK, failingRef, {
+    source_id: 'p-expire', data: { text: '过期' }, expires_at: new Date(clock.value - 1_000).toISOString(),
+  });
+  await node.resources.recover();
+  const swept = await node.resources.event(authK, failingRef, expiring.event_id);
+  check('resources.recover.expiry', swept.expired === true
+    ? '' : `the retention sweep left event ${expiring.event_id} unexpired`);
+
+  // RFC 0006 §4.3: the target records one answer per operation id and refuses a late probe.
+  const probeId = crypto.randomUUID();
+  const probeShape: HandoverProbe = {
+    operation_id: probeId, resource: failingRef, kind: 'im_conversation',
+    operations: ['read', 'send'], metadata: { reason: '测试' }, initiator: keeperNode,
+    cursor: '1', deadline: future(),
+  };
+  const answered = await target.node.resources.probe(authK, probeShape);
+  check('resources.probe.accept', answered.answer === 'accept' && answered.cursor === '1'
+    ? '' : `the target answered ${JSON.stringify(answered)}`);
+  const answeredAgain = await target.node.resources.probe(authK, probeShape);
+  check('resources.probe.replay', JSON.stringify(answeredAgain) === JSON.stringify(answered)
+    ? '' : `a probe replay answered ${JSON.stringify(answeredAgain)}`);
+  check('resources.probe.id_conflict', await refusal('id_conflict', () => target.node.resources.probe(authK, {
+    ...probeShape, metadata: { reason: '改了' },
+  })));
+  const late = await target.node.resources.probe(authK, {
+    ...probeShape, operation_id: crypto.randomUUID(), deadline: new Date(clock.value - 1_000).toISOString(),
+  });
+  check('resources.probe.deadline', late.answer === 'reject' && late.reason === 'deadline_passed'
+    ? '' : `a late probe answered ${JSON.stringify(late)}`);
+  const stored = await target.node.resources.probeAnswer(authK, probeId);
+  check('resources.probe.answer', JSON.stringify(stored) === JSON.stringify(answered)
+    ? '' : `the recorded answer read back as ${JSON.stringify(stored)}`);
+}
+
+// =============================================================================
+// 5b. handover recovery: a probe past the local wait settles from the target's record
+// =============================================================================
+async function phaseHandoverRecovery(): Promise<void> {
+  const driver: ResourceDriver = { validate: async () => undefined, execute: async () => ({ state: 'committed' as const }) };
+  const owner = serve(keeperNode, base_url => rig(keeperNode, base_url, { resources: driver }, 50));
+  serve(dpdpNode, base_url => rig(dpdpNode, base_url, {
+    handoverProbe: async value => {
+      // The target answers after the endpoint's local wait has already expired.
+      await sleep(300);
+      return { answer: 'accept', cursor: value.cursor };
+    },
+  }));
+  const authK: Auth = { actor: keeperNode };
+  const ref: ResourceRef = { owner: keeperNode, id: 'chat-slow' };
+  await owner.node.resources.register(authK, {
+    resource_ref: ref, kind: 'im_conversation', operations: ['read', 'send', 'handover'],
+    binding: { handler: keeperNode, cursor: '0' }, log_readers: [keeperNode],
+    event_seq: '0', revision: 'rev-slow', retention_ms: 60_000,
+  });
+  const pending = await owner.node.resources.operate(authK, ref, {
+    ...mut(), operation_id: crypto.randomUUID(), operation: 'handover', expected_revision: 'rev-slow',
+    data: { target: dpdpNode, handover_deadline: future(5_000) },
+  });
+  check('resources.handover.unknown', pending.state === 'unknown'
+    ? '' : `a slow probe reported ${pending.state} instead of unknown`);
+  await sleep(400);
+  await owner.node.resources.recover();
+  const moved = await owner.node.resources.describe(authK, ref);
+  check('resources.handover.recovered', moved.binding.handler === dpdpNode && moved.revision !== 'rev-slow'
+    ? '' : `recovery left ${JSON.stringify(moved)}`);
 }
 
 
@@ -887,6 +1057,30 @@ async function phaseAuth(): Promise<void> {
   check('auth.begin.confirmed', trustPhase(confirmedC) === 'requested' ? '' : `C phase ${trustPhase(confirmedC)}`);
   const invitedD = await beginD.node.trust.entry(keeperNode);
   check('auth.begin.invited', invitedD !== undefined && trustPhase(invitedD) === 'invited' ? '' : `D phase ${trustPhase(invitedD ?? confirmedC)}`);
+
+  // An invitation can arrive from a peer this node never discovered — an introduction carries its
+  // own address, and discovery has no record to resolve. The accepting side must answer the
+  // address that statement proved, or the row stays at `invited` with both holders approved.
+  const introducedNode = 'urn:onlyne:agent:introduced';
+  const introducerNode = 'urn:onlyne:agent:introducer';
+  const invitedSide = serve(introducedNode, base_url => keyed(introducedNode, base_url, [], {
+    resolve: async (node: string): Promise<Target> => {
+      if (node === introducerNode) throw new OnlyneError('not_found', 'No discovery record names this node.');
+      return { node_id: node, base_url: urls[node] ?? base_url };
+    },
+  }));
+  const introducerSide = serve(introducerNode, base_url => keyed(introducerNode, base_url));
+  const invitedIdentity = (await invitedSide.node.keys.describe())!;
+  const introducerIdentity = (await introducerSide.node.keys.describe())!;
+  await introducerSide.node.trust.request({ actor: introducerNode }, introducedNode, invitedIdentity.fingerprint);
+  check('auth.invited.recorded', trustPhase((await invitedSide.node.trust.entry(introducerNode))!) === 'invited'
+    ? '' : 'the invitation was not recorded as invited');
+  const acceptedBlind = await invitedSide.node.trust.accept({ actor: introducedNode }, introducerNode, introducerIdentity.fingerprint)
+    .catch(error => error as OnlyneError);
+  check('auth.invited.accepted', !(acceptedBlind instanceof OnlyneError) && trustPhase(acceptedBlind as TrustEntry) === 'exchanged'
+    ? '' : `accepting an introduction from an undiscovered peer reported ${String(acceptedBlind)}`);
+  check('auth.invited.exchanged-both', trustPhase((await introducerSide.node.trust.entry(introducedNode))!) === 'exchanged'
+    ? '' : 'the introducer never saw the approval');
 
   // A failed introduction is owed work: the loop re-drives it once the retry window opens.
   let resolveCalls = 0;
@@ -1234,6 +1428,7 @@ try {
   await phaseRecoverOutbound();
   await phaseExpiry();
   await phaseResources();
+  await phaseHandoverRecovery();
   await phaseAuth();
   await phaseMaintenance();
 } catch (error) {

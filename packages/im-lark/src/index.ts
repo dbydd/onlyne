@@ -10,6 +10,7 @@ import {
 } from './normalize.js';
 import { sendMessage } from './send.js';
 import { materializeAttachments } from './attachments.js';
+import { t } from './lark-text.js';
 
 export type { LarkPort, LarkConnectionState, LarkHandlers } from './port.js';
 export { createLarkPort } from './port.js';
@@ -95,7 +96,7 @@ export function createLarkConnector(options: LarkConnectorOptions = {}): LarkCon
           if (event !== undefined) await emit(event);
         });
         // Feishu wants the callback answered within three seconds; the work continues above.
-        return { toast: { type: 'info', content: '已收到' } };
+        return { toast: { type: 'info', content: t('ack.received') } };
       },
       reaction(raw, action) {
         background(async () => {

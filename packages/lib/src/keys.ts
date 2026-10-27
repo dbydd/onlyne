@@ -185,7 +185,7 @@ export class TrustService {
     const observed = peer.fingerprint;
     return {
       node_id: peer.node_id, fingerprint: peer.fingerprint, public_key: peer.public_key,
-      base_url: (await this.ctx.options.plugins.resolve(node)).base_url,
+      base_url: await this.peerBase(node),
       // The confirmation is sealed to the fingerprint this session displayed: a host that
       // confirms a value it never showed, or a key that moved since, never reaches the wire.
       confirm: async (fingerprint: string): Promise<TrustEntry> => {
@@ -208,9 +208,7 @@ export class TrustService {
     return url;
   }
   async inspect(node: NodeId): Promise<KeyIdentity> {
-    const target = await this.ctx.options.plugins.resolve(node);
-    if (target.node_id !== node) fail('unauthenticated', 'Resolver identity mismatch.');
-    const base = this.address(target.base_url);
+    const base = this.address(await this.peerBase(node));
     const response = await fetch(new URL('./keys', base.href.replace(/\/?$/, '/')), { redirect: 'error', signal: AbortSignal.timeout(this.ctx.options.wait_ms ?? 30_000) });
     if (!response.ok) fail('unavailable', `Key lookup answered HTTP ${response.status}.`);
     const identity = await response.json() as KeyIdentity;
@@ -218,6 +216,24 @@ export class TrustService {
     publicKey(identity.public_key);
     if (identity.node_id !== node || identity.fingerprint !== await keyFingerprint(Buffer.from(identity.public_key, 'base64'))) fail('unauthenticated', 'The peer identity or fingerprint is inconsistent.');
     return identity;
+  }
+  /**
+   * The peer's address. Discovery answers for every peer this node has observed; a peer that
+   * introduced itself before discovery ever saw it has no record at all, and the address its own
+   * signed statement carried is then the only one there is. Without that fallback an inbound
+   * invitation can never be accepted: the confirmation resolves the peer before it may answer,
+   * so the row would sit at `invited` forever while both holders had approved.
+   */
+  private async peerBase(node: NodeId): Promise<string> {
+    try {
+      const target = await this.ctx.options.plugins.resolve(node);
+      if (target.node_id !== node) fail('unauthenticated', 'Resolver identity mismatch.');
+      return target.base_url;
+    } catch (error) {
+      const recorded = (await this.entry(node))?.base_url;
+      if (!(error instanceof OnlyneError) || error.error.code !== 'not_found' || recorded === undefined || recorded === '') throw error;
+      return recorded;
+    }
   }
   private async statement(peer: KeyIdentity, approved: boolean, nonce: string, replyTo?: string, old?: Uint8Array): Promise<TrustStatement> {
     const own = await this.identity();
@@ -238,9 +254,7 @@ export class TrustService {
    * leaves the obligation owed, so the maintenance loop re-sends with a fresh nonce.
    */
   private async send(peer: KeyIdentity, approved: boolean, attempt: { nonce: string; old?: Uint8Array }): Promise<TrustEntry> {
-    const target = await this.ctx.options.plugins.resolve(peer.node_id);
-    if (target.node_id !== peer.node_id) fail('unauthenticated', 'Resolver identity mismatch.');
-    const base = this.address(target.base_url);
+    const base = this.address(await this.peerBase(peer.node_id));
     const statement = await this.statement(peer, approved, attempt.nonce, undefined, attempt.old);
     const response = await fetch(new URL('./introductions', base.href.replace(/\/?$/, '/')), {
       method: 'POST', headers: { 'content-type': 'application/json' }, redirect: 'error',

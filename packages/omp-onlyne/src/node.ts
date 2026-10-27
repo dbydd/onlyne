@@ -1,6 +1,7 @@
 import { networkInterfaces } from "node:os";
-import { FetchTransport, OnlyneError, OnlyneNode, trustPhase, type Action, type Auth, type Json, type KeyHook, type KeyMaterial, type MaintenanceClock, type MsgInput, type Runtime, type SigningTransportOptions, type Storage, type Target } from "@onlyne/lib";
+import { FetchTransport, OnlyneError, OnlyneNode, trustPhase, type Action, type AdmissionContext, type Auth, type Json, type KeyHook, type KeyMaterial, type MaintenanceClock, type MsgInput, type Runtime, type SigningTransportOptions, type Storage, type Target } from "@onlyne/lib";
 import { loadOrCreateKey, writeKeyMaterial } from "@onlyne/node-host/keys";
+import { hostText as t } from "./host-text.ts";
 import { canAnswer, type ContextRegistry } from "./store.ts";
 import type { OnlyneConfig } from "./types.ts";
 
@@ -26,21 +27,21 @@ export function advertisedHost(bind: string): string {
 			if (!address.internal && address.family === "IPv4") return address.address;
 		}
 	}
-	throw new OnlyneError("unavailable", "No concrete network address is available for this bind host.");
+	throw new OnlyneError("unavailable", t("addressUnavailable"));
 }
 
 export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 	const { config } = deps;
-	if (config.node.key_ref && deps.keys === undefined) throw new OnlyneError("unsupported_delivery", "External credential references need a host key provider.");
+	if (config.node.key_ref && deps.keys === undefined) throw new OnlyneError("unsupported_delivery", t("keyProvider"));
 	// Without a key directory the node keeps the loopback development binding (RFC 0001 §1).
 	if (deps.keys === undefined && deps.keyDir === undefined && !["127.0.0.1", "::1", "localhost"].includes(config.server.bind)) {
-		throw new OnlyneError("unsupported_delivery", "The unauthenticated development binding requires a loopback bind host. Create a node key to serve a remote address.");
+		throw new OnlyneError("unsupported_delivery", t("loopbackBind"));
 	}
 	let node: OnlyneNode;
 	const authenticate = async (request: Request): Promise<Auth | null> => {
 		const actor = request.headers.get("Onlyne-Actor");
 		if (!actor || !/^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$/.test(actor)) return null;
-		if (actor === config.node.id) throw new OnlyneError("forbidden", "HTTP callers cannot claim this node's management identity.");
+		if (actor === config.node.id) throw new OnlyneError("forbidden", t("managementIdentity"));
 		return { actor };
 	};
 	const resolve = async (id: string): Promise<Target> => {
@@ -49,9 +50,14 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 			: await node.discovery.resolve(id);
 		return { ...target, headers: { "Onlyne-Actor": config.node.id } };
 	};
-	const known = async (id: string): Promise<boolean> => {
+	/**
+	 * Admission reads the trust projection, never the discovery catalog (design §1.1): a discovered
+	 * peer is a clue (RFC 0017 §4), and `discovery.known` is process-local, so a restart would refuse
+	 * a peer whose exchange already completed.
+	 */
+	const admitted = async (id: string, context: AdmissionContext): Promise<boolean> => {
 		if (id === config.node.id) return true;
-		return node.discovery.known(id);
+		return await context.trust(id) === "exchanged";
 	};
 	const keyDir = deps.keyDir;
 	const keys: KeyHook | undefined = deps.keys ?? (keyDir === undefined ? undefined : Object.assign(
@@ -69,8 +75,8 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 		},
 		guidance: details => ({
 			entry: details.required_action === "confirm_exchange"
-				? ["/onlyne", "联系人", "待确认", "同意"]
-				: ["/onlyne", "发现", "请求交换密钥"],
+				? ["/onlyne", t("guideContacts"), t("guidePending"), t("guideAccept")]
+				: ["/onlyne", t("guideDiscover"), t("guideRequestExchange")],
 		}),
 	};
 	node = new OnlyneNode({
@@ -83,9 +89,9 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 			...(config.trust === undefined ? {} : { trust_seeds: config.trust }),
 			domainCandidates: id => node.discovery.candidates(id),
 			// The keyless development binding checks no identity (RFC 0001 §1): every declared
-			// actor may open a thread. A keyed node admits only peers it has verified.
-			mayAdmit: async actor => keys === undefined || await known(actor),
-			inboundThread: async actor => keys === undefined || await known(actor),
+			// actor may open a thread. A keyed node admits only peers whose exchange completed.
+			mayAdmit: async (actor, _thread, context) => keys === undefined || await admitted(actor, context),
+			inboundThread: async (actor, context) => keys === undefined || await admitted(actor, context),
 			// A context that cannot answer is not a continuation target: publishing one lets a
 			// sender aim a message at a session that can never reply (caerulea report 4, problem 7).
 			executionContexts: async () => (await deps.contexts.list()).filter(canAnswer)
@@ -95,7 +101,7 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 				if (name === "self" || name === config.node.id) return config.node.id;
 				const matches = (await node.discovery.listRecords()).filter(record => record.node_id === name || record.node_id.split(":").at(-1) === name);
 				const ids = [...new Set(matches.map(record => record.node_id))];
-				if (ids.length !== 1) throw new OnlyneError(ids.length ? "ambiguous_target" : "not_found", `No unique discovered node is named ${name}.`);
+				if (ids.length !== 1) throw new OnlyneError(ids.length ? "ambiguous_target" : "not_found", t("mentionNotFound", { name }));
 				return ids[0]!;
 			},
 			directory: async () => ({ node: config.node.id, region: config.region, endpoint: deps.endpoint, peers: await node.discovery.listRecords(), contexts: await deps.contexts.list() }) as unknown as Json,

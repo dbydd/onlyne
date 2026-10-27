@@ -4,6 +4,7 @@ import type {
   Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Json, LocalAttention,
   InjectOutcome, Member, Message, MessageQuery, MessageRef, MsgInput, Mutation, Outbound, Page, PageOptions, SendRequest,
   TraceEvent, Thread, ThreadRef, Transaction, Transport, MaintenanceClock, PreparedSend,
+  ResourceReadQuery, ResourceReadResult, ResourceInventory, Resource,
 } from './types.js';
 import type { MessageService } from './messages.js';
 import type { ResourceService } from './resources.js';
@@ -687,6 +688,42 @@ export class OnlyneClient {
     return this.#prepare(input, action);
   }
 
+  async readResources(query: ResourceReadQuery, options: MsgOptions = {}): Promise<ResourceReadResult> {
+    const auth = this.#auth();
+    const search = new URLSearchParams();
+    if ('cursor' in query && query.cursor !== undefined) search.set('cursor', query.cursor);
+    if ('page_size' in query && query.page_size !== undefined) search.set(query.op === 'log' ? 'limit' : 'page_size', String(query.page_size));
+    if (query.op === 'log' && query.since !== undefined) search.set('since', query.since);
+    const suffix = search.size === 0 ? '' : `?${search}`;
+    const remote = <T>(owner: string, path: string): Promise<T> => this.#remote(owner, 'GET', path + suffix, undefined, options.signal, this.#ctx.options.wait_ms ?? 60_000);
+    if (query.op === 'list') {
+      const owners = [...new Set(query.owners ?? [this.#ctx.node])];
+      if (query.cursor !== undefined && owners.length !== 1) fail('invalid_request', 'A resource cursor names exactly one owner.');
+      const rows: ResourceInventory['owners'] = await Promise.all(owners.map(async owner => {
+        try {
+          const result = owner === this.#ctx.node
+            ? await this.#resources.list(auth, query)
+            : await remote<Page<Resource>>(owner, '/resources');
+          return { owner, page: result };
+        } catch (error) {
+          if (options.signal?.aborted) throw error;
+          return { owner, error: failureOf(error) };
+        }
+      }));
+      return { owners: rows };
+    }
+    const ref = query.resource;
+    const local = ref.owner === this.#ctx.node;
+    const path = `/resources/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`;
+    switch (query.op) {
+      case 'describe': return local ? this.#resources.describe(auth, ref) : remote(ref.owner, path);
+      case 'log': return local ? this.#resources.log(auth, ref, query) : remote(ref.owner, path + '/log');
+      case 'event': return local ? this.#resources.event(auth, ref, query.event_id) : remote(ref.owner, path + `/log/${encodeURIComponent(query.event_id)}`);
+      case 'operations': return local ? this.#resources.operations(auth, ref, query) : remote(ref.owner, path + '/operations');
+      case 'status': return local ? this.#resources.operation(auth, ref, query.operation_id) : remote(ref.owner, path + `/operations/${encodeURIComponent(query.operation_id)}`);
+    }
+  }
+
   #prepare(input: MsgInput, action: Extract<Action, { kind: 'send' }>): PreparedSend {
     if (action.response === undefined || action.execution === undefined) {
       fail('decision_unavailable', 'A send needs response and execution; no plan was chosen.');
@@ -1335,6 +1372,7 @@ export class OnlyneClient {
     const auth = this.#auth();
     const mutation = (): Mutation => ({ idempotency_key: this.#ctx.id(), retry_until: this.#window(undefined) });
     if (action.kind === 'read') {
+      if (action.scope === 'resources') return this.readResources(action.query, options);
       switch (action.scope) {
         case 'directory': return this.#directory();
         case 'neighbors': {
@@ -1400,7 +1438,7 @@ export class OnlyneClient {
    * read locally. A remote owner that will not serve the read is a reported failure,
    * never a silent local fallback.
    */
-  async #readThread(action: Extract<Action, { kind: 'read' }>, options: MsgOptions): Promise<unknown> {
+  async #readThread(action: Extract<Action, { kind: 'read'; scope: 'directory' | 'neighbors' | 'threads' | 'inbox' | 'messages' | 'message' | 'evidence' }>, options: MsgOptions): Promise<unknown> {
     const ref = requireValue(action.thread, 'invalid_request');
     if (ref.owner === this.#ctx.options.node_id) {
       return this.#messages.list(this.#auth(), ref, {
@@ -1441,7 +1479,7 @@ export class OnlyneClient {
    * evidence. Otherwise the owner that admitted the message is the only source, and its
    * message list is where a referenced entry is found (RFC 0004 §2).
    */
-  async #readMessage(action: Extract<Action, { kind: 'read' }>, options: MsgOptions): Promise<unknown> {
+  async #readMessage(action: Extract<Action, { kind: 'read'; scope: 'directory' | 'neighbors' | 'threads' | 'inbox' | 'messages' | 'message' | 'evidence' }>, options: MsgOptions): Promise<unknown> {
     const ref = requireValue(action.message, 'invalid_request');
     if (action.scope === 'evidence') {
       const record = await this.#ctx.storage.transaction(tx => tx.get<StoredOutbound>(outboundKey(ref.sender, ref.id)));

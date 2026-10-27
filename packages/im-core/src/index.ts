@@ -1,5 +1,5 @@
 import type { Json } from '@onlyne/lib';
-export { createDriverBridge, type DriverBridgeOptions } from './bridge.js';
+export { createDriverBridge, coordinateOf, resourceIdOf, type DriverBridgeOptions } from './bridge.js';
 
 /** One platform attachment: either materialized to a local path or kept as a platform handle. */
 export interface ImAttachment {

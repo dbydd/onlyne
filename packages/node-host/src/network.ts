@@ -1,6 +1,6 @@
 import { networkInterfaces } from "node:os";
 
-/** The optional DNS-SD module. The package is not installed by default. */
+/** DNS-SD types used by the host adapter. */
 interface BonjourService {
 	fqdn: string;
 	name: string;
@@ -77,7 +77,7 @@ export class NetworkDiscovery {
 		try {
 			module = await import("bonjour-service") as unknown as { default?: BonjourConstructor } | BonjourConstructor;
 		} catch {
-			throw new Error("Optional DNS-SD discovery is unavailable. Install bonjour-service to enable it; HTTP seed discovery still works.");
+			throw new Error("DNS-SD discovery is unavailable. Check the bonjour-service installation.");
 		}
 		const Constructor = typeof module === "function" ? module : module.default;
 		if (Constructor === undefined) throw new Error("bonjour-service does not export a constructor.");

@@ -1,0 +1,19 @@
+{
+  "name": "@onlyne/node-host",
+  "version": "3.0.0",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts",
+    "./keys": "./src/keys.ts",
+    "./network": "./src/network.ts",
+    "./i18n": "./src/i18n.ts"
+  },
+  "files": ["src"],
+  "scripts": { "check": "tsc --noEmit" },
+  "dependencies": {
+    "@onlyne/lib": "workspace:*",
+    "bonjour-service": "^1.4.4"
+  },
+  "devDependencies": { "@types/bun": "^1.3.0", "typescript": "^5.9.0" }
+}

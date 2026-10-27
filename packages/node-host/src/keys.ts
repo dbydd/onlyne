@@ -2,7 +2,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import type { KeyMaterial } from "@onlyne/lib";
+import type { KeyHook, KeyMaterial } from "@onlyne/lib";
 import { execFile } from "node:child_process";
 import { generateKeyMaterial } from "@onlyne/lib";
 
@@ -148,4 +148,11 @@ export function assertKeyPermissions(dir: string): void {
 	void chmodSync;
 	void mkdirSync;
 	void readFileSync;
+}
+
+export async function createNodeKey(nodeId: string): Promise<KeyHook> {
+	const dir = await ensureKeyDir(process.cwd(), nodeId, "global");
+	return Object.assign(() => loadOrCreateKey(dir, nodeId), {
+		replace: (material: KeyMaterial) => writeKeyMaterial(dir, material, { replace: true }),
+	});
 }

@@ -3,11 +3,15 @@ import { OnlyneError, trustPhase, type DiscoveryCandidate, type DiscoveryRecord,
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { ensureKeyDir } from "@onlyne/node-host/keys";
 import { NetworkDiscovery } from "@onlyne/node-host/network";
+import { resolveLocale, setLocale } from "@onlyne/node-host/i18n";
+import { commandText as t } from "./ui/command-text.ts";
+import { registerMsgTool } from "./tool.ts";
 import { currentDecision, JudgeDecider } from "./decider.ts";
 import { loadConfig, normalizeServiceUrl, saveConfig, shortNodeId } from "./config.ts";
 import { createRuntimeBridge } from "./messages.ts";
 import { advertisedHost, createOnlyneNode } from "./node.ts";
 import { canAnswer, ContextRegistry, SqliteStorage } from "./store.ts";
+import { resourceQuery } from "./resources.ts";
 import type { OnlyneConfig, OnlyneStatus, QueueItem, ViewerContact, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "./types.ts";
 
 export interface PluginRuntime {
@@ -44,14 +48,17 @@ export function getRuntime(): PluginRuntime | undefined { return active; }
 export function setRuntime(runtime: PluginRuntime | undefined): void { active = runtime; }
 export async function startRuntime(pi: ExtensionAPI, ctx: ExtensionContext, host: RuntimeHost = {}): Promise<PluginRuntime> {
 	const config = await (host.config === undefined ? loadConfig(ctx.cwd) : host.config());
+	setLocale(resolveLocale(config.language));
 	if (active && active.config.path === config.path && JSON.stringify(active.config) === JSON.stringify(config)) return active;
 	return restartRuntime(config, pi, ctx, host);
 }
 export async function restartRuntime(config: OnlyneConfig, pi: ExtensionAPI, ctx: ExtensionContext, host: RuntimeHost = {}): Promise<PluginRuntime> {
+	setLocale(resolveLocale(config.language));
 	await active?.close();
 	const runtime = new OmpRuntime(config, pi, ctx, host);
 	try { await runtime.start(); } catch (error) { await runtime.close(); throw error; }
 	active = runtime;
+	registerMsgTool(pi);
 	return runtime;
 }
 export async function stopRuntime(): Promise<void> { await active?.close(); }
@@ -83,7 +90,7 @@ class OmpRuntime implements PluginRuntime {
 		this.contexts = new ContextRegistry(this.storage, config.node.id, main.agent.id);
 	}
 	async start(): Promise<void> {
-		let handler: (request: Request) => Promise<Response> = async () => new Response("Onlyne is initializing", { status: 503 });
+		let handler: (request: Request) => Promise<Response> = async () => new Response(t("initializing"), { status: 503 });
 		this.server = Bun.serve({ hostname: this.config.server.bind, port: 0, fetch: request => handler(request) });
 		const host = advertisedHost(this.config.server.bind);
 		this.endpoint = `http://${host.includes(":") ? `[${host}]` : host}:${this.server.port}/onlyne/v3`;
@@ -93,6 +100,7 @@ class OmpRuntime implements PluginRuntime {
 		let transport: OnlyneNode["transport"] | undefined;
 		this.decider = new JudgeDecider({
 			config: this.config, contexts: this.contexts, mainAgentId: this.mainAgentId,
+			resourceQuery: meta => resourceQuery(this.node, meta),
 			log: (message, fields) => {
 				// Judge decisions and their trims are the tuning record; everything else stays debug.
 				if (message.startsWith("onlyne.judge.")) this.pi.logger.info(message, fields);
@@ -101,7 +109,7 @@ class OmpRuntime implements PluginRuntime {
 			listPeers: async () => (await this.node.discovery.listRecords()).filter(record => record.verified_at !== undefined && Date.parse(record.expires_at) > Date.now()),
 			listReceiverContexts: async id => id === this.config.node.id
 				? [
-						{ alias: "main", summary: "Main OMP session", state: this.main.isIdle() ? "idle" : "running" },
+						{ alias: "main", summary: t("main"), state: this.main.isIdle() ? "idle" : "running" },
 						// A lost or never-bound record cannot receive a continuation; advertising it
 						// would invite the sender to pick a context that fails on arrival.
 						...await this.contexts.list().then(records => records
@@ -315,7 +323,7 @@ class OmpRuntime implements PluginRuntime {
 			const ref = item.attention.thread_ref;
 			const key = `${ref.owner}/${ref.id}`;
 			if (hosted.has(key)) continue;
-			const view = seen.get(key) ?? { ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: `来自 ${shortNodeId(ref.owner)} 的线程`, state: "open", unread: 0, last_seq: "0", messages: [] };
+			const view = seen.get(key) ?? { ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: t("thread", { node: shortNodeId(ref.owner) }), state: "open", unread: 0, last_seq: "0", messages: [] };
 			seen.set(key, view);
 			if (!item.injected) view.unread++;
 			const entry = item.attention.entry;
@@ -330,7 +338,7 @@ class OmpRuntime implements PluginRuntime {
 			const ref = receipt.thread_ref;
 			const key = `${ref.owner}/${ref.id}`;
 			if (hosted.has(key)) continue;
-			const view = seen.get(key) ?? { ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: `来自 ${shortNodeId(ref.owner)} 的线程`, state: "open", unread: 0, last_seq: "0", messages: [] };
+			const view = seen.get(key) ?? { ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: t("thread", { node: shortNodeId(ref.owner) }), state: "open", unread: 0, last_seq: "0", messages: [] };
 			seen.set(key, view);
 			const message = row.value.request.message;
 			view.messages.push({ ref: { sender: message.sender, id: message.id }, seq: receipt.seq, direction: "out", author: message.sender, at: row.value.created_at ?? "", text: message.msg, relation: message.meta?.relation });
@@ -338,7 +346,7 @@ class OmpRuntime implements PluginRuntime {
 		}
 		for (const view of seen.values()) view.messages.sort((left, right) => Number(left.seq) - Number(right.seq));
 		views.push(...seen.values());
-		const queue: QueueItem[] = inbox.filter(item => !item.injected).map(item => ({ id: `inbound:${item.attention.obligation_id}`, kind: "inbound", label: `${item.attention.thread_ref.id}/${item.attention.seq}`, detail: `${item.attention.authenticated_author} · pending consumption`, at: item.attention.entry?.at }));
+		const queue: QueueItem[] = inbox.filter(item => !item.injected).map(item => ({ id: `inbound:${item.attention.obligation_id}`, kind: "inbound", label: `${item.attention.thread_ref.id}/${item.attention.seq}`, detail: t("pending", { author: item.attention.authenticated_author }), at: item.attention.entry?.at }));
 		queue.push(...contexts.filter(record => record.state === "running" || record.state === "unbound").map(record => ({ id: `context:${record.alias}`, kind: "context" as const, label: record.alias, detail: `${record.summary} · ${record.state}`, at: record.created_at })));
 		queue.push(...outbound.filter(row => row.value.state === "unknown" || row.value.state === "pending").map(row => ({ id: row.key, kind: "outbound" as const, label: row.value.request.target_endpoint, detail: row.value.state })));
 		const at = Date.now();

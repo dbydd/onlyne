@@ -1,0 +1,38 @@
+import { createTranslator } from '@onlyne/node-host/i18n';
+const en = {
+  usage: 'Usage: /onlyne or /onlyne menu opens the viewer. /onlyne init creates configuration. /onlyne config edits configuration. /onlyne language en|zh-CN switches language.',
+  init: 'Create project configuration and node keys',
+  config: 'Edit region, node identity, key location and seed addresses',
+  menu: 'Open the Onlyne viewer',
+  language: 'Switch language: en or zh-CN',
+  description: 'Show Onlyne messages, edit configuration or switch language',
+  unavailable: 'The Onlyne viewer and configuration form need an interactive terminal. Run /onlyne init in an interactive terminal.',
+  configured: 'This project is configured. Use /onlyne config to edit it.',
+  savedRegion: 'Region comes from the current configuration',
+  noTern: 'No Tern session was detected. Enter a region',
+  ternRegion: 'Region comes from Tern session "{name}" and can be changed',
+  selected: 'Onlyne language: {language}.',
+  initializing: 'Onlyne is initializing',
+  main: 'Main OMP session',
+  thread: 'Thread from {node}',
+  pending: '{author} · pending consumption',
+};
+const zh: Record<keyof typeof en, string> = {
+  usage: '用法：/onlyne 或 /onlyne menu 打开界面；/onlyne init 创建配置；/onlyne config 修改配置；/onlyne language en|zh-CN 切换语言。',
+  init: '创建项目配置与节点密钥',
+  config: '修改区域、节点身份、密钥位置与种子地址',
+  menu: '打开 Onlyne 界面',
+  language: '切换语言：en 或 zh-CN',
+  description: '查看 Onlyne 消息、修改配置或切换语言',
+  unavailable: 'Onlyne 查看界面和配置面板需要交互式终端。请在交互式终端运行 /onlyne init。',
+  configured: '这个项目已有配置。请用 /onlyne config 修改。',
+  savedRegion: '区域来自当前配置',
+  noTern: '未检测到 Tern 会话，请填写区域',
+  ternRegion: '区域建议值来自 Tern 会话“{name}”，可以修改',
+  selected: 'Onlyne 语言：{language}。',
+  initializing: 'Onlyne 正在初始化',
+  main: 'OMP 主会话',
+  thread: '来自 {node} 的线程',
+  pending: '{author} · 等待消费',
+};
+export const commandText = createTranslator({ en, 'zh-CN': zh });

@@ -1,4 +1,5 @@
-import type { Auth, ErrorCode, Failure, Mutation, NodeOptions, Page, PageOptions, Storage, Transaction } from './types.js';
+import type { AdmissionContext, Auth, ErrorCode, Failure, Mutation, NodeId, NodeOptions, Page, PageOptions, Storage, Transaction, TrustEntry } from './types.js';
+import { trustPhase } from './types.js';
 
 const statuses: Record<ErrorCode, number> = {
   invalid_request: 400, unauthenticated: 401, forbidden: 403, not_a_member: 403,
@@ -23,6 +24,19 @@ export function requireValue<T>(value: T | undefined | null, code: ErrorCode = '
   return value;
 }
 export function key(...parts: string[]): string { return parts.map(encodeURIComponent).join('/'); }
+/**
+ * The durable facts an admission policy decides from, bound to the transaction that is admitting
+ * the message (RFC 0017 §4). A policy that opens its own storage transaction deadlocks: the
+ * admission transaction still holds the store.
+ */
+export function admissionView(tx: Transaction): AdmissionContext {
+  return {
+    async trust(node: NodeId) {
+      const entry = await tx.get<TrustEntry>(key('trust', node));
+      return entry === undefined ? undefined : trustPhase(entry);
+    },
+  };
+}
 export function canonical(value: unknown): string {
   if (value === undefined) return 'null';
   if (value === null || typeof value !== 'object') return JSON.stringify(value);

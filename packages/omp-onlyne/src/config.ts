@@ -1,6 +1,8 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { OnlyneConfig } from "./types.ts";
+import type { Locale } from "@onlyne/node-host/i18n";
+import { hostText as t } from "./host-text.ts";
 
 const CONFIG_RELATIVE_PATH = join(".onlyne", "config.toml");
 const REGION_PREFIX = "urn:onlyne:region:";
@@ -34,7 +36,7 @@ export function configPath(cwd: string): string {
  */
 export function normalizeRegion(value: string): string {
 	const trimmed = value.trim();
-	if (trimmed.length === 0) throw new ConfigError("invalid", "region must not be empty.");
+	if (trimmed.length === 0) throw new ConfigError("invalid", t("regionEmpty"));
 	return ABSOLUTE_URI.test(trimmed) && !/\s/.test(trimmed) ? trimmed : `${REGION_PREFIX}${encodeURIComponent(trimmed)}`;
 }
 
@@ -44,7 +46,7 @@ export function normalizeRegion(value: string): string {
  */
 export function normalizeNodeId(value: string): string {
 	const trimmed = value.trim();
-	if (trimmed.length === 0) throw new ConfigError("invalid", "node.id must not be empty.");
+	if (trimmed.length === 0) throw new ConfigError("invalid", t("nodeIdEmpty"));
 	return ABSOLUTE_URI.test(trimmed) && !/\s/.test(trimmed) ? trimmed : `${AGENT_PREFIX}${encodeURIComponent(trimmed)}`;
 }
 
@@ -66,24 +68,24 @@ export function shortNodeId(value: string): string {
  */
 export function normalizeServiceUrl(value: string): string {
 	const raw = value.trim();
-	if (raw.length === 0) throw new ConfigError("invalid", "A node address must not be empty.");
+	if (raw.length === 0) throw new ConfigError("invalid", t("addressEmpty"));
 	// A bare `host:port` reads as a scheme to `URL`; it is the common hand-typed form.
 	const candidate = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(raw) ? raw : `http://${raw}`;
 	let url: URL;
 	try {
 		url = new URL(candidate);
 	} catch {
-		throw new ConfigError("invalid", `A node address must be an absolute URL, got ${JSON.stringify(raw)}.`);
+		throw new ConfigError("invalid", t("addressUrl", { value: JSON.stringify(raw) }));
 	}
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
-		throw new ConfigError("invalid", `A node address must use http or https, got ${JSON.stringify(raw)}.`);
+		throw new ConfigError("invalid", t("addressScheme", { value: JSON.stringify(raw) }));
 	}
 	const path = url.pathname.replace(/\/+$/, "");
 	if (path.length === 0 || path === "/") return `${url.origin}${SERVICE_PATH}`;
 	if (path === SERVICE_PATH) return `${url.origin}${SERVICE_PATH}`;
 	throw new ConfigError(
 		"invalid",
-		`A node address is an origin (http://host:7801) or a service URL (http://host:7801${SERVICE_PATH}), got ${JSON.stringify(raw)}.`,
+		t("addressShape", { service: SERVICE_PATH, value: JSON.stringify(raw) }),
 	);
 }
 
@@ -95,7 +97,7 @@ export async function loadConfig(cwd: string): Promise<OnlyneConfig> {
 		text = await readFile(path, "utf8");
 	} catch (error) {
 		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
-			throw new ConfigError("missing", `No Onlyne configuration at ${path}. Run /onlyne init to create it.`);
+			throw new ConfigError("missing", t("configMissing", { path }));
 		}
 		throw error;
 	}
@@ -122,7 +124,7 @@ export function parseConfig(text: string, path: string): OnlyneConfig {
 	try {
 		raw = Bun.TOML.parse(text) as Record<string, unknown>;
 	} catch (error) {
-		throw new ConfigError("invalid", `${path}: ${error instanceof Error ? error.message : String(error)}`);
+		throw new ConfigError("invalid", t("configParse", { path, error: error instanceof Error ? error.message : String(error) }));
 	}
 	const node = table(raw, "node", path);
 	const server = table(raw, "server", path);
@@ -140,6 +142,7 @@ export function parseConfig(text: string, path: string): OnlyneConfig {
 	const pageSize = optionalInteger(threads, "page_size", "threads.page_size");
 	return validateConfig({
 		path,
+		...(raw.language === undefined ? {} : { language: raw.language as Locale }),
 		region: region ?? "",
 		node: { id: id ?? "", ...(keyRef === undefined ? {} : { key_ref: keyRef }), ...(keyScope === undefined ? {} : { key_scope: keyScope as "project" | "global" | "none" }) },
 		server: { bind: bind ?? DEFAULT_BIND, ...(publicUrl === undefined ? {} : { public_url: publicUrl }) },
@@ -153,6 +156,7 @@ export function parseConfig(text: string, path: string): OnlyneConfig {
 export function serializeConfig(config: OnlyneConfig): string {
 	const lines: string[] = [
 		"# Onlyne project configuration. Credentials stay behind key_ref references.",
+		...(config.language === undefined ? [] : [`language = ${tomlString(config.language)}`, ""]),
 		"[node]",
 		`id = ${tomlString(config.node.id)}`,
 		`region = ${tomlString(config.region)}`,
@@ -180,6 +184,9 @@ export function serializeConfig(config: OnlyneConfig): string {
 }
 
 function validateConfig(config: OnlyneConfig): OnlyneConfig {
+	if (config.language !== undefined && config.language !== "en" && config.language !== "zh-CN") {
+		throw new ConfigError("invalid", t("languageInvalid"));
+	}
 	const region = normalizeRegion(config.region);
 	const id = normalizeNodeId(config.node.id);
 	const keyRef = config.node.key_ref?.trim();
@@ -187,21 +194,22 @@ function validateConfig(config: OnlyneConfig): OnlyneConfig {
 	const publicUrl = config.server.public_url?.trim();
 	const keyScope = config.node.key_scope;
 	if (keyScope !== undefined && keyScope !== "project" && keyScope !== "global" && keyScope !== "none") {
-		throw new ConfigError("invalid", `node.key_scope must be project, global or none, got ${JSON.stringify(keyScope)}.`);
+		throw new ConfigError("invalid", t("keyScopeInvalid", { value: JSON.stringify(keyScope) }));
 	}
-	if (publicUrl !== undefined && publicUrl.length === 0) throw new ConfigError("invalid", "server.public_url must not be empty.");
+	if (publicUrl !== undefined && publicUrl.length === 0) throw new ConfigError("invalid", t("publicUrlEmpty"));
 	// A seed is contacted at every start, so it is stored in the one spelling the node uses.
 	const seeds = [...new Set((config.discovery?.seeds ?? []).map(seed => seed.trim()).filter(seed => seed.length > 0).map(normalizeServiceUrl))];
-	if (bind.length === 0) throw new ConfigError("invalid", "server.bind must not be empty.");
+	if (bind.length === 0) throw new ConfigError("invalid", t("bindEmpty"));
 	if (/[\s/]/.test(bind)) {
-		throw new ConfigError("invalid", `server.bind must be a hostname or IP address, got ${JSON.stringify(bind)}.`);
+		throw new ConfigError("invalid", t("bindShape", { value: JSON.stringify(bind) }));
 	}
 	const pageSize = config.threads.page_size;
 	if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
-		throw new ConfigError("invalid", `threads.page_size must be an integer from 1 to 100, got ${String(pageSize)}.`);
+		throw new ConfigError("invalid", t("pageSizeRange", { value: String(pageSize) }));
 	}
 	return {
 		path: config.path,
+		...(config.language === undefined ? {} : { language: config.language }),
 		region,
 		node: { id, ...(keyRef === undefined || keyRef.length === 0 ? {} : { key_ref: keyRef }), ...(keyScope === undefined ? {} : { key_scope: keyScope }) },
 		server: { bind, ...(publicUrl === undefined ? {} : { public_url: publicUrl }) },
@@ -217,11 +225,11 @@ function rejectRetired(
 	server: Record<string, unknown>,
 	threads: Record<string, unknown>,
 ): void {
-	rejectKey(node, "endpoint", "node.endpoint is not supported; the endpoint comes from server.bind and the assigned port.");
-	rejectKey(server, "port", "server.port is not supported; the operating system assigns the listening port.");
-	rejectKey(raw, "peers", "peers is not supported; peers are discovered over the network and kept in the project SQLite.");
-	rejectKey(raw, "omp", "omp is not supported; delivery and spawning are decided by the OMP judge.");
-	rejectKey(threads, "default_attention", "threads.default_attention is not supported; reads default to the attention list.");
+	rejectKey(node, "endpoint", t("retiredEndpoint"));
+	rejectKey(server, "port", t("retiredPort"));
+	rejectKey(raw, "peers", t("retiredPeers"));
+	rejectKey(raw, "omp", t("retiredOmp"));
+	rejectKey(threads, "default_attention", t("retiredAttention"));
 }
 
 function rejectKey(source: Record<string, unknown>, key: string, message: string): void {
@@ -231,14 +239,14 @@ function rejectKey(source: Record<string, unknown>, key: string, message: string
 function table(root: Record<string, unknown>, key: string, path: string): Record<string, unknown> {
 	const value = root[key];
 	if (value === undefined) return {};
-	if (!isTable(value)) throw new ConfigError("invalid", `${path}: ${key} must be a table.`);
+	if (!isTable(value)) throw new ConfigError("invalid", t("tableExpected", { path, key }));
 	return value;
 }
 
 function optionalString(source: Record<string, unknown>, key: string, field: string): string | undefined {
 	const value = source[key];
 	if (value === undefined) return undefined;
-	if (typeof value !== "string") throw new ConfigError("invalid", `${field} must be a string.`);
+	if (typeof value !== "string") throw new ConfigError("invalid", t("stringExpected", { field }));
 	return value;
 }
 
@@ -246,7 +254,7 @@ function optionalInteger(source: Record<string, unknown>, key: string, field: st
 	const value = source[key];
 	if (value === undefined) return undefined;
 	if (typeof value !== "number" || !Number.isInteger(value)) {
-		throw new ConfigError("invalid", `${field} must be an integer.`);
+		throw new ConfigError("invalid", t("integerExpected", { field }));
 	}
 	return value;
 }
@@ -256,7 +264,7 @@ function stringArray(source: Record<string, unknown>, key: string, field: string
 	const value = source[key];
 	if (value === undefined) return undefined;
 	if (!Array.isArray(value) || !value.every(entry => typeof entry === "string" && entry.length > 0)) {
-		throw new ConfigError("invalid", `${field} must be an array of non-empty strings.`);
+		throw new ConfigError("invalid", t("stringArrayExpected", { field }));
 	}
 	return value;
 }
@@ -265,17 +273,17 @@ function stringArray(source: Record<string, unknown>, key: string, field: string
 function trustSeeds(raw: Record<string, unknown>, path: string): Array<{ node_id: string; fingerprint: string }> | undefined {
 	const value = raw.trust;
 	if (value === undefined) return undefined;
-	if (!Array.isArray(value)) throw new ConfigError("invalid", `${path}: trust must be an array of tables.`);
+	if (!Array.isArray(value)) throw new ConfigError("invalid", t("trustArray", { path }));
 	const entries: Array<{ node_id: string; fingerprint: string }> = [];
 	for (const row of value) {
 		if (row === null || typeof row !== "object" || Array.isArray(row)) {
-			throw new ConfigError("invalid", `${path}: trust must be an array of tables.`);
+			throw new ConfigError("invalid", t("trustArray", { path }));
 		}
 		const record = row as Record<string, unknown>;
 		const node_id = typeof record.node_id === "string" ? record.node_id.trim() : "";
 		const fingerprint = typeof record.fingerprint === "string" ? record.fingerprint.trim() : "";
 		if (node_id.length === 0 || !/^[0-9a-f]{16}$/.test(fingerprint)) {
-			throw new ConfigError("invalid", `${path}: a trust entry needs node_id and a 16-character fingerprint.`);
+			throw new ConfigError("invalid", t("trustEntry", { path }));
 		}
 		entries.push({ node_id, fingerprint });
 	}

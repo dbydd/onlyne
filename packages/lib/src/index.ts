@@ -6,7 +6,7 @@ export { ThreadService } from './threads.js';
 export { MessageService } from './messages.js';
 export { HistoryService } from './history.js';
 export { createResourceService } from './resources.js';
-export type { ResourceService, HandoverInvitation } from './resources.js';
+export type { ResourceService } from './resources.js';
 export { DomainService } from './domains.js';
 export { DiscoveryService } from './discovery.js';
 export { OnlyneClient } from './client.js';

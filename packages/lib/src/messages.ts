@@ -1,5 +1,5 @@
 import type { Attention, Auth, DeliveryPlan, Entry, Event, Failure, Grant, Json, LocalAttention, Member, MessageQuery, MessageRef, Mutation, Outbound, PageOptions, Receipt, ReplyPermit, SendRequest, Thread, ThreadRef, Transaction } from './types.js';
-import { canonical, decimal, fail, fingerprint, key, OnlyneError, page, requireValue, same, type Context } from './core.js';
+import { admissionView, canonical, decimal, fail, fingerprint, key, OnlyneError, page, requireValue, same, type Context } from './core.js';
 import { canRead, getThread } from './threads.js';
 
 type Remembered = { digest: string; receipt?: Receipt; error?: Failure; retry_until: string };
@@ -97,7 +97,7 @@ export class MessageService {
         // Finding a landing grants nothing (RFC 0002 §3): only the owner's inbound policy
         // may open a thread and admit this sender into it.
         const policy = this.ctx.options.plugins.inboundThread;
-        if (policy === undefined || !await policy(auth.actor)) {
+        if (policy === undefined || !await policy(auth.actor, admissionView(tx))) {
           return this.refuse(tx, identity, digest, request, new OnlyneError('not_found', 'No default thread is configured.'));
         }
         firstContact = true;
@@ -119,7 +119,7 @@ export class MessageService {
     if (!ordinary && !allowedPermit) return this.refuse(tx, identity, digest, request, new OnlyneError('not_a_member', 'The sender is not an active post member.'));
     if (thread.state === 'closed') return this.refuse(tx, identity, digest, request, new OnlyneError('thread_closed', 'The thread is closed.'));
     const admissionPolicy = this.ctx.options.plugins.mayAdmit;
-    if (admissionPolicy && !await admissionPolicy(auth.actor, threadRef)) {
+    if (admissionPolicy && !await admissionPolicy(auth.actor, threadRef, admissionView(tx))) {
       return this.refuse(tx, identity, digest, request, new OnlyneError('forbidden', 'The admission policy refused the request.'));
     }
 

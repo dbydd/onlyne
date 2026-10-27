@@ -56,11 +56,17 @@ const members = await node.domains.discover(node.auth, "urn:onlyne:domain:resear
 
 ## 资源
 
+资源只有一个绑定——处理者与它已确认的最高事件——加一份只追加的日志。事件不带收件人：事件属于资源，绑定只说明该由谁消费。`receive` 按 `source_id` 去重追加平台事件；`log` 从 `since` 位置分页读日志，`event` 读单条。两者只对当前 handler 和资源的 `log_readers` 开放，且只读存储，所以 handler 离线时历史仍可读。`ack` 把 handler 的游标向前推进，返回 `{ resource_ref, cursor }`；指向游标位置或更早的 id 不改变任何状态。
+
+`client.readResources(query)` 读取本地资源，或向资源 owner 的认证接口发起查询。`ResourceReadQuery` 支持 `list`、`describe`、`log`、`event`、`operations` 和 `status`。`decide` 插件可返回 `{ kind: 'read', scope: 'resources', query }`，让 `msg` 使用同一读取实现。查询不建立操作记录，也不调用资源驱动。
+
+`list` 接受具体的 `owners`、`page_size` 和 `cursor`，省略 `owners` 时只查本节点。结果为 `owners: [{ owner, page } | { owner, error }]`，成功分页与不可用节点的错误分别保留。带游标的查询只允许一个 owner。宿主负责选择 owner 集合。其他查询指定 `resource: { owner, id }`。`log` 接受不包含起点的 `since` 事件编号、`page_size` 和 `cursor`；`event` 指定 `event_id`；`status` 指定 `operation_id` 并返回已有操作记录。原调用者失去资源读取权限后，仍可读取自己提交的操作记录。`operations` 只列出当前调用者的记录。
+
 操作结果为 `committed`、`pending`、`aborted` 或 `unknown`。`aborted` 表示 endpoint 明确拒绝或本地中止，且已确证没有产生外部效果；无法排除已产生副作用的失败记为 `unknown`，在 `details` 中保留原始错误，并由 `node.resources.recover()` 按 `operation_id` 向插件查询结局。调用方停止等待时只结束本地等待，外部调用继续运行，之后插件给出的结局可以修正该记录。重投的操作只查询结局，不会再次执行。
 
-事件同时带投递确认与保留期。接收者确认与保留期过期各自把同一投递义务从待清空积压中幂等移除。过期结束本地投递责任，内容仍按内容保留策略处理。过期之后到达的 `ack` 保留接收证据，不复活义务、不重复移除，也不恢复本地投递责任。交接提交检查的正是这个积压。
+交接是三段式握手，不是邀请。handler 提交 `operation: 'handover'`，数据为 `{ target, handover_deadline, metadata? }`；endpoint 先落 intent，并在当前游标处冻结入站投递，然后向目标发 `POST /handover/probes`。目标答复 `accept`（带游标）或 `reject`（带原因），并按 `operation_id` 记录答复。接受后在一个事务里切换绑定——新 handler、新 revision、探测给出的游标——因此原 handler 的发送会因旧 revision 被拒，冻结期写入的事件归新 handler。探测由 endpoint 签名，不由发起交接的 agent 签名，所以 endpoint 自己必须与目标完成密钥交换：缺少这段配对时请求根本发不出去，交接以 `data.reason: 'untrusted_target'` 中止，`error` 指明缺失的配对与该由哪一方发起。拒绝、不可达或期限到期都会中止交接，绑定、revision 与游标保持不变。探测超出调用方等待窗口时返回 `unknown`，`node.resources.recover()` 读回目标记录的答复并结案。切换不修改 `log_readers`：历史读取是另一份授权。
 
-资源交接先返回 `pending`，指定目标通过 `decideHandover` 接受或拒绝。提交检查当前 revision、权限、`decision_deadline` 和积压为空；到期未提交的准备记为 `aborted`，之后不得凭已记录的接受补交。平台 SDK、平台凭据和产物读取由资源插件负责。
+路由为 `GET|POST /resources`、`GET /resources/{owner}/{id}`、`POST /resources/{owner}/{id}/operations`、`GET /resources/{owner}/{id}/operations[/{operation_id}]`、`POST /resources/{owner}/{id}/events`、`POST /resources/{owner}/{id}/events/{event_id}/ack`、`GET /resources/{owner}/{id}/log?since=&limit=`、`GET /resources/{owner}/{id}/log/{event_id}`，目标节点上另有 `POST /handover/probes` 与 `GET /handover/probes/{operation_id}`。平台 SDK、平台凭据和产物读取由资源插件负责。
 
 ## 插件边界
 
@@ -74,7 +80,8 @@ const members = await node.domains.discover(node.auth, "urn:onlyne:domain:resear
 | `decide` | 把消息意图解释为一个可执行动作。 |
 | `runtime` | 检查投递能力、注入宿主上下文、按需建立运行时待办，并报告宿主已观察到的 await 工具结果。 |
 | `resources` | 校验资源参数、执行平台操作、查询未知结果。 |
-| `mayAdmit`、`mayHandover`、`mention`、`directory` | 提供接纳策略、交接策略、thread 别名和宿主目录。 |
+| `prepareResourceOperation` | HTTP 认证并解析操作后，按需创建动态资源；资源授权与执行随后由库处理。 |
+| `mayAdmit`、`handoverProbe`、`mention`、`directory` | 提供接纳策略、目标侧对交接探测的答复、thread 别名和宿主目录。 |
 | `domainCandidates` | 提供可能声明某个域的节点身份。缺少它时拒绝发现，不猜成员。 |
 | `transport` | 按需用其他网络绑定替换内置 Fetch transport。 |
 
