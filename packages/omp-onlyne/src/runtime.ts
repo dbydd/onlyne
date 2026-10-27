@@ -85,6 +85,18 @@ function mutation(): { idempotency_key: string; retry_until: string } {
 	return { idempotency_key: crypto.randomUUID(), retry_until: new Date(Date.now() + 60_000).toISOString() };
 }
 
+/** The port a configured public_url names, defaulting by scheme; undefined when it names none. */
+function publicPort(value: string | undefined): number | undefined {
+	if (value === undefined) return undefined;
+	try {
+		const url = new URL(value);
+		if (url.port !== "") return Number(url.port);
+		return url.protocol === "https:" ? 443 : 80;
+	} catch {
+		return undefined;
+	}
+}
+
 class OmpRuntime implements PluginRuntime {
 	readonly contexts: ContextRegistry;
 	readonly storage: SqliteStorage;
@@ -119,12 +131,26 @@ class OmpRuntime implements PluginRuntime {
 		// RFC 0018 §2.1: the address a peer statement arrived from is known only here. The
 		// library calls `notify` synchronously from inside the request it is serving, so the
 		// connection's own store is still in scope when the trust event is handled.
-		this.server = Bun.serve({
-			hostname: this.config.server.bind, port: 0,
+		const serve = (port: number) => Bun.serve({
+			hostname: this.config.server.bind, port,
 			fetch: (request, server) => this.connection.run(server.requestIP(request)?.address, () => handler(request)),
 		});
+		// A configured public_url is a promise about where this node answers. Advertising it
+		// without listening there leaves every peer that pinned the address calling a port
+		// nobody serves, so the port is taken unless it is already in use.
+		const wanted = publicPort(this.config.server.public_url);
+		let fellBack = false;
+		try {
+			this.server = serve(wanted ?? 0);
+		} catch (error) {
+			if (wanted === undefined) throw error;
+			fellBack = true;
+			this.server = serve(0);
+			this.pi.logger.warn("onlyne.port.taken", { wanted, bound: this.server.port, error: errorText(error) });
+		}
 		const host = advertisedHost(this.config.server.bind);
-		this.endpoint = `http://${host.includes(":") ? `[${host}]` : host}:${this.server.port}/onlyne/v3`;
+		const actual = `http://${host.includes(":") ? `[${host}]` : host}:${this.server.port}/onlyne/v3`;
+		this.endpoint = this.config.server.public_url === undefined || fellBack ? actual : normalizeServiceUrl(this.config.server.public_url);
 		const instanceId = crypto.randomUUID();
 		// The decider probes peers for their execution contexts, so it must use the node's own
 		// transport: an unsigned probe is refused by every keyed peer.
