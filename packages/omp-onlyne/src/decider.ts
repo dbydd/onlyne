@@ -106,6 +106,33 @@ export function currentDecision(): DecisionScope | undefined {
 	return decisionScope.getStore();
 }
 
+/**
+ * The thread a send continues: the most recently opened open thread this node owns whose members
+ * already include the addressee. Derived from local records alone (RFC 0016 §5), so it costs no
+ * judgement. A node may hold several open threads with one peer; the newest is the conversation
+ * still in use, and a caller that wants a fresh topic names one or plans `execution: new`.
+ */
+export async function reuseThread(deps: DeciderDeps, to: NodeId): Promise<ThreadRef | undefined> {
+	const self = deps.config.node.id;
+	const threads = await deps.listThreads();
+	const candidates = threads
+		.filter(thread => thread.thread_ref.owner === self && thread.state === "open")
+		.sort((left, right) => right.created_at.localeCompare(left.created_at));
+	for (const thread of candidates) {
+		let members: NodeId[];
+		try {
+			members = await deps.threadMembers(thread.thread_ref);
+		} catch (error) {
+			// An unreadable member list is a reason to try the next thread, not to open a new one
+			// silently, so it is reported and skipped.
+			deps.log?.("onlyne.thread.members_unreadable", { thread: threadKey(thread.thread_ref), error: message(error) });
+			continue;
+		}
+		if (members.includes(to)) return thread.thread_ref;
+	}
+	return undefined;
+}
+
 export interface DeciderDeps {
 	config: OnlyneConfig;
 	/** Registry id of this node's main session; children are bound under it. */
@@ -114,8 +141,12 @@ export interface DeciderDeps {
 	log?(message: string, fields: Record<string, unknown>): void;
 	listThreads(): Promise<Thread[]>;
 	listMessages(thread: ThreadRef, cursor?: string): Promise<Page<Entry>>;
+	/** The peers one thread already lists as members; a send reuses the thread a peer belongs to. */
+	threadMembers(thread: ThreadRef): Promise<NodeId[]>;
 	/** Peers from the library's live discovery records, never a static configuration. */
 	listPeers(): Promise<PeerRecord[]>;
+	/** Every trust row this node holds, in any phase. Identity outlives a discovery record. */
+	listTrust(): Promise<Array<{ node_id: NodeId; phase: string }>>;
 	/** Contexts the target node publishes for `execution: existing`. */
 	listReceiverContexts(nodeId: NodeId): Promise<ReceiverContext[]>;
 	resourceQuery?(meta: Record<string, Json>): Promise<ResourceReadQuery>;
@@ -185,8 +216,9 @@ export class JudgeDecider {
 	async decide(scope: DecisionScope): Promise<Action> {
 		const explicit = await this.#explicit(scope);
 		if (explicit !== undefined) {
-			await this.#guard(scope, explicit);
-			return explicit;
+			const filled = await this.#threaded(explicit);
+			await this.#guard(scope, filled);
+			return filled;
 		}
 
 		// A subagent classifies exactly as the main session does and `#guard` decides what may run.
@@ -204,9 +236,27 @@ export class JudgeDecider {
 					: intent === "manage_domain"
 						? await this.#domainAction(scope, meta)
 						: await this.#resourceAction(meta);
-		await this.#guard(scope, action);
-		this.deps.log?.("onlyne.judge.action", { direction: "outbound", ...actionFacts(action) });
-		return action;
+		const filled = await this.#threaded(action);
+		await this.#guard(scope, filled);
+		this.deps.log?.("onlyne.judge.action", { direction: "outbound", ...actionFacts(filled) });
+		return filled;
+	}
+
+	/**
+	 * The thread a send belongs to, decided once for every path that produces one.
+	 *
+	 * A reply lands on the thread that holds its original (the client resolves it), and a plan
+	 * that says `new` opens a topic. Otherwise the message continues the conversation this node
+	 * already has with its addressee: leaving it unnamed makes the client open a thread per
+	 * message, and asking the model for an alias it cannot know is the mistake the design already
+	 * recorded. This is a lookup over local records, not a judgement (RFC 0016 §5), so it sits
+	 * after both the explicit and the judged paths rather than inside either.
+	 */
+	async #threaded(action: Action): Promise<Action> {
+		if (action.kind !== "send" || action.thread !== undefined) return action;
+		if (action.in_reply_to !== undefined || action.execution === "new") return action;
+		const thread = await reuseThread(this.deps, action.to);
+		return thread === undefined ? action : { ...action, thread };
 	}
 
 	/** Node O-1: one question, five options, no lists of peers, threads, or history. */
@@ -1270,15 +1320,14 @@ export class JudgeDecider {
 	}
 
 	/**
-	 * Resolve an explicit target against live discovery. A bare alias is accepted
-	 * only when exactly one known node's last URN segment names it.
+	 * Resolve an explicit target to a node id. Identity comes from the trust table and the
+	 * discovery catalog, never from liveness: a peer whose exchange is done is still that peer
+	 * when its discovery record goes stale or is deleted. Whether we can reach it is a delivery
+	 * question, reported as `unavailable` by the transport, not a reason to claim no such node
+	 * exists. A bare alias is accepted only when exactly one known node's last segment names it.
 	 */
 	async #peerId(alias: string): Promise<NodeId> {
-		const peers = await this.#peers();
-		if (!peers.available) {
-			throw new OnlyneError("unavailable", text("error.target_unresolved", { reason: peers.reason }));
-		}
-		const ids = [this.deps.config.node.id, ...peers.value.map(peer => peer.node_id)];
+		const ids = await this.#knownIds();
 		if (alias === "self") return this.deps.config.node.id;
 		if (ids.includes(alias)) return alias;
 		const matches = ids.filter(id => lastSegment(id) === alias);
@@ -1287,6 +1336,25 @@ export class JudgeDecider {
 			throw new OnlyneError("ambiguous_target", text("error.alias_ambiguous", { alias, matches: matches.join(", ") }));
 		}
 		throw new OnlyneError("not_found", text("error.alias_not_found", { alias }));
+	}
+
+	/**
+	 * Every node this one can name: itself, each peer it holds a live trust row with, and each
+	 * peer discovery currently reports. The trust rows come first because they are the ones that
+	 * survive a peer moving, restarting or dropping out of the catalog for a refresh window.
+	 */
+	async #knownIds(): Promise<NodeId[]> {
+		const ids = new Set<NodeId>([this.deps.config.node.id]);
+		try {
+			for (const row of await this.deps.listTrust()) {
+				if (row.phase !== "revoked") ids.add(row.node_id);
+			}
+		} catch (error) {
+			this.deps.log?.("onlyne.judge.trust_unreadable", { error: message(error) });
+		}
+		const peers = await this.#peers();
+		if (peers.available) for (const peer of peers.value) ids.add(peer.node_id);
+		return [...ids];
 	}
 
 	async #mentions(meta: Record<string, Json> | undefined): Promise<string[] | undefined> {

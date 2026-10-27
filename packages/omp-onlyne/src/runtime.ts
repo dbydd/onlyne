@@ -164,6 +164,7 @@ class OmpRuntime implements PluginRuntime {
 				else this.pi.logger.debug(message, fields);
 			},
 			listPeers: async () => (await this.node.discovery.listRecords()).filter(record => record.verified_at !== undefined && Date.parse(record.expires_at) > Date.now()),
+			listTrust: async () => (await this.node.trust.list(this.node.auth)).map(row => ({ node_id: row.node_id, phase: trustPhase(row) })),
 			listReceiverContexts: async id => id === this.config.node.id
 				? [
 						{ alias: "main", summary: t("main"), state: this.main.isIdle() ? "idle" : "running" },
@@ -179,6 +180,7 @@ class OmpRuntime implements PluginRuntime {
 			listThreads: async () => (await allPages(cursor => this.node.threads.list(this.node.auth, { page_size: 100, cursor })))
 				.filter(thread => !isTrustThread(this.config.node.id, thread.thread_ref)),
 			listMessages: (thread, cursor) => this.node.messages.list(this.node.auth, thread, { attention: "thread", page_size: 100, cursor }),
+			threadMembers: async thread => (await this.node.threads.describe(this.node.auth, thread)).members.map(member => member.peer),
 		});
 		const bridge = createRuntimeBridge({ pi: this.pi, main: this.main, decider: this.decider, contexts: this.contexts, nodeId: this.config.node.id });
 		const projectRoot = dirname(dirname(this.config.path));

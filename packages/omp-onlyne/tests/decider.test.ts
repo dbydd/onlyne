@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Entry, Page, Thread, ThreadRef } from "@onlyne/lib";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { fitState, needsReplyOf, JudgeDecider, type DecisionScope, type PeerRecord } from "../src/decider.ts";
+import { fitState, needsReplyOf, JudgeDecider, reuseThread, type DeciderDeps, type DecisionScope, type PeerRecord } from "../src/decider.ts";
 import type { ContextRegistry } from "../src/store.ts";
 import type { ContextRecord, OnlyneConfig } from "../src/types.ts";
 
@@ -54,17 +54,27 @@ function record(overrides: Partial<ContextRecord> & { alias: string; thread_ref?
 	};
 }
 
-function decider(records: ContextRecord[] = []): JudgeDecider {
+interface Stubs {
+	threads?: Thread[];
+	trust?: Array<{ node_id: string; phase: string }>;
+	members?: Record<string, string[]>;
+	peers?: PeerRecord[];
+}
+
+function decider(records: ContextRecord[] = [], stubs: Stubs = {}): JudgeDecider {
 	const contexts = {
 		list: async () => records,
 	} as unknown as ContextRegistry;
+	const members = stubs.members ?? { [thread.thread_ref.id]: [node, other] };
 	return new JudgeDecider({
 		config,
 		mainAgentId: "Main",
 		contexts,
-		listThreads: async () => [thread],
+		listThreads: async () => stubs.threads ?? [thread],
 		listMessages: async (): Promise<Page<Entry>> => ({ items: [entry], next_cursor: null }),
-		listPeers: async () => peers,
+		listPeers: async () => stubs.peers ?? peers,
+		listTrust: async () => stubs.trust ?? [],
+		threadMembers: async ref => members[ref.id] ?? [],
 		listReceiverContexts: async () => [],
 	});
 }
@@ -244,5 +254,52 @@ describe("hierarchical decision nodes", () => {
 	test("needs_reply is derived from the body heuristic, not only from meta", () => {
 		expect(needsReplyOf(inbound)).toBe(true);
 		expect(needsReplyOf(entry)).toBe(false);
+	});
+});
+
+describe("thread reuse", () => {
+	const older: Thread = { ...thread, thread_ref: { owner: node, id: "older" }, created_at: "2025-12-01T00:00:00Z" };
+	const closed: Thread = { ...thread, thread_ref: { owner: node, id: "closed" }, state: "closed", created_at: "2026-03-01T00:00:00Z" };
+	const foreign: Thread = { ...thread, thread_ref: { owner: other, id: "theirs" }, created_at: "2026-04-01T00:00:00Z" };
+
+	function reuse(threads: Thread[], members: Record<string, string[]>) {
+		const deps = {
+			config, log: () => {},
+			listThreads: async () => threads,
+			threadMembers: async (ref: ThreadRef) => members[ref.id] ?? [],
+		} as unknown as DeciderDeps;
+		return reuseThread(deps, other);
+	}
+
+	test("continues the newest open thread the peer already belongs to", async () => {
+		const members = { research: [node, other], older: [node, other], closed: [node, other], theirs: [node, other] };
+		expect(await reuse([older, closed, foreign, thread], members)).toEqual(thread.thread_ref);
+	});
+
+	test("falls back to an older thread when the newest one has another member", async () => {
+		expect(await reuse([older, thread], { older: [node, other], research: [node, unique] })).toEqual(older.thread_ref);
+	});
+
+	test("opens nothing when no open thread of this node lists that peer", async () => {
+		expect(await reuse([older, thread], { older: [node], research: [node] })).toBeUndefined();
+	});
+});
+
+describe("identity outlives liveness", () => {
+	test("a peer with a trust row is addressable without a live discovery record", async () => {
+		const des = decider([], { peers: [], trust: [{ node_id: other, phase: "exchanged" }] });
+		expect(await des.decide(scope({ op: "member_add", thread: "research", to: other }))).toEqual({
+			kind: "thread",
+			op: "member_add",
+			thread: thread.thread_ref,
+			to: other,
+		});
+	});
+
+	test("a revoked peer is not addressable", async () => {
+		await expect(
+			decider([], { peers: [], trust: [{ node_id: other, phase: "revoked" }] })
+				.decide(scope({ op: "member_add", thread: "research", to: other })),
+		).rejects.toThrow();
 	});
 });
