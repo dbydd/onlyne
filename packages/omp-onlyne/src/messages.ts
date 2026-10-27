@@ -32,7 +32,14 @@ interface InboundAttempt {
 	decision?: InboundDecision;
 	failure?: OnlyneError;
 	landed?: string;
+	/** Maintenance passes this entry has been reported landed without being confirmed. */
+	passes?: number;
+	/** Whether the held delivery has already been forced through as a trigger. */
+	escalated?: boolean;
 }
+
+/** Passes a main-session delivery may stay unconfirmed before the host forces it through. */
+const MAIN_RETRY_PASSES = 2;
 const inboundAttempts = new Map<string, InboundAttempt>();
 
 function inboundKey(entry: Entry): string {
@@ -106,6 +113,21 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				inboundAttempts.delete(key);
 				throw new OnlyneError("context_lost", t("contextLost", { alias: holder.alias }), { context: holder.alias });
 			}
+			// A delivery the session never picked up leaves the entry owed and its row
+			// `injected: false`. Reporting it delivered again does nothing, so a bounded retry
+			// forces it through as a trigger once, and after that the entry is reported as
+			// unconfirmed instead of disappearing into the queue (RFC 0008 §7).
+			attempt.passes = (attempt.passes ?? 0) + 1;
+			if (attempt.landed === deps.main.agent.id && attempt.passes > MAIN_RETRY_PASSES) {
+				if (attempt.escalated !== true) {
+					attempt.escalated = true;
+					const token = registerPending(entry, deps.main.agent.id, "fragment");
+					deps.pi.sendMessage(payload(entry, INBOUND, token), { triggerTurn: true });
+					deps.pi.logger.info("onlyne.delivery.escalated", { entry: key, reason: "unconfirmed", passes: attempt.passes });
+				} else {
+					deps.pi.logger.warn("onlyne.delivery.unconfirmed", { entry: key, passes: attempt.passes, context: attempt.landed });
+				}
+			}
 				deps.pi.logger.debug("onlyne.delivery.held", { entry: key, reason: "already-delivered", context: attempt.landed });
 				return { context: attempt.landed, consumed: false, outcome: "delivered" as const };
 			}
@@ -149,7 +171,12 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 					mode === undefined ? { triggerTurn: true } : { deliverAs: mode === "steer" ? "steer" : "followUp" },
 				);
 			} else {
-				deps.pi.sendMessage(payload(entry, INBOUND, token), { deliverAs: "nextTurn" });
+				// RFC 0008 §7: a fragment enters the next context assembly without starting a turn.
+				// An idle session never reaches that assembly by itself, so the entry would sit in
+				// the queue as `injected: false` forever; idle means there is no turn to wait for.
+				const idle = deps.main.isIdle();
+				deps.pi.sendMessage(payload(entry, INBOUND, token), idle ? { triggerTurn: true } : { deliverAs: "nextTurn" });
+				if (idle) deps.pi.logger.info("onlyne.delivery.escalated", { entry: key, reason: "idle-fragment" });
 			}
 			attempt.landed = deps.main.agent.id;
 			deps.pi.logger.info("onlyne.delivery.sent", {
