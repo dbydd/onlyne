@@ -19,7 +19,7 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "bin": { "onlyne-mcp-gateway": "./src/main.ts" },
+  "bin": { "onlyne-mcp-gateway": "src/main.ts" },
   "files": ["src", "README.md", "LICENSE"],
   "scripts": {
     "check": "tsc --noEmit",

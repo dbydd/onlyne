@@ -20,7 +20,7 @@
     ".": "./src/index.ts",
     "./storage": "./src/storage.ts"
   },
-  "bin": { "onlyne-im-gateway": "./src/main.ts" },
+  "bin": { "onlyne-im-gateway": "src/main.ts" },
   "files": ["src", "README.md", "LICENSE"],
   "scripts": {
     "check": "tsc --noEmit",
