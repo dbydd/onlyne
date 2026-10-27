@@ -224,6 +224,11 @@ Stop each OMP session with `Ctrl-D` or its own exit command.
 
 ## Install this skill
 
-The skill ships in the Onlyne repository at `.agents/skills/onlyne-cluster/`. Install it from
-the repository URL with the skill CLI, or copy that directory into
-`~/.agents/skills/onlyne-cluster/`.
+The skill ships in the Onlyne repository at `.agents/skills/onlyne-cluster/`.
+
+```sh
+npx skills https://github.com/dbydd/onlyne
+```
+
+The installer copies the directory into `~/.agents/skills/onlyne-cluster/`. Without the
+installer, copy that directory there yourself.
