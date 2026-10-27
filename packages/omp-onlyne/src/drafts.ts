@@ -2,6 +2,7 @@ import { OnlyneError, type Json, type MessageRef, type MsgInput, type PreparedSe
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { runDecision } from "./decider.ts";
 import type { PluginRuntime } from "./runtime.ts";
+import { bridgeText as t } from "./bridge-text.ts";
 
 interface Draft {
 	id: string;
@@ -13,12 +14,12 @@ interface Draft {
 export async function createDraft(runtime: PluginRuntime, ctx: ExtensionContext, input: MsgInput, signal?: AbortSignal): Promise<unknown> {
 	const meta = { ...input.meta };
 	delete meta.op;
-	if (meta.relation !== "reply" && meta.relation !== "followup") throw new OnlyneError("invalid_request", "A reply draft needs relation reply or followup and in_reply_to.");
+	if (meta.relation !== "reply" && meta.relation !== "followup") throw new OnlyneError("invalid_request", t("draftNeedsRelation"));
 	const original = await resolveSource(runtime, meta.in_reply_to);
 	if (ctx.agent.kind === "sub") {
 		const authorized = (await runtime.contexts.list()).some(record => record.agent_id === ctx.agent.id
 			&& record.source?.sender === original.sender && record.source.id === original.id);
-		if (!authorized) throw new OnlyneError("forbidden", "A child may draft a reply only to the source message assigned to its context.");
+		if (!authorized) throw new OnlyneError("forbidden", t("draftChildScope"));
 	}
 	meta.in_reply_to = { sender: original.sender, id: original.id };
 	const normalized = { ...input, meta };
@@ -30,15 +31,15 @@ export async function createDraft(runtime: PluginRuntime, ctx: ExtensionContext,
 }
 
 export async function sendDraft(runtime: PluginRuntime, ctx: ExtensionContext, id: string, signal?: AbortSignal): Promise<unknown> {
-	if (ctx.agent.kind === "sub") throw new OnlyneError("forbidden", "Return draft_id to the main session; a child cannot send a draft.");
+	if (ctx.agent.kind === "sub") throw new OnlyneError("forbidden", t("draftChildCannotSend"));
 	const draft = await runtime.storage.transaction(tx => tx.get<Draft>(`draft/${id}`));
-	if (draft === undefined) throw new OnlyneError("not_found", `No reply draft is named ${id}.`);
+	if (draft === undefined) throw new OnlyneError("not_found", t("draftNotFound", { id }));
 	const { to, message, plan } = draft.prepared;
 	return runtime.node.client.send(to, message, plan, { context: ctx.agent.id, signal });
 }
 
 async function resolveSource(runtime: PluginRuntime, value: Json | undefined): Promise<MessageRef> {
-	if (value === null || typeof value !== "object" || Array.isArray(value)) throw new OnlyneError("invalid_request", "A reply draft needs in_reply_to {sender,id} or {thread,seq}.");
+	if (value === null || typeof value !== "object" || Array.isArray(value)) throw new OnlyneError("invalid_request", t("draftNeedsReference"));
 	if (typeof value.sender === "string" && typeof value.id === "string") return { sender: value.sender, id: value.id };
 	if (typeof value.thread === "string" && (typeof value.seq === "string" || typeof value.seq === "number")) {
 		const slash = value.thread.lastIndexOf("/");
@@ -52,5 +53,5 @@ async function resolveSource(runtime: PluginRuntime, value: Json | undefined): P
 			cursor = result.next_cursor ?? undefined;
 		} while (cursor !== undefined);
 	}
-	throw new OnlyneError("not_found", "The draft source message is unavailable.");
+	throw new OnlyneError("not_found", t("draftSourceUnavailable"));
 }

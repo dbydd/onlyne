@@ -12,6 +12,7 @@ import {
 	stringField,
 	type HostTodoPhase,
 } from "./todo-native.ts";
+import { bridgeText as t } from "./bridge-text.ts";
 
 export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
 
@@ -231,7 +232,7 @@ let backendPromise: Promise<TodoBackend> | undefined;
  */
 export async function applyMessageTodo(entry: Entry, context: string, planner: TodoPlanner): Promise<void> {
 	const scope = context.replace(/\s+/g, " ").trim();
-	if (scope.length === 0) throw new OnlyneError("invalid_request", "A todo decision needs a non-empty context alias.");
+	if (scope.length === 0) throw new OnlyneError("invalid_request", t("todoContextRequired"));
 
 	const session = liveSession();
 	const backend = await backendFor();
@@ -244,7 +245,7 @@ export async function applyMessageTodo(entry: Entry, context: string, planner: T
 
 	const plan = await planner.decideTodo(entry, backend.read(session.sessionManager.getBranch()), scope);
 	if (plan.action !== "none" && plan.action !== "associate" && plan.action !== "append") {
-		throw new OnlyneError("decision_unavailable", `The judge returned an unknown todo action: ${String(plan.action)}.`);
+		throw new OnlyneError("decision_unavailable", t("todoUnknownAction", { action: String(plan.action) }));
 	}
 
 	await session.sessionManager.appendEntriesAtomically(() => {
@@ -378,16 +379,10 @@ function asTodoMoreStateModule(value: unknown): TodoMoreStateModule {
 		typeof module.TODO_MORE_ENTRY_TYPE !== "string" ||
 		typeof module.TODO_MORE_RESULT_MARK !== "string"
 	) {
-		throw new OnlyneError(
-			"unavailable",
-			"omp-todo-more is installed but does not expose the todo state adapter API this plugin drives.",
-		);
+		throw new OnlyneError("unavailable", t("todoAdapterApi"));
 	}
 	if (module.TODO_MORE_ENTRY_TYPE !== TODO_MORE_ENTRY || module.TODO_MORE_RESULT_MARK !== TODO_MORE_RESULT_MARK) {
-		throw new OnlyneError(
-			"unavailable",
-			"omp-todo-more uses branch record types this omp-onlyne build does not understand.",
-		);
+		throw new OnlyneError("unavailable", t("todoRecordTypes"));
 	}
 	return module as TodoMoreStateModule;
 }
@@ -498,17 +493,17 @@ function prepareRichCommit(
 			const title = requiredText(plan.title, "associate", "title");
 			const phase = plan.phase?.trim() || undefined;
 			if (state.kind === "empty") {
-				throw new OnlyneError("decision_unavailable", "The judge chose associate, but the todo list is empty.");
+				throw new OnlyneError("decision_unavailable", t("todoEmptyAssociate"));
 			}
 			const matches = state.phases
 				.filter(candidate => phase === undefined || candidate.name === phase)
 				.filter(candidate => candidate.items.some(item => item.title === title))
 				.map(candidate => candidate.name);
 			if (matches.length === 0) {
-				throw new OnlyneError("decision_unavailable", `The judge chose associate, but no todo item is titled "${title}".`);
+				throw new OnlyneError("decision_unavailable", t("todoNoSuchItem", { title }));
 			}
 			if (matches.length > 1) {
-				throw new OnlyneError("ambiguous_target", `More than one todo item is titled "${title}"; the decision needs a phase.`);
+				throw new OnlyneError("ambiguous_target", t("todoAmbiguousTitle", { title }));
 			}
 			const phaseName = matches[0]!;
 			const origin = [...origins.values()].find(
@@ -525,14 +520,11 @@ function prepareRichCommit(
 				? state.phases.flatMap(candidate => candidate.items).some(item => item.title === title)
 				: false;
 			if (existing) {
-				throw new OnlyneError(
-					"id_conflict",
-					`The judge chose append, but the todo list already has an item titled "${title}"; associate instead.`,
-				);
+				throw new OnlyneError("id_conflict", t("todoDuplicateTitle", { title }));
 			}
 
-			const phaseName = plan.phase?.trim() ?? "Tasks";
-			if (phaseName.length === 0) throw new OnlyneError("invalid_request", "An append decision needs a non-empty phase name.");
+			const phaseName = plan.phase?.trim() ?? t("todoDefaultPhase");
+			if (phaseName.length === 0) throw new OnlyneError("invalid_request", t("todoPhaseRequired"));
 			const explanation = appendExplanation(plan, entry, context);
 			const item: RichItem = {
 				title,
@@ -569,7 +561,7 @@ function prepareRichCommit(
 		}
 		default: {
 			const unreachable: never = plan.action;
-			throw new Error(`Unexpected todo action: ${String(unreachable)}`);
+			throw new Error(t("todoUnexpectedAction", { action: String(unreachable) }));
 		}
 	}
 }
@@ -608,10 +600,10 @@ function prepareNativeCommit(
 				.filter(candidate => candidate.items.some(item => item.title === title))
 				.map(candidate => candidate.name);
 			if (matches.length === 0) {
-				throw new OnlyneError("decision_unavailable", `The judge chose associate, but no todo item is titled "${title}".`);
+				throw new OnlyneError("decision_unavailable", t("todoNoSuchItem", { title }));
 			}
 			if (matches.length > 1) {
-				throw new OnlyneError("ambiguous_target", `More than one todo item is titled "${title}"; the decision needs a phase.`);
+				throw new OnlyneError("ambiguous_target", t("todoAmbiguousTitle", { title }));
 			}
 			const phaseName = matches[0]!;
 			const origin = [...origins.values()].find(
@@ -626,13 +618,10 @@ function prepareNativeCommit(
 			const title = requiredText(plan.title, "append", "title");
 			const existing = state.phases.some(candidate => candidate.items.some(item => item.title === title));
 			if (existing) {
-				throw new OnlyneError(
-					"id_conflict",
-					`The judge chose append, but the todo list already has an item titled "${title}"; associate instead.`,
-				);
+				throw new OnlyneError("id_conflict", t("todoDuplicateTitle", { title }));
 			}
-			const phaseName = plan.phase?.trim() ?? "Tasks";
-			if (phaseName.length === 0) throw new OnlyneError("invalid_request", "An append decision needs a non-empty phase name.");
+			const phaseName = plan.phase?.trim() ?? t("todoDefaultPhase");
+			if (phaseName.length === 0) throw new OnlyneError("invalid_request", t("todoPhaseRequired"));
 			const item: TodoStateItem = { title, status: "pending" };
 			const index = state.phases.findIndex(candidate => candidate.name === phaseName);
 			const phases =
@@ -661,7 +650,7 @@ function prepareNativeCommit(
 		}
 		default: {
 			const unreachable: never = plan.action;
-			throw new Error(`Unexpected todo action: ${String(unreachable)}`);
+			throw new Error(t("todoUnexpectedAction", { action: String(unreachable) }));
 		}
 	}
 }
@@ -687,13 +676,13 @@ function makeLink(entry: Entry, context: string, origin: OnlyneTodoOrigin, at: s
 function explanationText(plan: TodoDecision, entry: Entry, context: string): string | undefined {
 	const body = plan.explanation?.trim() || entry.message.msg.replace(/\s+/g, " ").trim();
 	if (body.length === 0) return undefined;
-	return `Source: ${context}/${entry.seq} from ${entry.authenticated_author}\n\n${body}`;
+	return `${t("todoSourceLine", { source: context, seq: entry.seq, author: entry.authenticated_author })}\n\n${body}`;
 }
 
 function appendExplanation(plan: TodoDecision, entry: Entry, context: string): RichExplanation {
 	const text = explanationText(plan, entry, context);
 	if (text === undefined) {
-		throw new OnlyneError("invalid_request", "An append decision needs an explanation or a non-empty message body.");
+		throw new OnlyneError("invalid_request", t("todoExplanationRequired"));
 	}
 	return { kind: "explained", text };
 }
@@ -702,7 +691,7 @@ function itemTime(minutes: number | undefined): RichTime {
 	if (minutes === undefined) return { kind: "missing" };
 	const max = Math.floor(Number.MAX_SAFE_INTEGER / 60_000);
 	if (!Number.isInteger(minutes) || minutes <= 0 || minutes > max) {
-		throw new OnlyneError("invalid_request", "A todo estimate must be a positive whole number of minutes.");
+		throw new OnlyneError("invalid_request", t("todoEstimateInvalid"));
 	}
 	return { kind: "estimated", budgetId: crypto.randomUUID(), minutes, elapsedMs: 0, runningSince: null };
 }
@@ -710,7 +699,7 @@ function itemTime(minutes: number | undefined): RichTime {
 function requiredText(value: string | undefined, action: string, field: string): string {
 	const text = value?.trim();
 	if (text === undefined || text.length === 0) {
-		throw new OnlyneError("decision_unavailable", `The judge chose ${action} without a ${field}.`);
+		throw new OnlyneError("decision_unavailable", t("todoMissingField", { action, field }));
 	}
 	return text;
 }
@@ -720,10 +709,7 @@ function requiredGoal(goal: TodoDecision["goal"]): TodoStateGoal {
 	const measure = goal?.measure.trim();
 	const doneWhen = goal?.doneWhen.trim();
 	if (!objective || !measure || !doneWhen) {
-		throw new OnlyneError(
-			"decision_unavailable",
-			"The judge chose append into an empty list without the goal's objective, measure and doneWhen.",
-		);
+		throw new OnlyneError("decision_unavailable", t("todoGoalRequired"));
 	}
 	return { objective, measure, doneWhen };
 }
@@ -742,13 +728,10 @@ function liveSession(): AgentSession {
 		.list()
 		.filter(ref => ref.kind === "main" && ref.session !== null);
 	if (mains.length === 0) {
-		throw new OnlyneError(
-			"unavailable",
-			"No live OMP session owns this inbound todo decision; the todo remains owed by the inbound queue.",
-		);
+		throw new OnlyneError("unavailable", t("todoNoSession"));
 	}
 	if (mains.length > 1) {
-		throw new OnlyneError("unavailable", "More than one live main OMP session is registered; the todo target is ambiguous.");
+		throw new OnlyneError("unavailable", t("todoMultipleSessions"));
 	}
 	return mains[0]!.session!;
 }
@@ -808,10 +791,10 @@ function onlyneMetadata(data: unknown, entryId: string): OnlyneTodoMetadata | un
 function markerMetadata(data: unknown, entryId: string): OnlyneTodoMetadata {
 	const metadata = parseMetadata(data, entryId);
 	if (metadata === undefined) {
-		throw new Error(`Onlyne todo decision entry ${entryId} uses an unsupported metadata version.`);
+		throw new Error(t("todoBadMetadataVersion", { entry: entryId }));
 	}
 	if (metadata.decision === undefined) {
-		throw new Error(`Onlyne todo decision entry ${entryId} records no decision.`);
+		throw new Error(t("todoNoDecisionRecord", { entry: entryId }));
 	}
 	return metadata;
 }
@@ -843,7 +826,7 @@ function parseGoalIntent(value: unknown, entryId: string): TodoStateGoal | undef
 
 function parseOrigins(value: unknown, entryId: string): OnlyneTodoOrigin[] {
 	if (!Array.isArray(value)) {
-		throw new Error(`Onlyne todo metadata on entry ${entryId} has no origins array; the association cannot be replayed.`);
+		throw new Error(t("todoNoOrigins", { entry: entryId }));
 	}
 	return value.map(origin => ({
 		item_id: requiredString(origin, "item_id", entryId),
@@ -854,7 +837,7 @@ function parseOrigins(value: unknown, entryId: string): OnlyneTodoOrigin[] {
 
 function parseLinks(value: unknown, entryId: string): OnlyneTodoLink[] {
 	if (!Array.isArray(value)) {
-		throw new Error(`Onlyne todo metadata on entry ${entryId} has no links array; the association cannot be replayed.`);
+		throw new Error(t("todoNoLinks", { entry: entryId }));
 	}
 	return value.map(link => ({
 		link_id: requiredString(link, "link_id", entryId),
@@ -873,7 +856,7 @@ function parseDecision(value: unknown, entryId: string): OnlyneTodoDecisionRecor
 	if (value === undefined) return undefined;
 	const action = stringField(value, "action");
 	if (action !== "none" && action !== "associate" && action !== "append") {
-		throw new Error(`Onlyne todo decision on entry ${entryId} has an unknown action.`);
+		throw new Error(t("todoUnknownRecordedAction", { entry: entryId }));
 	}
 	const linkId = stringField(value, "link_id");
 	const explanation = stringField(value, "explanation");
@@ -907,7 +890,7 @@ function requiredThreadRef(value: unknown, entryId: string): ThreadRef {
 function requiredString(value: unknown, field: string, entryId: string): string {
 	const text = stringField(value, field);
 	if (text === undefined) {
-		throw new Error(`Onlyne todo metadata on entry ${entryId} has no string ${field}.`);
+		throw new Error(t("todoMissingString", { entry: entryId, field }));
 	}
 	return text;
 }

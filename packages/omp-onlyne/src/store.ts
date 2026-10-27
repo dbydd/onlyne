@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Entry, Storage, ThreadRef, Transaction } from "@onlyne/lib";
 import type { ContextRecord } from "./types.ts";
+import { bridgeText as t } from "./bridge-text.ts";
 
 /** Key/value rows under one SQLite file; the library's durable state and the plugin's registry share it. */
 export class SqliteStorage implements Storage {
@@ -40,7 +41,7 @@ export class SqliteStorage implements Storage {
 	}
 
 	async #execute<T>(work: (tx: Transaction) => Promise<T>): Promise<T> {
-		if (this.#closed) throw new Error("The Onlyne store is closed.");
+		if (this.#closed) throw new Error(t("storeClosed"));
 		this.#db.exec("BEGIN IMMEDIATE");
 		const tx: Transaction = {
 			get: async <V>(key: string) => this.#get<V>(key),
@@ -116,7 +117,7 @@ export class ContextRegistry {
 			if (current !== undefined) return current;
 			const record: ContextRecord = {
 				alias: "main", node_id: this.nodeId, main_agent_id: this.mainAgentId, agent_id: this.mainAgentId,
-				summary: "Main OMP session", state: "idle", created_at: new Date().toISOString(),
+				summary: t("mainSummary"), state: "idle", created_at: new Date().toISOString(),
 			};
 			await tx.put(key, record);
 			return record;
@@ -151,7 +152,7 @@ export class ContextRegistry {
 		return this.storage.transaction(async tx => {
 			const key = `${CONTEXT_PREFIX}${alias}`;
 			const current = await tx.get<ContextRecord>(key);
-			if (current === undefined) throw new Error(`No execution context is registered as ${alias}.`);
+			if (current === undefined) throw new Error(t("contextNotRegistered", { alias }));
 			const next: ContextRecord = {
 				...current,
 				agent_id: binding.agent_id,

@@ -8,6 +8,7 @@ import type { ContextRecord } from "./types.ts";
 import { AWAIT_CONSUMED, pendingAwaitResults } from "./tool.ts";
 import { applyMessageTodo, type TodoPlanner } from "./todo.ts";
 import { getRuntime } from "./runtime.ts";
+import { bridgeText as t } from "./bridge-text.ts";
 
 export const INBOUND = "onlyne.inbound";
 export const ROUTING = "onlyne.routing";
@@ -90,7 +91,7 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				throw attempt.failure;
 			}
 			const decision = attempt.decision;
-			if (decision === undefined) throw new OnlyneError("decision_unavailable", "The inbound entry has no decision.");
+			if (decision === undefined) throw new OnlyneError("decision_unavailable", t("noDecision"));
 			if (decision.action === "new_subagent") {
 				attempt.landed ??= await startSubagent(deps, entry);
 				// A spawn is a submission, not a read: the child's prompt carries the token and its
@@ -105,12 +106,12 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 			}
 			if (decision.action === "context") {
 				const alias = decision.context;
-				if (alias === undefined) throw new OnlyneError("decision_unavailable", "The inbound decision named no context.");
+				if (alias === undefined) throw new OnlyneError("decision_unavailable", t("noContextNamed"));
 				const record = await deps.contexts.find(alias);
 				if (record?.agent_id === undefined || record.state === "lost" || record.state === "unbound") {
 					// The binding went away between the decision and the delivery: the entry stays
 					// owed, and an explicit new decision is the only way to land it (RFC 0005 §1).
-					throw new OnlyneError("context_lost", `${alias} is no longer bound; it needs an explicit new decision`, { context: alias });
+					throw new OnlyneError("context_lost", t("contextLost", { alias }), { context: alias });
 				}
 				const token = registerPending(entry, record.agent_id, "fragment");
 				try {
@@ -228,7 +229,7 @@ async function deliverToContext(agentId: string, payload: MessagePayload, runnin
 	// Never revive a session for an inbound delivery: a disposed subagent accepts the message
 	// where nobody reads it, and the library records the injection as delivered.
 	const session = AgentRegistry.global().get(agentId)?.session ?? undefined;
-	if (session === undefined) throw new OnlyneError("not_found", `The execution context ${agentId} has no live session; it must be bound again before it can receive messages.`);
+	if (session === undefined) throw new OnlyneError("not_found", t("noLiveSession", { context: agentId }));
 	await session.sendCustomMessage(payload, running ? { deliverAs: "steer" } : { triggerTurn: true });
 }
 /**
@@ -243,11 +244,15 @@ async function startSubagent(deps: BridgeDeps, entry: Entry): Promise<string> {
 	const existing = await findContextBySource(deps.contexts, entry);
 	if (existing?.agent_id !== undefined) return existing.agent_id;
 	const tool = taskTool(deps.main);
-	if (!tool) throw new OnlyneError("unsupported_delivery", "This OMP session has no native task tool.");
+	if (!tool) throw new OnlyneError("unsupported_delivery", t("noTaskTool"));
 	// Both references the child can actually use: the message id for `{sender,id}` replies and
 	// the thread/seq pair for reads. A bare `thread/seq` string fits neither (cyanea report 1).
 	const source = `${entry.thread_ref.owner}/${entry.thread_ref.id}/${entry.seq}`;
-	const references = `message ${entry.message.id}, thread ${entry.thread_ref.owner}/${entry.thread_ref.id} seq ${entry.seq}`;
+	const references = t("deliveryReferences", {
+		message: entry.message.id,
+		thread: `${entry.thread_ref.owner}/${entry.thread_ref.id}`,
+		seq: entry.seq,
+	});
 	const record = existing ?? await deps.contexts.allocate(entry.thread_ref, `onlyne ${source}`, entry.message);
 	const name = `onlyne-${record.alias}`;
 	const token = `onlyne-${crypto.randomUUID()}`;
@@ -256,20 +261,24 @@ async function startSubagent(deps: BridgeDeps, entry: Entry): Promise<string> {
 		// does work, because a session told to "handle" a delivery with no send right reads the
 		// refusal as its own failure (dpdp report 4).
 		task: [
-			`Read this onlyne delivery from ${entry.authenticated_author} (${references}).`,
-			`This session cannot send a message. When you have an answer, call the msg tool once to draft it and report the draft id back:`,
-			`msg({ delivery_kind: "draft the reply", msg: <your reply body>, meta: { op: "draft", to: ${JSON.stringify(entry.reply_authority)}, relation: "reply", in_reply_to: { sender: ${JSON.stringify(entry.message.sender)}, id: ${JSON.stringify(entry.message.id)} } } })`,
-			`That call stores a draft and sends nothing; the main session sends it. Do not retry a refused send and do not poll for the outcome.`,
+			t("subagentPreamble", { author: entry.authenticated_author, references }),
+			t("subagentCannotSend"),
+			t("subagentDraftCall", {
+				to: JSON.stringify(entry.reply_authority),
+				sender: JSON.stringify(entry.message.sender),
+				id: JSON.stringify(entry.message.id),
+			}),
+			t("subagentNoRetry"),
 			`[[${token}]]`,
 			"",
 			entry.message.msg,
 		].join("\n"),
-		solutionSpace: "The delivery decides the work; use the message as the task.",
+		solutionSpace: t("subagentSolutionSpace"),
 		name,
 	});
 	const details = result.details as unknown as { progress?: Array<{ id?: string; index?: number }>; results?: Array<{ id?: string; index?: number }> } | undefined;
 	const child = [...(details?.progress ?? []), ...(details?.results ?? [])].find(item => typeof item.id === "string" && item.id.length > 0)?.id;
-	if (child === undefined) throw new OnlyneError("unavailable", "The native task tool returned no child identity.");
+	if (child === undefined) throw new OnlyneError("unavailable", t("noChildIdentity"));
 	const parentId = AgentRegistry.global().get(child)?.parentId;
 	await deps.contexts.bind(record.alias, { agent_id: child, ...(parentId === undefined ? {} : { parent_id: parentId }) });
 	// The token is already in the child's prompt, so it can only be registered once the child's
@@ -312,7 +321,7 @@ export function registerMessageRenderers(pi: ExtensionAPI): void {
 	for (const type of [INBOUND, ROUTING, SUPPLEMENT]) pi.registerMessageRenderer(type, renderMailMessage);
 }
 function renderEntry(entry: Entry, customType: string): string {
-	const label = customType === SUPPLEMENT ? "supplement" : "inbound";
+	const label = customType === SUPPLEMENT ? t("labelSupplement") : t("labelInbound");
 	const relation = entry.message.meta?.relation === undefined ? "" : ` · ${entry.message.meta.relation}`;
 	return `${entry.thread_ref.id}/${entry.seq} · ${label} · ${entry.authenticated_author}${relation}\n${entry.message.msg.split(/\r?\n/).map(line => `  > ${line}`).join("\n")}`;
 }
