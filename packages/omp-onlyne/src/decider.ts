@@ -1731,7 +1731,8 @@ function pageSize(meta: Record<string, Json>): number | undefined {
 
 function attention(meta: Record<string, Json>): "inbox" | "thread" {
 	const value = meta.attention;
-	if (value === undefined) return "thread";
+	// RFC 0005 §1: reads default to the attention list; `thread` is the switch that widens one.
+	if (value === undefined) return "inbox";
 	if (value === "inbox" || value === "thread") return value;
 	throw new OnlyneError("invalid_request", text("error.attention"));
 }

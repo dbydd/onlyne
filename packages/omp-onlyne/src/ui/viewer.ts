@@ -17,6 +17,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { normalizeServiceUrl, shortNodeId } from "../config.ts";
 import { getRuntime } from "../runtime.ts";
+import { runDecision } from "../decider.ts";
 import type { OnlyneStatus, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "../types.ts";
 import { ageText, clockText, fit, oneLine, shortAlias, sinceText } from "./format.ts";
 import { type ViewerTextKey, t } from "./viewer-text.ts";
@@ -1282,7 +1283,11 @@ export class OnlyneViewer implements Component {
 		this.sending = true;
 		this.changed();
 		try {
-			const outcome = (await runtime.node.client.msg(input, { context: runtime.mainAgentId })) as SendOutcome;
+			// The library decides every send through the plugin, and the plugin only decides inside
+			// a bound scope: without one the composer reported a send failure (audit §2.3). The
+			// panel is the main session's input, so it carries the main session's scope.
+			const outcome = (await runDecision({ ctx: runtime.main, input }, () =>
+				runtime.node.client.msg(input, { context: runtime.mainAgentId }))) as SendOutcome;
 			this.setNotice(this.describeOutcome(outcome), outcome.admission === "refused" || outcome.error !== undefined);
 			if (outcome.admission === "accepted" || outcome.admission === "unknown") {
 				this.draft = "";

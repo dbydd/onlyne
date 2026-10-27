@@ -104,6 +104,13 @@ describe("explicit actions", () => {
 
 	test("read scope routes without a semantic shortcut", async () => {
 		expect(await decider().decide(scope({ scope: "directory" }))).toEqual({ kind: "read", scope: "directory" });
+		// RFC 0005 §1: a read that names no attention mode reads the attention list.
+		expect(await decider().decide(scope({ scope: "messages", thread: "research" }))).toEqual({
+			kind: "read",
+			scope: "messages",
+			thread: thread.thread_ref,
+			attention: "inbox",
+		});
 		expect(await decider().decide(scope({ scope: "message", thread: "research", seq: "1" }))).toEqual({
 			kind: "read",
 			scope: "message",
