@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import type { OnlyneConfig } from "./types.ts";
 import type { Locale } from "@onlyne/node-host/i18n";
 import { hostText as t } from "./host-text.ts";
+import { DEFAULT_ACQUISITION, parseAllowBlock, type AcquirePolicy, type AcquisitionPolicy } from "./acquire.ts";
 
 const CONFIG_RELATIVE_PATH = join(".onlyne", "config.toml");
 const REGION_PREFIX = "urn:onlyne:region:";
@@ -138,6 +139,9 @@ export function parseConfig(text: string, path: string): OnlyneConfig {
 	const publicUrl = optionalString(server, "public_url", "server.public_url");
 	const seeds = discovery === undefined ? undefined : stringArray(discovery, "seeds", "discovery.seeds");
 	const trust = trustSeeds(raw, path);
+	const acquisition = raw.acquisition === undefined ? undefined : table(raw, "acquisition", path);
+	const acquirePolicy = acquisition === undefined ? undefined : optionalString(acquisition, "policy", "acquisition.policy");
+	const acquireAllow = acquisition === undefined ? undefined : stringArray(acquisition, "allow", "acquisition.allow");
 	const bind = optionalString(server, "bind", "server.bind");
 	const pageSize = optionalInteger(threads, "page_size", "threads.page_size");
 	return validateConfig({
@@ -147,6 +151,7 @@ export function parseConfig(text: string, path: string): OnlyneConfig {
 		node: { id: id ?? "", ...(keyRef === undefined ? {} : { key_ref: keyRef }), ...(keyScope === undefined ? {} : { key_scope: keyScope as "project" | "global" | "none" }) },
 		server: { bind: bind ?? DEFAULT_BIND, ...(publicUrl === undefined ? {} : { public_url: publicUrl }) },
 		threads: { page_size: pageSize ?? DEFAULT_PAGE_SIZE },
+		acquisition: { policy: acquirePolicyOf(acquirePolicy), allow: acquireAllow ?? [...DEFAULT_ACQUISITION.allow] },
 		...(seeds === undefined && trust === undefined ? {} : { discovery: { ...(seeds === undefined ? {} : { seeds }), ...(trust === undefined ? {} : { trust }) } }),
 		...(trust === undefined ? {} : { trust }),
 	});
@@ -172,6 +177,9 @@ export function serializeConfig(config: OnlyneConfig): string {
 		"[threads]",
 		`page_size = ${String(config.threads.page_size)}`,
 	);
+	const acquisition = config.acquisition ?? DEFAULT_ACQUISITION;
+	lines.push("", "[acquisition]", `policy = ${tomlString(acquisition.policy)}`);
+	if (acquisition.allow.length > 0) lines.push(`allow = [${acquisition.allow.map(entry => tomlString(entry)).join(", ")}]`);
 	if (config.discovery?.seeds !== undefined || config.trust !== undefined) {
 		lines.push("", "[discovery]");
 		const seeds = config.discovery?.seeds ?? [];
@@ -207,6 +215,17 @@ function validateConfig(config: OnlyneConfig): OnlyneConfig {
 	if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
 		throw new ConfigError("invalid", t("pageSizeRange", { value: String(pageSize) }));
 	}
+	const policy = config.acquisition?.policy ?? DEFAULT_ACQUISITION.policy;
+	if (policy !== "all" && policy !== "segment" && policy !== "none") {
+		throw new ConfigError("invalid", t("acquirePolicy", { value: JSON.stringify(policy) }));
+	}
+	const acquisition: AcquisitionPolicy = {
+		policy,
+		allow: [...new Set((config.acquisition?.allow ?? DEFAULT_ACQUISITION.allow).map(entry => entry.trim()).filter(entry => entry.length > 0))],
+	};
+	for (const entry of acquisition.allow) {
+		if (parseAllowBlock(entry) === undefined) throw new ConfigError("invalid", t("acquireAllow", { value: JSON.stringify(entry) }));
+	}
 	return {
 		path: config.path,
 		...(config.language === undefined ? {} : { language: config.language }),
@@ -214,6 +233,7 @@ function validateConfig(config: OnlyneConfig): OnlyneConfig {
 		node: { id, ...(keyRef === undefined || keyRef.length === 0 ? {} : { key_ref: keyRef }), ...(keyScope === undefined ? {} : { key_scope: keyScope }) },
 		server: { bind, ...(publicUrl === undefined ? {} : { public_url: publicUrl }) },
 		threads: { page_size: pageSize },
+		acquisition,
 		...(seeds.length === 0 ? {} : { discovery: { seeds } }),
 		...(config.trust === undefined ? {} : { trust: config.trust }),
 	};
@@ -234,6 +254,13 @@ function rejectRetired(
 
 function rejectKey(source: Record<string, unknown>, key: string, message: string): void {
 	if (source[key] !== undefined) throw new ConfigError("invalid", message);
+}
+
+/** `acquisition.policy`: the documented default when absent; any other word is a configuration error. */
+function acquirePolicyOf(value: string | undefined): AcquirePolicy {
+	if (value === undefined) return DEFAULT_ACQUISITION.policy;
+	if (value === "all" || value === "segment" || value === "none") return value;
+	throw new ConfigError("invalid", t("acquirePolicy", { value: JSON.stringify(value) }));
 }
 
 function table(root: Record<string, unknown>, key: string, path: string): Record<string, unknown> {

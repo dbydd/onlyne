@@ -8,6 +8,7 @@ import type { ContextRecord } from "./types.ts";
 import { AWAIT_CONSUMED, pendingAwaitResults } from "./tool.ts";
 import { applyMessageTodo, type TodoPlanner } from "./todo.ts";
 import { getRuntime } from "./runtime.ts";
+import { handshakeFacts } from "./handshake.ts";
 import { bridgeText as t } from "./bridge-text.ts";
 
 export const INBOUND = "onlyne.inbound";
@@ -149,6 +150,12 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 		},
 		todo: async (entry, context) => {
 			inboundAttempts.delete(inboundKey(entry));
+			// RFC 0018 §3: a handshake status update is delivered for the record, not as work.
+			// Only an entry that owes a decision takes the todo decision path.
+			if (handshakeFacts(entry.message.meta)?.pending === false) {
+				refreshMailCards();
+				return;
+			}
 			const planner: TodoPlanner = {
 				decideTodo: (incoming, current) => deps.decider.decideTodo(deps.main, incoming, current),
 			};

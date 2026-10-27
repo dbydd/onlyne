@@ -51,6 +51,23 @@ const en = {
 	todoNoLinks: "Onlyne todo metadata on entry {entry} has no links array; the association cannot be replayed.",
 	todoUnknownRecordedAction: "Onlyne todo decision on entry {entry} has an unknown action.",
 	todoMissingString: "Onlyne todo metadata on entry {entry} has no string {field}.",
+
+	trustHeader: "Onlyne trust · {phase} · {node}",
+	trustFingerprint: "fingerprint: {fingerprint}",
+	trustDeclared: "declared address: {declared}",
+	trustObserved: "observed address: {observed}",
+	trustUnobserved: "not observed",
+	trustPolicy: "acquisition policy: {policy}",
+	trustJudgement: "judgement: {reason} · {conclusion}",
+	trustAllowed: "allowed",
+	trustRefused: "refused",
+	trustInvited: "This peer's approval waits for yours. Decide it explicitly:",
+	trustApproved: "The acquisition policy approved this peer before any human confirmed, and the approval is committed. No action is requested.",
+	trustRequested: "Local approval is committed; the exchange completes when the peer confirms. No action is requested unless this approval should be dropped:",
+	trustExchanged: "Both sides approved. This is a status update; no action is requested.",
+	trustRevoked: "Local approval was dropped. This is a status update; no action is requested.",
+	trustAcceptAction: 'accept: msg({ delivery_kind: "accept the trust handshake", msg: "accept {node}", meta: { op: "trust_accept", node_id: "{node}", fingerprint: "{fingerprint}" } })',
+	trustRevokeAction: 'revoke: msg({ delivery_kind: "revoke the trust handshake", msg: "revoke {node}", meta: { op: "trust_revoke", node_id: "{node}" } })',
 };
 
 const zh: Record<keyof typeof en, string> = {
@@ -104,6 +121,23 @@ const zh: Record<keyof typeof en, string> = {
 	todoNoLinks: "条目 {entry} 上的 onlyne todo 元数据没有 links 数组；无法重放该关联。",
 	todoUnknownRecordedAction: "条目 {entry} 上的 onlyne todo 决策含有未知动作。",
 	todoMissingString: "条目 {entry} 上的 onlyne todo 元数据缺少字符串字段 {field}。",
+
+	trustHeader: "Onlyne 信任 · {phase} · {node}",
+	trustFingerprint: "指纹：{fingerprint}",
+	trustDeclared: "声明地址：{declared}",
+	trustObserved: "观测地址：{observed}",
+	trustUnobserved: "未观测到",
+	trustPolicy: "获取策略：{policy}",
+	trustJudgement: "判定：{reason} · {conclusion}",
+	trustAllowed: "允许",
+	trustRefused: "拒绝",
+	trustInvited: "这个对端的批准在等你。请显式决定：",
+	trustApproved: "获取策略在任何人工确认之前批准了这个对端，批准已经提交。不索取任何动作。",
+	trustRequested: "本地批准已提交；对端确认后交换完成。除非要撤销这次批准，否则不索取动作：",
+	trustExchanged: "双方都已批准。这是状态更新，不索取任何动作。",
+	trustRevoked: "本地批准已撤销。这是状态更新，不索取任何动作。",
+	trustAcceptAction: '批准：msg({ delivery_kind: "批准信任握手", msg: "批准 {node}", meta: { op: "trust_accept", node_id: "{node}", fingerprint: "{fingerprint}" } })',
+	trustRevokeAction: '撤销：msg({ delivery_kind: "撤销信任握手", msg: "撤销 {node}", meta: { op: "trust_revoke", node_id: "{node}" } })',
 };
 
 export const bridgeText = createTranslator({ en, "zh-CN": zh });

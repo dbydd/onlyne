@@ -176,6 +176,7 @@ export class OnlyneBootstrap implements Component {
 			threads: { page_size: Number(this.value("pageSize")) },
 			...(seeds.length === 0 ? {} : { discovery: { seeds } }),
 			...(previous?.trust === undefined ? {} : { trust: previous.trust }),
+			...(previous?.acquisition === undefined ? {} : { acquisition: previous.acquisition }),
 			...(previous?.language === undefined ? {} : { language: previous.language }),
 		};
 		this.saving = true;

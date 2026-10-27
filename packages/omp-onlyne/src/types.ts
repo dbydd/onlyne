@@ -1,5 +1,6 @@
 import type { MessageRef, NodeId, ThreadRef, TrustPhase, TrustSeed } from "@onlyne/lib";
 import type { Locale } from "@onlyne/node-host/i18n";
+import type { AcquisitionPolicy } from "./acquire.ts";
 
 /**
  * Project-scoped configuration in `<project>/.onlyne/config.toml`.
@@ -32,6 +33,8 @@ export interface OnlyneConfig {
 	};
 	/** Pinned peer fingerprints; an arriving key that matches is trusted without a prompt. */
 	trust?: TrustSeed[];
+	/** RFC 0018 §2: peers this node may approve without a human confirming first. */
+	acquisition?: AcquisitionPolicy;
 }
 
 /** One execution context the plugin registered for a delivered message. */

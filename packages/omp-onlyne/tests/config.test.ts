@@ -60,6 +60,7 @@ describe("config", () => {
 			node: { id: "urn:onlyne:agent:lazuli", key_ref: "env:ONLYNE_NODE_TOKEN" },
 			server: { bind: "127.0.0.1" },
 			threads: { page_size: 50 },
+			acquisition: { policy: "segment", allow: ["127.0.0.0/8", "::1/128"] },
 		});
 	});
 
@@ -184,5 +185,22 @@ describe("config", () => {
 			"utf8",
 		);
 		expect((await loadConfig(cwd)).node.id).toBe("urn:onlyne:agent:hash#tag");
+	});
+
+	test("reads the acquisition table and writes it back", () => {
+		const text = `${SAMPLE}\n[acquisition]\npolicy = "none"\nallow = ["10.0.0.0/8", "::1/128"]\n`;
+		const parsed = parseConfig(text, PATH);
+		expect(parsed.acquisition).toEqual({ policy: "none", allow: ["10.0.0.0/8", "::1/128"] });
+		expect(parseConfig(serializeConfig(parsed), PATH).acquisition).toEqual(parsed.acquisition);
+	});
+
+	test("rejects an unknown policy and a malformed allow block", () => {
+		expect(() => parseConfig(`${SAMPLE}\n[acquisition]\npolicy = "sometimes"\n`, PATH)).toThrow(ConfigError);
+		expect(() => parseConfig(`${SAMPLE}\n[acquisition]\nallow = ["127.0.0.0"]\n`, PATH)).toThrow(ConfigError);
+		expect(() => parseConfig(`${SAMPLE}\n[acquisition]\nallow = ["127.0.0.0/33"]\n`, PATH)).toThrow(ConfigError);
+	});
+
+	test("still rejects peers as a retired key", () => {
+		expect(() => parseConfig(`${SAMPLE}\n[peers]\npolicy = "all"\n`, PATH)).toThrow(ConfigError);
 	});
 });

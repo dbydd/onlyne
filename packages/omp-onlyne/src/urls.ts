@@ -29,6 +29,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { resourceQuery } from "./resources.ts";
 import { getRuntime, type PluginRuntime } from "./runtime.ts";
+import { isTrustThread } from "./handshake.ts";
 import type { ContextRecord } from "./types.ts";
 import { urlsText } from "./urls-text.ts";
 
@@ -811,12 +812,14 @@ function conversationPermitted(conversation: Conversation, allowed: Set<string>,
 }
 
 async function localThreads(runtime: PluginRuntime): Promise<Thread[]> {
-	return collect(cursor =>
+	// RFC 0018 §3.2: the handshake thread is this host's own record, not a conversation.
+	const threads = await collect(cursor =>
 		runtime.node.threads.list(runtime.node.auth, {
 			page_size: PAGE,
 			...(cursor === undefined ? {} : { cursor }),
 		}),
 	);
+	return threads.filter(thread => !isTrustThread(runtime.config.node.id, thread.thread_ref));
 }
 
 async function allMessages(runtime: PluginRuntime, ref: Thread["thread_ref"]): Promise<Entry[]> {

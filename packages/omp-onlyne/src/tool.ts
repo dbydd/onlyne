@@ -1,6 +1,6 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type ExtensionAPI, type ExtensionContext, type SessionEntry, z } from "@oh-my-pi/pi-coding-agent";
-import type { Json, MsgInput, SendOutcome } from "@onlyne/lib";
+import { OnlyneError, trustPhase, type Json, type MsgInput, type SendOutcome } from "@onlyne/lib";
 import { runDecision } from "./decider.ts";
 import { createDraft, sendDraft } from "./drafts.ts";
 import { observeToolResult } from "./messages.ts";
@@ -56,6 +56,22 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 					// createDraft is typed unknown but always returns the draft record it just stored.
 					const draft = result as { draft_id: string };
 					return { content: [{ type: "text", text: toolText("draft.ready", { draft_id: draft.draft_id }) }], details: { result } };
+				}
+				// RFC 0018 §3.1: a trust action is mechanical — no judging, and no action kind
+				// invented for it, because the library executes exactly five and a trust action is
+				// not one of them (client.ts admits send, read, thread, resource and domain).
+				if (op === "trust_accept" || op === "trust_revoke") {
+					if (ctx.agent.kind === "sub") throw new OnlyneError("forbidden", toolText("failure.trust_main_only"));
+					const node = trustField(parsed.data.meta, "node_id");
+					if (op === "trust_revoke") {
+						await runtime.acquireRevoke(node);
+						return { content: [{ type: "text", text: toolText("trust.revoked", { node }) }], details: { result: { op, node_id: node } } };
+					}
+					const entry = await runtime.acquireAccept(node, trustField(parsed.data.meta, "fingerprint"));
+					return {
+						content: [{ type: "text", text: toolText("trust.accepted", { node, fingerprint: entry.fingerprint, phase: trustPhase(entry) }) }],
+						details: { result: entry },
+					};
 				}
 				if (typeof parsed.data.meta?.draft_id === "string") {
 					const result = await sendDraft(runtime, ctx, parsed.data.meta.draft_id, signal);
@@ -233,4 +249,14 @@ function failure(text: string): AgentToolResult<{ result: unknown }> {
 		details: { result: undefined },
 		isError: true,
 	};
+}
+
+/**
+ * RFC 0018 §3.1: a trust op names its peer mechanically. The fields are read before any
+ * judgement or storage write, so a malformed call is a caller error, never a policy answer.
+ */
+function trustField(meta: Record<string, unknown> | undefined, field: string): string {
+	const value = meta?.[field];
+	if (typeof value !== "string" || value.length === 0) throw new OnlyneError("invalid_request", toolText("failure.trust_fields", { field }));
+	return value;
 }

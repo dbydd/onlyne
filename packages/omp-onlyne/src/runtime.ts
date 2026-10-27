@@ -1,9 +1,12 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, join } from "node:path";
-import { OnlyneError, trustPhase, type DiscoveryCandidate, type DiscoveryRecord, type KeyExchange, type KeyHook, type MaintenanceClock, type NotifyEvent, type OnlyneNode, type Outbound, type Page } from "@onlyne/lib";
+import { OnlyneError, trustPhase, type DiscoveryCandidate, type DiscoveryRecord, type KeyExchange, type KeyHook, type MaintenanceClock, type NotifyEvent, type OnlyneNode, type Outbound, type Page, type TrustEntry } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { ensureKeyDir } from "@onlyne/node-host/keys";
 import { NetworkDiscovery } from "@onlyne/node-host/network";
 import { resolveLocale, setLocale } from "@onlyne/node-host/i18n";
+import { acquisitionOf } from "./acquire.ts";
+import { AcquisitionLog, approvePeer, handshakeEntry, isTrustThread, judgeApproval, judgementFacts, revokePeer, trustThread, TRUST_THREAD, type ApprovalDeps, type ApprovalJudgement } from "./handshake.ts";
 import { commandText as t } from "./ui/command-text.ts";
 import { registerMsgTool } from "./tool.ts";
 import { currentDecision, JudgeDecider } from "./decider.ts";
@@ -13,6 +16,9 @@ import { advertisedHost, createOnlyneNode } from "./node.ts";
 import { canAnswer, ContextRegistry, SqliteStorage } from "./store.ts";
 import { resourceQuery } from "./resources.ts";
 import type { OnlyneConfig, OnlyneStatus, QueueItem, ViewerContact, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "./types.ts";
+
+/** The trust transition of RFC 0017 §5, as the host receives it. */
+type TrustNotify = Extract<NotifyEvent, { event: "trust" }>;
 
 export interface PluginRuntime {
 	readonly config: OnlyneConfig;
@@ -32,9 +38,14 @@ export interface PluginRuntime {
 	contact(endpoint: string): Promise<void>;
 	/** Stage one of one exchange; the returned session carries the fingerprint the peer proved. */
 	trustBegin(node: string): Promise<KeyExchange>;
+	/** A human's confirmation in the panel: RFC 0018 §2 keeps that gate outside the policy. */
 	trustAccept(node: string, fingerprint: string): Promise<void>;
 	trustRevoke(node: string): Promise<void>;
 	trustRotate(): Promise<{ fingerprint: string }>;
+	/** RFC 0018 §2/§3.1: an agent's approval, judged against the acquisition policy first. */
+	acquireAccept(node: string, fingerprint: string): Promise<TrustEntry>;
+	/** RFC 0018 §2/§3.1: an agent's revocation. The policy never applies to dropping a peer. */
+	acquireRevoke(node: string): Promise<void>;
 	refreshDiscovery(): Promise<void>;
 	updateConfig(next: OnlyneConfig): Promise<void>;
 	close(): Promise<void>;
@@ -66,6 +77,14 @@ export async function stopRuntime(): Promise<void> { await active?.close(); }
 /** How often the discovery catalog is re-observed; well inside the library's 120 s freshness window. */
 const DISCOVERY_REFRESH_MS = 30_000;
 
+/** The alias the context registry gives this node's main session (`ContextRegistry.ensureMain`). */
+const MAIN_CONTEXT = "main";
+
+/** One mutation's identity for the library: a fresh key and a window that outlives this call. */
+function mutation(): { idempotency_key: string; retry_until: string } {
+	return { idempotency_key: crypto.randomUUID(), retry_until: new Date(Date.now() + 60_000).toISOString() };
+}
+
 class OmpRuntime implements PluginRuntime {
 	readonly contexts: ContextRegistry;
 	readonly storage: SqliteStorage;
@@ -73,6 +92,11 @@ class OmpRuntime implements PluginRuntime {
 	node!: OnlyneNode;
 	decider!: JudgeDecider;
 	endpoint = "";
+	/** RFC 0018 §2.1: where the connection being served came from, for the library's own call into `notify`. */
+	private readonly connection = new AsyncLocalStorage<string | undefined>();
+	private readonly log: AcquisitionLog;
+	/** The host side of one approval, built once with the node in `start`. */
+	private peers!: ApprovalDeps;
 	private server?: ReturnType<typeof Bun.serve>;
 	private keyDir?: string;
 	private network?: NetworkDiscovery;
@@ -88,10 +112,17 @@ class OmpRuntime implements PluginRuntime {
 		this.mainAgentId = main.agent.id;
 		this.storage = new SqliteStorage(join(dirname(config.path), "omp.db"));
 		this.contexts = new ContextRegistry(this.storage, config.node.id, main.agent.id);
+		this.log = new AcquisitionLog(this.storage);
 	}
 	async start(): Promise<void> {
 		let handler: (request: Request) => Promise<Response> = async () => new Response(t("initializing"), { status: 503 });
-		this.server = Bun.serve({ hostname: this.config.server.bind, port: 0, fetch: request => handler(request) });
+		// RFC 0018 §2.1: the address a peer statement arrived from is known only here. The
+		// library calls `notify` synchronously from inside the request it is serving, so the
+		// connection's own store is still in scope when the trust event is handled.
+		this.server = Bun.serve({
+			hostname: this.config.server.bind, port: 0,
+			fetch: (request, server) => this.connection.run(server.requestIP(request)?.address, () => handler(request)),
+		});
 		const host = advertisedHost(this.config.server.bind);
 		this.endpoint = `http://${host.includes(":") ? `[${host}]` : host}:${this.server.port}/onlyne/v3`;
 		const instanceId = crypto.randomUUID();
@@ -117,7 +148,10 @@ class OmpRuntime implements PluginRuntime {
 							.map(record => ({ alias: record.alias, summary: record.summary, state: record.state }))),
 					]
 				: transport!.request(id, "GET", "/contexts", undefined, this.controller.signal),
-			listThreads: () => allPages(cursor => this.node.threads.list(this.node.auth, { page_size: 100, cursor })),
+			// RFC 0018 §3.2: the handshake thread is this host's own record, never a candidate
+			// for a conversation the agent routes or reads by name.
+			listThreads: async () => (await allPages(cursor => this.node.threads.list(this.node.auth, { page_size: 100, cursor })))
+				.filter(thread => !isTrustThread(this.config.node.id, thread.thread_ref)),
 			listMessages: (thread, cursor) => this.node.messages.list(this.node.auth, thread, { attention: "thread", page_size: 100, cursor }),
 		});
 		const bridge = createRuntimeBridge({ pi: this.pi, main: this.main, decider: this.decider, contexts: this.contexts, nodeId: this.config.node.id });
@@ -145,9 +179,19 @@ class OmpRuntime implements PluginRuntime {
 			},
 		});
 		transport = this.node.transport;
+		this.peers = {
+			policy: acquisitionOf(this.config),
+			log: this.log,
+			observed: async (nodeId, fingerprint) => (await this.log.observation(nodeId, fingerprint))?.observed,
+			declared: async nodeId => (await this.node.trust.entry(nodeId))?.base_url,
+			recorded: nodeId => this.recorded(nodeId),
+			audit: judgement => this.pi.logger.info("onlyne.acquire.decided", judgementFacts(judgement)),
+			accept: (nodeId, fingerprint) => this.node.trust.accept(this.node.auth, nodeId, fingerprint),
+			revoke: nodeId => this.node.trust.revoke(this.node.auth, nodeId),
+			now: () => new Date().toISOString(),
+		};
 		const memberships = (await this.node.domains.list(this.node.auth)).items;
 		const current = memberships[0];
-		const mutation = () => ({ idempotency_key: crypto.randomUUID(), retry_until: new Date(Date.now() + 60_000).toISOString() });
 		if (current && current.domain_id !== this.config.region) await this.node.domains.leave(this.node.auth, current.domain_id, { ...mutation(), expected_revision: current.revision });
 		if (!current || current.domain_id !== this.config.region) {
 			let expected_revision: string | undefined;
@@ -191,11 +235,101 @@ class OmpRuntime implements PluginRuntime {
 			this.pi.logger.info(`onlyne.trust.${event.cause}`, {
 				node: event.entry.node_id, phase: event.phase, fingerprint: event.entry.fingerprint,
 			});
+			// RFC 0018 §2.1: the address this statement arrived from exists only inside the
+			// call the library is making right now, and nothing after it can recover it.
+			this.trustEvent(event, this.connection.getStore());
 		}
 		this.changed();
 	}
 	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
 	private changed(): void { for (const listener of this.listeners) listener(); }
+	/**
+	 * RFC 0018 §2/§3: one trust transition's host work — the observation its statement's
+	 * connection left, the judgement of an invitation this host may approve itself, and the
+	 * handshake entry the agent reads. Everything is reported by the library's own call, so it
+	 * runs beside it; a failure here is logged and is never a reason to doubt the committed row.
+	 */
+	private trustEvent(event: TrustNotify, observed: string | undefined): void {
+		void this.handleTrust(event, observed).catch(error => {
+			this.pi.logger.warn("onlyne.trust.handling_failed", { node: event.entry.node_id, phase: event.phase, error: errorText(error) });
+		});
+	}
+	private async handleTrust(event: TrustNotify, observed: string | undefined): Promise<void> {
+		const node = event.entry.node_id;
+		const fingerprint = event.entry.fingerprint;
+		// The address is recorded for every peer statement, before its verdict. Local
+		// transitions never replace it with the address of the approval call (which has none),
+		// so an approval decided later still reads the statement's original connection.
+		const at = new Date().toISOString();
+		if (event.cause === "peer-statement") {
+			await this.log.observe(node, fingerprint, {
+				...(observed === undefined ? {} : { observed }), at, cause: event.cause,
+			});
+		} else await this.log.transition(node, fingerprint, at, event.cause);
+		// §2.2: only an invitation whose statement covered a connection this host observed, and
+		// whose declared and recorded addresses all stay inside the allow set, is committed
+		// without a human deciding first.
+		const judgement = event.phase === "invited" && event.cause === "peer-statement"
+			? await judgeApproval(this.peers, { node_id: node, fingerprint, observed })
+			: undefined;
+		if (judgement?.verdict.allowed === true) this.approveDeferred(node, fingerprint);
+		await this.deliverHandshake(event, observed, judgement);
+	}
+	/**
+	 * RFC 0018 §2: the approval an invitation earned is committed outside the library's call,
+	 * so the admission that notified this host is never re-entered.
+	 */
+	private approveDeferred(node: string, fingerprint: string): void {
+		queueMicrotask(() => {
+			void this.peers.accept(node, fingerprint)
+				.catch(error => this.pi.logger.warn("onlyne.acquire.approve_failed", { node, error: errorText(error) }));
+		});
+	}
+	/**
+	 * RFC 0018 §3: one handshake entry per `(node, fingerprint, phase)`, written into this
+	 * node's own thread under a plan bound to the main session. The thread has this node as its
+	 * only member, so the entry never leaves the node.
+	 */
+	private async deliverHandshake(event: TrustNotify, observed: string | undefined, judgement: ApprovalJudgement | undefined): Promise<void> {
+		const node = event.entry.node_id;
+		const fingerprint = event.entry.fingerprint;
+		if (await this.log.delivered(node, fingerprint, event.phase)) return;
+		const handshake = handshakeEntry({
+			node_id: node, fingerprint, phase: event.phase, declared: event.entry.base_url, observed,
+			policy: this.peers.policy, judgement, approved: judgement?.verdict.allowed === true,
+		});
+		await this.ensureTrustThread();
+		const outcome = await this.node.client.send(this.config.node.id, {
+			id: crypto.randomUUID(),
+			sender: this.config.node.id,
+			delivery_kind: "trust",
+			msg: handshake.msg,
+			// The mention is what puts the entry in this node's own inbox: the delivery plan
+			// names the main context, and the bridge reads the facts for its todo hook.
+			meta: { thread: trustThread(this.config.node.id), mentions: [this.config.node.id], data: { trust: handshake.trust } },
+		}, { response: "none", execution: "existing", context: MAIN_CONTEXT });
+		if (outcome.admission !== "accepted") {
+			this.pi.logger.warn("onlyne.trust.delivery_failed", { node, phase: event.phase, error: outcome.error?.message });
+			return;
+		}
+		await this.log.markDelivered(node, fingerprint, event.phase, new Date().toISOString());
+	}
+	/** RFC 0018 §3.2: the handshake thread, created on first use. Its id is fixed, so it is one thread for the node's lifetime. */
+	private async ensureTrustThread(): Promise<void> {
+		const ref = trustThread(this.config.node.id);
+		try {
+			await this.node.threads.describe(this.node.auth, ref);
+			return;
+		} catch (error) {
+			if (!(error instanceof OnlyneError && error.error.code === "not_found")) throw error;
+		}
+		await this.node.threads.create(this.node.auth, { title: TRUST_THREAD, id: ref.id, ...mutation() });
+	}
+	/** RFC 0018 §2.2: every address discovery holds for this node is an outbound candidate the policy must allow. */
+	private async recorded(node: string): Promise<string[]> {
+		const records = await this.node.discovery.listRecords();
+		return [...new Set(records.filter(record => record.node_id === node).map(record => record.base_url))];
+	}
 	/**
 	 * A user-typed address. It is normalized once, read for its own identity and everything it
 	 * declares, and only a successful read becomes a seed. The node keeps running: a seed is a
@@ -252,6 +386,14 @@ class OmpRuntime implements PluginRuntime {
 	async trustRevoke(node: string): Promise<void> {
 		await this.node.trust.revoke(this.node.auth, node);
 	}
+	/** RFC 0018 §2/§3.1: the agent's approval, refused with `policy_denied` when the policy does not allow it. */
+	async acquireAccept(node: string, fingerprint: string): Promise<TrustEntry> {
+		return approvePeer(this.peers, node, fingerprint);
+	}
+	/** RFC 0018 §2/§3.1: the agent's revocation, which no policy judges. */
+	async acquireRevoke(node: string): Promise<void> {
+		await revokePeer(this.peers, node);
+	}
 	async trustRotate(): Promise<{ fingerprint: string }> {
 		const identity = await this.node.trust.rotate(this.node.auth);
 		return { fingerprint: identity.fingerprint };
@@ -307,6 +449,9 @@ class OmpRuntime implements PluginRuntime {
 		for (const thread of await allPages(cursor => this.node.threads.list(this.node.auth, { page_size: 100, cursor }))) {
 			const ref = thread.thread_ref;
 			hosted.add(`${ref.owner}/${ref.id}`);
+			// RFC 0018 §3.2: the handshake entries stay out of the conversation tree. The
+			// thread is still recorded above, so its own inbox rows are not re-rendered here.
+			if (isTrustThread(this.config.node.id, ref)) continue;
 			const entries = await allPages(cursor => this.node.messages.list(this.node.auth, ref, { attention: "thread", page_size: 100, cursor }));
 			views.push({ ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: thread.title, state: thread.state,
 				unread: inbox.filter(item => !item.injected && item.attention.thread_ref.owner === ref.owner && item.attention.thread_ref.id === ref.id).length,
