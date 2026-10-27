@@ -352,7 +352,7 @@ mod tests {
 
     fn message(id: &str, parent: Option<&str>) -> Message {
         let mut m = Message::root(id);
-        m.from = Some(Participant::new("u_1", Some("dbydd")));
+        m.from = Some(Participant::new("u_1", Some("operator")));
         m.text = Some(format!("body of {id}"));
         if let Some(parent) = parent {
             m = m.answering(parent);
@@ -363,7 +363,7 @@ mod tests {
     fn list() -> List {
         List {
             root: "7f3a9c2e".into(),
-            participants: vec![Participant::new("u_1", Some("dbydd"))],
+            participants: vec![Participant::new("u_1", Some("operator"))],
             messages: vec![
                 message("ROBOT1.0_AdAXNfwe", None),
                 message("0f3a9c2e1b04", Some("ROBOT1.0_AdAXNfwe")),
@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn a_participant_without_a_name_is_still_addressable_by_id() {
         assert_eq!(Participant::new("u_9", None::<String>).label(), "u_9");
-        assert_eq!(Participant::new("u_9", Some("dbydd")).label(), "dbydd");
+        assert_eq!(Participant::new("u_9", Some("operator")).label(), "operator");
     }
 
     #[test]

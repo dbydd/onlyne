@@ -105,7 +105,7 @@ author's own copy is the working record it keeps extending. This repository's ow
 
 # round4 — 1.4.0 换机验收现场（2026-09-23 23:20 起 CST）
 
-集群：真身 `/Users/dbydd/Library/CloudStorage/OneDrive-个人/new_document/Alexandria`
+集群：真身 `/Users/example/Library/CloudStorage/OneDrive-个人/new_document/Alexandria`
 新二进制：onlyne / onlyne-server / onlyne-client / onlyne-gateway / onlyne-tui 均 1.4.0（23:19）
 
 ## 换机动作与结果

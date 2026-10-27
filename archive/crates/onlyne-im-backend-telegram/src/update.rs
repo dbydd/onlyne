@@ -271,7 +271,7 @@ mod tests {
             "message": {
                 "message_id": 42,
                 "chat": {"id": -100},
-                "from": {"id": 7, "first_name": "dbydd"},
+                "from": {"id": 7, "first_name": "operator"},
                 "text": "and another thing",
                 "reply_to_message": {
                     "message_id": 41,

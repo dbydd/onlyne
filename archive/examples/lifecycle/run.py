@@ -6,7 +6,7 @@
 `onlyne-agent-fake`，以及一个扮演各集群常驻 agent 的 `resident` 进程。resident 不是
 模拟器：它按 adapter 协议逐帧和真实 client 的 workspace socket 对话（`crates/onlyne-adapter/PROTOCOL.md`）。
 
-复刻的形态与 `/Users/dbydd/vibe-agent-working-dir` 上的部署一一对应：
+复刻的形态与 `/Users/example/vibe-agent-working-dir` 上的部署一一对应：
 
   daily-workbench（中心，自选端口）
       _supervisor   逻辑签名位，不起 client
