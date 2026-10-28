@@ -353,6 +353,14 @@ export class ThreadService {
       await tx.put(key('known', ref.owner, ref.id), known);
       if (previous !== undefined && (previous.owner !== ref.owner || previous.id !== ref.id)) {
         await tx.delete(key('known', previous.owner, previous.id));
+        // The copied grant rows under the old owner are what the confirmation pass walks: left
+        // in place they keep confirming a notice the dead owner issued and keep the dead thread
+        // in this node's joined list. A re-issue replaces them, so drop every row that names it.
+        for (const row of await tx.scan<Grant>(key('grant') + '/')) {
+          if (row.value.thread_ref.owner === previous.owner && row.value.thread_ref.id === previous.id) {
+            await tx.delete(row.key);
+          }
+        }
       }
       if (stored !== undefined) return stored;
       const next: Grant = { id: grant.id, recipient: this.#ctx.node, thread_ref: ref, revision: grant.revision, acked: false };
