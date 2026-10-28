@@ -624,7 +624,14 @@ export function createHttpHandler({ ctx, threads, messages, resources, domains, 
       }
 
       if (path.length === 1 && path[0] === 'threads') {
-        if (request.method === 'GET') return respond(await threads.list(auth, pageOptions(params)));
+        if (request.method === 'GET') {
+          const joined = params.get('joined');
+          if (joined !== null) {
+            if (joined !== '1') fail('invalid_request', 'joined takes the value 1.');
+            return respond(await threads.joined(auth, pageOptions(params)));
+          }
+          return respond(await threads.list(auth, pageOptions(params)));
+        }
         if (request.method === 'POST') {
           const raw = shape(await json(request, limit, rawBody), 'body', ['idempotency_key', 'retry_until', 'title', 'id', 'default']);
           if (raw.default !== undefined && typeof raw.default !== 'boolean') fail('invalid_request', 'default must be a boolean.');

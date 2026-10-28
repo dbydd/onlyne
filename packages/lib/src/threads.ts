@@ -1,6 +1,6 @@
-import { admissionView, fail, key, page, requireValue, utc } from './core.ts';
+import { admissionView, decimal, fail, key, page, requireValue, utc } from './core.ts';
 import type { Context } from './core.ts';
-import type { Auth, Entry, Event, Grant, Json, Member, MessageRef, Mutation, Page, PageOptions, ReadScope, ReplyPermit, Thread, ThreadRef, Transaction } from './types.ts';
+import type { Attention, Auth, Entry, Event, Grant, JoinedThread, Json, LocalAttention, Member, MessageRef, Mutation, Outbound, Page, PageOptions, ReadScope, ReplyPermit, Thread, ThreadDescription, ThreadRef, Transaction } from './types.ts';
 
 /** One reserved default-thread id per owner: omitted targets land here, and the id is never reused. */
 export const DEFAULT_THREAD = 'thr-default';
@@ -181,7 +181,45 @@ export class ThreadService {
     });
   }
 
-  async describe(auth: Auth, ref: ThreadRef): Promise<{ thread: Thread; members: Member[] }> {
+  /**
+   * Participant view: the threads this node was invited into and does not own, derived only
+   * from the records it already holds — the known-owner rows and grant notices `acceptGrant`
+   * wrote, the attention and inbox rows that name a thread, and the receipts of messages it
+   * sent there. The title, the state and the member table belong to the owner, so they are
+   * absent here; a caller that can reach the owner fills them in. This listing never invents
+   * a member it could not read.
+   */
+  async joined(auth: Auth, options: PageOptions = {}): Promise<Page<JoinedThread>> {
+    if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
+    if (auth.actor !== this.#ctx.node) fail('forbidden', 'The joined-thread view belongs to this node.');
+    return this.#ctx.storage.transaction(async tx => {
+      const rows = new Map<string, { ref: ThreadRef; seq: string; messages: Set<string> }>();
+      const hold = (ref: ThreadRef, seq?: string, message?: MessageRef): void => {
+        // A thread this node owns is already in `list()`; this view is the other side of it.
+        if (ref.owner === this.#ctx.node) return;
+        const slot = key(ref.owner, ref.id);
+        const held = rows.get(slot) ?? { ref: { owner: ref.owner, id: ref.id }, seq: '0', messages: new Set<string>() };
+        rows.set(slot, held);
+        if (seq !== undefined && decimal(seq) > decimal(held.seq)) held.seq = seq;
+        if (message !== undefined) held.messages.add(key(message.sender, message.id));
+      };
+      for (const row of await tx.scan<Known>(key('known') + '/')) hold(row.value.thread_ref);
+      for (const row of await tx.scan<Grant>(key('grant') + '/')) hold(row.value.thread_ref);
+      for (const row of await tx.scan<Attention>(key('attention') + '/')) hold(row.value.thread_ref, row.value.seq, row.value.message_ref);
+      for (const row of await tx.scan<LocalAttention>(key('inbox') + '/')) hold(row.value.attention.thread_ref, row.value.attention.seq, row.value.attention.message_ref);
+      for (const row of await tx.scan<Outbound>(key('outbound') + '/')) {
+        const receipt = row.value.receipt;
+        if (receipt !== undefined) hold(receipt.thread_ref, receipt.seq, receipt.message_ref);
+      }
+      const items = sortedBy([...rows.values()], row => key(row.ref.owner, row.ref.id))
+        .map((row): JoinedThread => ({
+          thread_ref: row.ref, last_seq: row.seq, message_count: row.messages.size, read_only: true,
+        }));
+      return page(items, options, { kind: 'joined', owner: auth.actor }, item => key(item.thread_ref.owner, item.thread_ref.id));
+    });
+  }
+
+  async describe(auth: Auth, ref: ThreadRef): Promise<ThreadDescription> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
     return this.#ctx.storage.transaction(async tx => {
       const thread = await loadThread(tx, this.#ctx, ref);

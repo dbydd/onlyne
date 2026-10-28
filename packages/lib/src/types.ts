@@ -77,6 +77,28 @@ export interface Thread {
   event_seq: string; created_at: string; closed_at: string | null;
   messages_until?: string;
 }
+/**
+ * A thread this node was invited into and does not own. Every field here comes from a record
+ * this node already holds; the owner's title, state and member table are filled in only by a
+ * caller that could ask the owner, and a row that could not ask keeps the failure instead of
+ * inventing them.
+ */
+export interface JoinedThread {
+  thread_ref: ThreadRef;
+  /** The highest sequence this node holds a local record for; `0` when it holds none. */
+  last_seq: string;
+  /** Distinct messages this node holds for the thread. */
+  message_count: number;
+  /** A participant never owns the member table, so this view is read-only by construction. */
+  read_only: true;
+  title?: string;
+  state?: Thread['state'];
+  members?: Member[];
+  /** The owner could not be asked; the row stays listed with what the local records prove. */
+  unavailable?: Failure;
+}
+/** One thread record with its member table: what the describe read answers, here or at the owner. */
+export interface ThreadDescription { thread: Thread; members: Member[] }
 export interface Attention {
   obligation_id: string; recipient: NodeId; thread_ref: ThreadRef; seq: string;
   message_ref: MessageRef; authenticated_author: NodeId; acked: boolean;

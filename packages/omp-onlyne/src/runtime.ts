@@ -183,6 +183,8 @@ class OmpRuntime implements PluginRuntime {
 			// for a conversation the agent routes or reads by name.
 			listThreads: async () => (await allPages(cursor => this.node.threads.list(this.node.auth, { page_size: 100, cursor })))
 				.filter(thread => !isTrustThread(this.config.node.id, thread.thread_ref)),
+			listJoinedThreads: async () => (await allPages(cursor => this.node.threads.joined(this.node.auth, { page_size: 100, cursor })))
+				.filter(thread => !isTrustThread(this.config.node.id, thread.thread_ref)),
 			listMessages: (thread, cursor) => this.node.messages.list(this.node.auth, thread, { attention: "thread", page_size: 100, cursor }),
 			threadMembers: async thread => (await this.node.threads.describe(this.node.auth, thread)).members.map(member => member.peer),
 		});
@@ -522,11 +524,20 @@ class OmpRuntime implements PluginRuntime {
 		// sees the reply and not the question that started it.
 		const outbound = await this.storage.transaction(tx => tx.scan<Outbound>("outbound/"));
 		const seen = new Map<string, ViewerThread>();
+		// A grant can arrive before any message, and a thread this node was invited into is a row
+		// the viewer must show. The local joined listing supplies those rows; the owner is never
+		// asked here, so the viewer stays a read of this node's own records.
+		for (const row of await allPages(cursor => this.node.threads.joined(this.node.auth, { page_size: 100, cursor }))) {
+			const ref = row.thread_ref;
+			const key = `${ref.owner}/${ref.id}`;
+			if (hosted.has(key) || seen.has(key)) continue;
+			seen.set(key, { ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: t("thread", { node: shortNodeId(ref.owner) }), state: "open", unread: 0, last_seq: row.last_seq, messages: [], read_only: true });
+		}
 		for (const item of inbox) {
 			const ref = item.attention.thread_ref;
 			const key = `${ref.owner}/${ref.id}`;
 			if (hosted.has(key)) continue;
-			const view = seen.get(key) ?? { ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: t("thread", { node: shortNodeId(ref.owner) }), state: "open", unread: 0, last_seq: "0", messages: [] };
+			const view = seen.get(key) ?? { ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: t("thread", { node: shortNodeId(ref.owner) }), state: "open", unread: 0, last_seq: "0", messages: [], read_only: true };
 			seen.set(key, view);
 			if (!item.injected) view.unread++;
 			const entry = item.attention.entry;
@@ -541,7 +552,7 @@ class OmpRuntime implements PluginRuntime {
 			const ref = receipt.thread_ref;
 			const key = `${ref.owner}/${ref.id}`;
 			if (hosted.has(key)) continue;
-			const view = seen.get(key) ?? { ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: t("thread", { node: shortNodeId(ref.owner) }), state: "open", unread: 0, last_seq: "0", messages: [] };
+			const view = seen.get(key) ?? { ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: t("thread", { node: shortNodeId(ref.owner) }), state: "open", unread: 0, last_seq: "0", messages: [], read_only: true };
 			seen.set(key, view);
 			const message = row.value.request.message;
 			view.messages.push({ ref: { sender: message.sender, id: message.id }, seq: receipt.seq, direction: "out", author: message.sender, at: row.value.created_at ?? "", text: message.msg, relation: message.meta?.relation });

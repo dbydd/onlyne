@@ -338,7 +338,11 @@ export class OnlyneViewer implements Component {
 	private sendBlocked(): string | undefined {
 		if (this.error !== undefined) return this.error;
 		if (this.draft.trim() === "") return t("send.blocked.empty");
-		if (this.target === undefined && this.replyTo === undefined && this.selectedThread() === undefined) {
+		const thread = this.selectedThread();
+		// A joined thread is another node's: the viewer shows it and offers no write it cannot
+		// perform. A manual recipient starts a new message and is unaffected.
+		if (this.target === undefined && thread?.read_only === true) return t("send.blocked.readOnly");
+		if (this.target === undefined && this.replyTo === undefined && thread === undefined) {
 			return t("send.blocked.noTarget");
 		}
 		return undefined;
@@ -480,7 +484,11 @@ export class OnlyneViewer implements Component {
 				node(
 					"item",
 					{
-						label: [span(`# ${thread.title}`, open ? "strong" : undefined), ...(thread.state === "closed" ? [span(` ${t("thread.closed")}`, "dim")] : [])],
+						label: [
+							span(`# ${thread.title}`, open ? "strong" : undefined),
+							...(thread.state === "closed" ? [span(` ${t("thread.closed")}`, "dim")] : []),
+							...(thread.read_only === true ? [span(` ${t("thread.readOnly")}`, "dim")] : []),
+						],
 						// One number per row, always the same number: the unread count. A row that
 						// showed the message total once everything was read made two rows of equal
 						// width mean different things.
@@ -754,7 +762,11 @@ export class OnlyneViewer implements Component {
 				children.push(
 					node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
 						node("col", { gap: "none", grow: 1 }, [
-							textNode([span(`# ${thread.title}`, "strong"), ...(thread.state === "closed" ? [span(` · ${t("thread.closed")}`, "dim")] : [])], { truncate: "end" }),
+							textNode([
+								span(`# ${thread.title}`, "strong"),
+								...(thread.state === "closed" ? [span(` · ${t("thread.closed")}`, "dim")] : []),
+								...(thread.read_only === true ? [span(` · ${t("thread.readOnly")}`, "dim")] : []),
+							], { truncate: "end" }),
 							textNode([span(t("thread.meta", {
 								messages: messages.length,
 								speakers: new Set(messages.map(message => message.author)).size,

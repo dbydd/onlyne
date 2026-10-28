@@ -169,6 +169,24 @@ describe("onlyne:// threads", () => {
 		expect(page).toContain(`onlyne://threads/${x.aThreadId}/messages/1`);
 		expect(page).toContain(`→ reply to urn:onlyne:agent:a/${x.helloId}`);
 	});
+
+	test("a member lists the thread it was invited into, marked read-only", async () => {
+		const x = await exchange();
+		setRuntime(x.b);
+		const list = await readView("onlyne://threads");
+		expect(list).toContain("read-only");
+		expect(list).toContain(`urn:onlyne:agent:a/${x.aThreadId}`);
+	});
+
+	test("a member reads a joined thread by its id from the owner", async () => {
+		const x = await exchange();
+		setRuntime(x.b);
+		const page = await readView(`onlyne://threads/${x.aThreadId}`);
+		// The owner holds the thread: its state and members come from the describe read.
+		expect(page).toContain("Read-only");
+		expect(page).toContain("hello");
+		expect(page).toContain("urn:onlyne:agent:b");
+	});
 });
 
 describe("onlyne:// routes", () => {

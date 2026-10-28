@@ -24,6 +24,7 @@ const en = {
 
 	"send.blocked.empty": "Type a message first.",
 	"send.blocked.noTarget": "Open a thread first, or pick a recipient.",
+	"send.blocked.readOnly": "This thread is read-only here: its owner holds it, so send from a node that owns it.",
 
 	"rail.domain.title": "{label} · nodes {count}",
 	"rail.empty": "no domains",
@@ -36,6 +37,7 @@ const en = {
 	"sidebar.inbox": "✉ Inbox",
 	"sidebar.noKey": "no node key",
 	"thread.closed": "closed",
+	"thread.readOnly": "read-only",
 
 	"key.missing": "this node has no key",
 	"approvals.head": "{node} asks to exchange keys with you",
@@ -173,6 +175,7 @@ const zh: Record<ViewerTextKey, string> = {
 
 	"send.blocked.empty": "输入内容后发送",
 	"send.blocked.noTarget": "先打开线程，或选择收件人",
+	"send.blocked.readOnly": "这个线程在此只读：它由所有者托管，请从拥有它的节点发送。",
 
 	"rail.domain.title": "{label} · {count} 节点",
 	"rail.empty": "无域",
@@ -185,6 +188,7 @@ const zh: Record<ViewerTextKey, string> = {
 	"sidebar.inbox": "✉ 收件箱",
 	"sidebar.noKey": "无节点密钥",
 	"thread.closed": "已关闭",
+	"thread.readOnly": "只读",
 
 	"key.missing": "本节点没有密钥",
 	"approvals.head": "{node} 请求与你交换密钥",

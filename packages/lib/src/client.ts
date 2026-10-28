@@ -1,9 +1,9 @@
 import type { Context } from './core.ts';
-import { canonical, decimal, fail, key, requireValue, utc } from './core.ts';
+import { canonical, decimal, fail, key, page, requireValue, utc } from './core.ts';
 import type {
   Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Json, LocalAttention,
-  InjectOutcome, Member, Message, MessageQuery, MessageRef, MsgInput, Mutation, NodeId, Outbound, Page, PageOptions, SendRequest,
-  TraceEvent, Thread, ThreadRef, Transaction, Transport, MaintenanceClock, PreparedSend,
+  InjectOutcome, JoinedThread, Member, Message, MessageQuery, MessageRef, MsgInput, Mutation, NodeId, Outbound, Page, PageOptions, SendRequest,
+  TraceEvent, Thread, ThreadDescription, ThreadRef, Transaction, Transport, MaintenanceClock, PreparedSend,
   ResourceReadQuery, ResourceReadResult, ResourceInventory, Resource, AttentionSettlement,
 } from './types.ts';
 import type { MessageService } from './messages.ts';
@@ -1300,6 +1300,58 @@ export class OnlyneClient {
     return stored?.confirmed === true;
   }
 
+  /**
+   * The threads this node was invited into. The rows come from the records it already holds;
+   * each row is then asked of its owner through the same describe read the thread view uses,
+   * which is where the title, the state and the member table live. An owner that cannot be
+   * reached leaves the row in place with the failure attached: an unreachable peer is a
+   * reported outage, never a reason to hide a thread this node belongs to.
+   */
+  async joinedThreads(options: PageOptions = {}, signal?: AbortSignal): Promise<Page<JoinedThread>> {
+    const listed = await this.#threads.joined(this.#auth(), options);
+    const items: JoinedThread[] = [];
+    for (const row of listed.items) items.push(await this.#ownerFacts(row, signal));
+    return { ...listed, items };
+  }
+
+  async #ownerFacts(row: JoinedThread, signal?: AbortSignal): Promise<JoinedThread> {
+    try {
+      const described = await this.#remote<ThreadDescription>(
+        row.thread_ref.owner, 'GET',
+        `/threads/${encodeURIComponent(row.thread_ref.owner)}/${encodeURIComponent(row.thread_ref.id)}`,
+        undefined, signal, this.#ctx.options.wait_ms ?? 60_000);
+      return { ...row, title: described.thread.title, state: described.thread.state, members: described.members };
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return { ...row, unavailable: failureOf(error) };
+    }
+  }
+
+  /** One thread's record and members: local when this node hosts it, from the owner otherwise. */
+  async describeThread(ref: ThreadRef, signal?: AbortSignal): Promise<ThreadDescription> {
+    if (ref.owner === this.#ctx.options.node_id) return this.#threads.describe(this.#auth(), ref);
+    return this.#remote(
+      ref.owner, 'GET', `/threads/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`,
+      undefined, signal, this.#ctx.options.wait_ms ?? 60_000);
+  }
+
+  /**
+   * One page of a thread's entries, read locally when this node hosts the thread and from the
+   * owner otherwise. A member of a joined thread has no local copy of the entries, so the
+   * owner's message route is the only source that can answer for them.
+   */
+  async threadEntries(ref: ThreadRef, query: MessageQuery = {}, signal?: AbortSignal): Promise<Page<Entry>> {
+    if (ref.owner === this.#ctx.options.node_id) return this.#messages.list(this.#auth(), ref, query);
+    const search = new URLSearchParams();
+    for (const [name, value] of Object.entries(query)) {
+      if (value === undefined) continue;
+      search.set(name, typeof value === 'object' ? JSON.stringify(value) : String(value));
+    }
+    const path = `/threads/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}/messages`
+      + (search.size === 0 ? '' : `?${search}`);
+    return this.#remote(ref.owner, 'GET', path, undefined, signal, this.#ctx.options.wait_ms ?? 60_000);
+  }
+
   /** Every owner + thread this node knows, from accepted grant notices plus its own threads. */
   async #knownRefs(): Promise<ThreadRef[]> {
     const granted = await this.#ctx.storage.transaction(async tx =>
@@ -1460,7 +1512,7 @@ export class OnlyneClient {
           if (peers === undefined) fail('unsupported_delivery', 'No neighbor directory is available on this host.');
           return peers();
         }
-        case 'threads': return this.#threads.list(auth);
+        case 'threads': return this.#threadsView(action, options);
         case 'inbox':
           // A thread-scoped inbox is the owner's attention list for that thread, so the
           // owner that admitted the messages is asked, exactly like reconciliation does.
@@ -1483,7 +1535,7 @@ export class OnlyneClient {
           return this.#threads.create(auth, { ...mutation(), title: requireValue(action.title, 'invalid_request') });
         case 'close': return this.#threads.close(auth, requireValue(action.thread, 'invalid_request'), mutation());
         case 'list': return this.#threads.list(auth);
-        case 'describe': return this.#readThreadRef(requireValue(action.thread, 'invalid_request'), options);
+        case 'describe': return this.describeThread(requireValue(action.thread, 'invalid_request'), options.signal);
         case 'member_add':
           return this.#threads.member(auth, requireValue(action.thread, 'invalid_request'), requireValue(action.to, 'invalid_request'), {}, mutation());
         case 'member_remove':
@@ -1519,37 +1571,42 @@ export class OnlyneClient {
    */
   async #readThread(action: Extract<Action, { kind: 'read'; scope: 'directory' | 'neighbors' | 'threads' | 'inbox' | 'messages' | 'message' | 'evidence' }>, options: MsgOptions): Promise<unknown> {
     const ref = requireValue(action.thread, 'invalid_request');
-    if (ref.owner === this.#ctx.options.node_id) {
-      return this.#messages.list(this.#auth(), ref, {
-        attention: action.attention ?? 'thread',
-        ...(action.cursor === undefined ? {} : { cursor: action.cursor }),
-        ...(action.page_size === undefined ? {} : { page_size: action.page_size }),
-        ...(action.seq === undefined ? {} : { since_seq: action.seq }),
-        ...(action.message === undefined ? {} : { related_to: action.message }),
-      });
-    }
     const query: MessageQuery = {
+      attention: action.attention ?? 'thread',
       ...(action.cursor === undefined ? {} : { cursor: action.cursor }),
       ...(action.page_size === undefined ? {} : { page_size: action.page_size }),
       ...(action.seq === undefined ? {} : { since_seq: action.seq }),
       ...(action.message === undefined ? {} : { related_to: action.message }),
-      attention: action.attention ?? 'thread',
     };
-    const search = new URLSearchParams();
-    for (const [name, value] of Object.entries(query)) {
-      if (value === undefined) continue;
-      search.set(name, typeof value === 'object' ? JSON.stringify(value) : String(value));
-    }
-    const path = `/threads/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}/messages`
-      + (search.size === 0 ? '' : `?${search}`);
-    return this.#remote(ref.owner, 'GET', path, undefined, options.signal, this.#ctx.options.wait_ms ?? 60_000);
+    return this.threadEntries(ref, query, options.signal);
   }
 
-  async #readThreadRef(ref: ThreadRef, options: MsgOptions): Promise<unknown> {
-    if (ref.owner === this.#ctx.options.node_id) return this.#threads.describe(this.#auth(), ref);
-    return this.#remote(
-      ref.owner, 'GET', `/threads/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`,
-      undefined, options.signal, this.#ctx.options.wait_ms ?? 60_000);
+  /**
+   * The threads this node can see in one page: the ones it owns, plus the ones it was invited
+   * into. A joined row carries `read_only: true`; its owner's title, state and member table
+   * come from the describe read, and an unreachable owner leaves the failure on the row
+   * instead of dropping the thread from the list.
+   */
+  async #threadsView(action: PageOptions, options: MsgOptions): Promise<Page<Thread | JoinedThread>> {
+    const [owned, joined] = await Promise.all([
+      this.#allPages(cursor => this.#threads.list(this.#auth(), { page_size: 100, ...(cursor === undefined ? {} : { cursor }) })),
+      this.#allPages(cursor => this.joinedThreads({ page_size: 100, ...(cursor === undefined ? {} : { cursor }) }, options.signal)),
+    ]);
+    const position = (row: Thread | JoinedThread): string => key(row.thread_ref.owner, row.thread_ref.id);
+    const rows = [...owned, ...joined].sort((left, right) => {
+      const a = position(left);
+      const b = position(right);
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+    return page(
+      rows,
+      {
+        ...(action.cursor === undefined ? {} : { cursor: action.cursor }),
+        ...(action.page_size === undefined ? {} : { page_size: action.page_size }),
+      },
+      { kind: 'threads', actor: this.#ctx.options.node_id },
+      position,
+    );
   }
 
   /**

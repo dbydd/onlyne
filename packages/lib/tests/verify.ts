@@ -497,7 +497,83 @@ async function phaseNet(): Promise<void> {
 }
 
 // =============================================================================
-// 3. outbound recovery: a pending delivery re-driven after the peer comes back
+// 3. joined threads: a member lists and reads a thread another node hosts
+// =============================================================================
+/**
+ * A thread one node hosts and another was invited into. The member must be able to list it,
+ * read its owner-held facts and read its entries; a thread it was never invited into must
+ * stay absent, and an owner that cannot be reached must leave the row in place with the
+ * failure attached instead of hiding the thread.
+ */
+async function phaseJoined(): Promise<void> {
+  let ownerHandler: (request: Request) => Promise<Response> = async () => new Response('starting', { status: 503 });
+  const ownerServer = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: request => ownerHandler(request) });
+  servers.push(ownerServer);
+  urls[lazuliNode] = `http://127.0.0.1:${ownerServer.port}/onlyne/v3`;
+  const ownerRig = rig(lazuliNode, urls[lazuliNode]!, { mayAdmit: async () => true });
+  ownerHandler = request => ownerRig.node.fetch(request);
+  const memberRig = serve(dpdpNode, base_url => rig(dpdpNode, base_url, { mayAdmit: async () => true }));
+  const owner = ownerRig.node;
+  const member = memberRig.node;
+  const authOwner: Auth = { actor: lazuliNode };
+  const authMember: Auth = { actor: dpdpNode };
+
+  const thread = await owner.threads.create(authOwner, { ...mut(), title: 'joined review' });
+  const ref = thread.thread_ref;
+  await owner.threads.member(authOwner, ref, dpdpNode, { access: ['post', 'read'] }, mut());
+  for (const [id, msg] of [['join-01', '第一段。'], ['join-02', '第二段。']] as const) {
+    await owner.messages.admit(authOwner, {
+      idempotency_key: crypto.randomUUID(), retry_until: future(),
+      message: { id, sender: lazuliNode, delivery_kind: '进度', msg, meta: { thread: ref, mentions: ['@all'] } },
+      target_endpoint: lazuliNode, plan,
+    });
+  }
+  // The owner pushes its grant notice, then the member pulls both obligations.
+  await owner.client.maintain();
+  await member.client.reconcile();
+
+  const local = await member.threads.joined(authMember);
+  const row = local.items.find(item => item.thread_ref.id === ref.id);
+  check('joined.local_listing', row !== undefined && row.thread_ref.owner === lazuliNode
+    && row.last_seq === '2' && row.message_count === 2 && row.read_only === true
+    ? '' : `the member listed ${JSON.stringify(row)}`);
+
+  const described = await member.client.joinedThreads();
+  const withOwner = described.items.find(item => item.thread_ref.id === ref.id);
+  check('joined.owner_facts', withOwner?.title === 'joined review' && withOwner.state === 'open'
+    && withOwner.unavailable === undefined
+    && withOwner.members?.some(entry => entry.peer === dpdpNode && entry.state === 'active') === true
+    ? '' : `the owner did not answer the describe read: ${JSON.stringify(withOwner)}`);
+
+  // The member holds no copy of the entries, so reading them is the owner's answer.
+  const entries = await member.client.threadEntries(ref, { attention: 'thread' });
+  check('joined.messages', entries.items.length === 2 && entries.items[1]?.message.msg === '第二段。'
+    ? '' : `the member read ${entries.items.length} entries from the owner`);
+
+  // The HTTP view is the same listing, and only the node itself may read it.
+  const own = await fetch(`${urls[dpdpNode]}/threads?joined=1&page_size=10`, { headers: { 'x-onlyne-actor': dpdpNode } });
+  const listed = await own.json() as { items?: Array<{ thread_ref?: ThreadRef }> };
+  check('joined.http', own.status === 200 && listed.items?.some(item => item.thread_ref?.id === ref.id) === true
+    ? '' : `GET /threads?joined=1 answered ${own.status}`);
+  const foreign = await fetch(`${urls[dpdpNode]}/threads?joined=1`, { headers: { 'x-onlyne-actor': lazuliNode } });
+  check('joined.http.actor', foreign.status === 403
+    ? '' : `another actor read the joined view with ${foreign.status}`);
+
+  const uninvited = await owner.threads.create(authOwner, { ...mut(), title: 'owner only' });
+  const absent = await member.threads.joined(authMember);
+  check('joined.uninvited_absent', absent.items.some(item => item.thread_ref.id === uninvited.thread_ref.id) === false
+    ? '' : 'a thread the member was never invited into appeared in its joined listing');
+
+  // The owner goes away: the row must survive with the failure on it, not vanish.
+  ownerServer.stop(true);
+  const offline = await member.client.joinedThreads();
+  const marked = offline.items.find(item => item.thread_ref.id === ref.id);
+  check('joined.owner_unavailable', marked !== undefined && marked.unavailable?.code === 'unavailable' && marked.last_seq === '2'
+    ? '' : `an unreachable owner answered ${JSON.stringify(marked)}`);
+}
+
+// =============================================================================
+// 4. outbound recovery: a pending delivery re-driven after the peer comes back
 // =============================================================================
 async function phaseRecoverOutbound(): Promise<void> {
   // Nothing listens here until the peer comes back; the sender keeps a durable record meanwhile.
@@ -1692,6 +1768,7 @@ async function phaseMaintenance(): Promise<void> {
 try {
   await phaseLocal();
   await phaseNet();
+  await phaseJoined();
   await phaseRecoverOutbound();
   await phaseExpiry();
   await phaseResources();

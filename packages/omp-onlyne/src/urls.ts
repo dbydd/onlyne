@@ -5,6 +5,7 @@ import {
 	type Entry,
 	type HistoryMessage,
 	type HistoryQuery,
+	type JoinedThread,
 	type LocalAttention,
 	type MessageRef,
 	type OperationRecord,
@@ -15,6 +16,7 @@ import {
 	type ResourceInventory,
 	type ResourceRef,
 	type Thread,
+	type ThreadDescription,
 	type ThreadRef,
 	type TrustPhase,
 } from "@onlyne/lib";
@@ -80,10 +82,16 @@ const handler: ProtocolHandler = {
 			for (const thread of await visibleThreads(runtime, caller)) {
 				urls.push(threadPath(thread.thread_ref));
 			}
+			for (const row of await joinedThreads(runtime, caller)) {
+				urls.push(threadPath(row.thread_ref));
+			}
 			return leafDocuments(runtime, caller, urls);
 		}
 		if (view.host === "threads" && view.parts.length === 0) {
-			const urls = (await visibleThreads(runtime, caller)).map(thread => threadPath(thread.thread_ref));
+			const urls = [
+				...(await visibleThreads(runtime, caller)).map(thread => threadPath(thread.thread_ref)),
+				...(await joinedThreads(runtime, caller)).map(row => threadPath(row.thread_ref)),
+			];
 			return leafDocuments(runtime, caller, urls);
 		}
 		if (view.host === "threads") {
@@ -93,7 +101,7 @@ const handler: ProtocolHandler = {
 				const entry = await entryAt(runtime, thread, target.seq);
 				return [{ url: entryPath(thread.thread_ref, target.seq), content: `${JSON.stringify(entry, null, 2)}\n` }];
 			}
-			const entries = await allMessages(runtime, thread.thread_ref);
+			const entries = await threadEntries(runtime, thread.thread_ref);
 			return entries.map(entry => ({
 				url: entryPath(thread.thread_ref, entry.seq),
 				content: JSON.stringify(entry, null, 2),
@@ -234,6 +242,7 @@ async function renderRoot(runtime: PluginRuntime, caller: Caller): Promise<strin
 	}
 	const records = await scopedRecords(runtime, caller);
 	const threads = await visibleThreads(runtime, caller);
+	const joined = await joinedThreads(runtime, caller);
 	lines.push("", caller.main
 		? t("rootContexts", { count: records.length })
 		: t("rootContextsHeld", { agent: caller.agent_id ?? "", count: records.length }));
@@ -252,6 +261,16 @@ async function renderRoot(runtime: PluginRuntime, caller: Caller): Promise<strin
 		}));
 	}
 	if (threads.length === 0) lines.push(t("rootNoThreads"));
+	if (joined.length > 0) {
+		lines.push("", t("rootJoinedThreads", { count: joined.length }));
+		for (const row of joined) {
+			lines.push(t("rootThreadJoinedRow", {
+				title: row.title ?? t("joinedThreadTitle", { id: row.thread_ref.id, owner: row.thread_ref.owner }),
+				key: threadKey(row.thread_ref),
+				last: row.last_seq,
+			}));
+		}
+	}
 	lines.push(
 		"",
 		caller.main ? t("rootViewsResources") : t("rootViews"),
@@ -265,13 +284,30 @@ async function renderThreads(runtime: PluginRuntime, caller: Caller, view: View)
 	requireSession(caller, "threads");
 	if (view.parts.length === 0) {
 		const request = pageRequest(view);
-		const threads = (await visibleThreads(runtime, caller))
-			.slice()
-			.sort((left, right) => threadKey(left.thread_ref).localeCompare(threadKey(right.thread_ref)));
+		// One list of everything this node can read: a joined row is marked read-only and
+		// carries only what the local records prove, because its owner holds the rest. The
+		// merged order is the cursor's order, so it is sorted after the two sources join.
+		const threads: Array<Thread | JoinedThread> = [
+			...(await visibleThreads(runtime, caller)),
+			...(await joinedThreads(runtime, caller)),
+		].sort((left, right) => threadKey(left.thread_ref).localeCompare(threadKey(right.thread_ref)));
 		const index = await historyIndex(runtime, caller);
 		const page = localPage(threads, request, cursorScope("threads", caller, ""), thread => threadKey(thread.thread_ref));
 		const lines = [t("threadsTitle", { node: runtime.config.node.id }), ""];
 		for (const thread of page.items) {
+			if ("read_only" in thread) {
+				lines.push(t("threadRowJoined", {
+					title: thread.title ?? t("joinedThreadTitle", { id: thread.thread_ref.id, owner: thread.thread_ref.owner }),
+					key: threadKey(thread.thread_ref),
+					last: thread.last_seq,
+					count: thread.message_count,
+				}));
+				lines.push(t("threadJoinedLinks", {
+					thread: threadPath(thread.thread_ref),
+					owner: thread.thread_ref.owner,
+				}));
+				continue;
+			}
 			const rows = index.get(threadKey(thread.thread_ref)) ?? [];
 			const first = rows[0];
 			const latest = rows.at(-1);
@@ -328,34 +364,54 @@ function threadTarget(parts: string[]): ThreadTarget {
 	return { alias: parts.join("/") };
 }
 
-async function entryAt(runtime: PluginRuntime, thread: Thread, seq: string): Promise<Entry> {
-	const entry = (await allMessages(runtime, thread.thread_ref)).find(item => item.seq === seq);
+async function entryAt(runtime: PluginRuntime, thread: Thread | JoinedThread, seq: string): Promise<Entry> {
+	const entry = (await threadEntries(runtime, thread.thread_ref)).find(item => item.seq === seq);
 	if (entry === undefined) throw new Error(t("noMessageAt", { key: threadKey(thread.thread_ref), seq }));
 	return entry;
 }
 
-async function messageView(runtime: PluginRuntime, thread: Thread, seq: string): Promise<Rendered> {
+async function messageView(runtime: PluginRuntime, thread: Thread | JoinedThread, seq: string): Promise<Rendered> {
 	return json(await entryAt(runtime, thread, seq));
 }
 
-async function renderThread(runtime: PluginRuntime, thread: Thread): Promise<string> {
-	const rows = await threadMessages(runtime, thread.thread_ref);
-	const title = rows.length === 0 ? thread.title : titleOf(rows[0]!);
+/**
+ * One thread document. A hosted thread is rendered from this node's history projection; a
+ * joined one is read from its owner, and the page says so: the owner holds the state, the
+ * member table and the entries, and nothing here claims to change them.
+ */
+async function renderThread(runtime: PluginRuntime, thread: Thread | JoinedThread): Promise<string> {
+	const joined = "read_only" in thread;
+	const ref = thread.thread_ref;
+	const rows = joined ? [] : await threadMessages(runtime, ref);
+	const entries = joined ? await threadEntries(runtime, ref) : [];
+	let described: ThreadDescription | undefined;
+	try {
+		described = await runtime.node.client.describeThread(ref);
+	} catch {
+		// The owner's answer is what a joined page is mostly about, so its absence is stated
+		// below rather than papered over with local guesses.
+		described = undefined;
+	}
+	const title = thread.title ?? (rows.length === 0 ? ref.id : titleOf(rows[0]!));
+	const next = described?.thread.next_seq ?? ("next_seq" in thread ? thread.next_seq : thread.last_seq);
+	const count = joined ? entries.length : rows.length;
 	const lines = [
 		t("threadTitle", { title }),
 		"",
 		t("threadMeta", {
-			key: threadKey(thread.thread_ref),
-			state: thread.state,
-			next: thread.next_seq,
-			count: rows.length,
+			key: threadKey(ref),
+			state: described?.thread.state ?? thread.state ?? t("threadStateUnknown"),
+			next,
+			count,
 		}),
-		"",
-		t("members"),
-		"",
 	];
-	try {
-		const described = await runtime.node.threads.describe(runtime.node.auth, thread.thread_ref);
+	if (joined) lines.push("", t("threadReadOnly", { owner: ref.owner }));
+	lines.push("", t("members"), "");
+	if (described === undefined) {
+		lines.push(t("unavailable", { message: t("ownerUnreachable", { owner: ref.owner }) }));
+	} else if (described.members.length === 0) {
+		lines.push(t("noMembers"));
+	} else {
 		for (const member of described.members) {
 			lines.push(t("memberRow", {
 				peer: member.peer,
@@ -363,13 +419,11 @@ async function renderThread(runtime: PluginRuntime, thread: Thread): Promise<str
 				access: member.access.length === 0 ? t("noAccess") : member.access.join(", "),
 			}));
 		}
-		if (described.members.length === 0) lines.push(t("noMembers"));
-	} catch (error) {
-		lines.push(t("unavailable", { message: error instanceof Error ? error.message : String(error) }));
 	}
 	lines.push("", t("messages"), "");
-	for (const row of rows) lines.push(renderHistoryRow(row, runtime.config.node.id));
-	if (rows.length === 0) lines.push(t("noMessages"));
+	if (joined) for (const entry of entries) lines.push(renderEntryRow(entry, runtime.config.node.id));
+	else for (const row of rows) lines.push(renderHistoryRow(row, runtime.config.node.id));
+	if (count === 0) lines.push(t("noMessages"));
 	return `${lines.join("\n")}\n`;
 }
 
@@ -733,7 +787,7 @@ async function inboxLeaves(runtime: PluginRuntime, caller: Caller): Promise<Arra
 	}
 	const leaves: Array<{ url: string; content: string }> = [];
 	for (const group of byThread.values()) {
-		const entries = await allMessages(runtime, group.ref);
+		const entries = await threadEntries(runtime, group.ref);
 		for (const entry of entries) {
 			if (!group.seqs.has(entry.seq)) continue;
 			leaves.push({
@@ -759,13 +813,18 @@ async function visibleThreads(runtime: PluginRuntime, caller: Caller): Promise<T
 	return threads.filter(thread => allowed.has(threadKey(thread.thread_ref)));
 }
 
-async function findThread(runtime: PluginRuntime, caller: Caller, alias: string): Promise<Thread> {
+async function findThread(runtime: PluginRuntime, caller: Caller, alias: string): Promise<Thread | JoinedThread> {
 	const threads = await visibleThreads(runtime, caller);
-	const matches = threads.filter(thread =>
+	const matches: Array<Thread | JoinedThread> = threads.filter(thread =>
 		thread.thread_ref.id === alias ||
 		thread.title === alias ||
 		threadKey(thread.thread_ref) === alias,
 	);
+	// A thread this node was invited into is named the same way, but its record lives on the
+	// owner: the id and the `owner/id` key are what the local records can answer for.
+	for (const row of await joinedThreads(runtime, caller)) {
+		if (row.thread_ref.id === alias || row.title === alias || threadKey(row.thread_ref) === alias) matches.push(row);
+	}
 	if (matches.length === 1) return matches[0]!;
 	if (matches.length > 1) throw new Error(t("manyThreadsNamed", { alias }));
 	if (!caller.main && caller.agent_id !== undefined) throw new Error(t("noThreadSlice", { alias }));
@@ -822,9 +881,43 @@ async function localThreads(runtime: PluginRuntime): Promise<Thread[]> {
 	return threads.filter(thread => !isTrustThread(runtime.config.node.id, thread.thread_ref));
 }
 
+/**
+ * Threads this node was invited into. They live on their owner, so the rows carry only what
+ * the local records prove; the owner is asked for the title and the member table where the
+ * detail page needs them. A subagent sees the joined threads its own records name.
+ */
+async function joinedThreads(runtime: PluginRuntime, caller: Caller): Promise<JoinedThread[]> {
+	const rows = await collect(cursor =>
+		runtime.node.threads.joined(runtime.node.auth, {
+			page_size: PAGE,
+			...(cursor === undefined ? {} : { cursor }),
+		}),
+	);
+	const visible = rows.filter(row => !isTrustThread(runtime.config.node.id, row.thread_ref));
+	if (caller.main) return visible;
+	const allowed = allowedThreads(await scopedRecords(runtime, caller));
+	return visible.filter(row => allowed.has(threadKey(row.thread_ref)));
+}
+
 async function allMessages(runtime: PluginRuntime, ref: Thread["thread_ref"]): Promise<Entry[]> {
 	return collect(cursor =>
 		runtime.node.messages.list(runtime.node.auth, ref, {
+			attention: "thread",
+			page_size: PAGE,
+			...(cursor === undefined ? {} : { cursor }),
+		}),
+	);
+}
+
+/**
+ * A thread's entries: this node's own storage for a thread it hosts, the owner's message
+ * route otherwise. A member holds no copy of a joined thread's entries, so the owner is the
+ * only source that can answer for them.
+ */
+async function threadEntries(runtime: PluginRuntime, ref: ThreadRef): Promise<Entry[]> {
+	if (ref.owner === runtime.config.node.id) return allMessages(runtime, ref);
+	return collect(cursor =>
+		runtime.node.client.threadEntries(ref, {
 			attention: "thread",
 			page_size: PAGE,
 			...(cursor === undefined ? {} : { cursor }),
@@ -1317,6 +1410,37 @@ export function conversationPath(ref: MessageRef): string {
 /** The raw local thread entry route, kept alongside the history projection. */
 function entryPath(ref: ThreadRef, seq: string): string {
 	return `onlyne://threads/${encodeURIComponent(ref.id)}/messages/${encodeURIComponent(seq)}`;
+}
+
+/** The entry route of a thread named by its full `owner/id` key, which a joined thread needs. */
+function ownedEntryPath(ref: ThreadRef, seq: string): string {
+	return `onlyne://threads/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}/messages/${encodeURIComponent(seq)}`;
+}
+
+/**
+ * One entry as its owner holds it. A joined thread's page is the owner's record, so it reports
+ * the entry itself and never claims this node's own delivery or consumption state for it.
+ */
+function renderEntryRow(entry: Entry, nodeId: string): string {
+	const ref: MessageRef = { sender: entry.message.sender, id: entry.message.id };
+	const related = entry.message.meta?.in_reply_to;
+	const lines = [
+		t("historyRow", {
+			prefix: t("historySeqPrefix", { seq: entry.seq }),
+			direction: entry.message.sender === nodeId ? "out" : "in",
+			sender: ref.sender,
+			at: entry.at,
+			status: t("ownerHeld"),
+		}),
+	];
+	if (related !== undefined) lines.push(t("replyTo", { ref: refKey(related), url: messagePath(related) }));
+	lines.push(t("historyLinks", {
+		message: messagePath(ref),
+		conversation: conversationPath(ref),
+		entry: ownedEntryPath(entry.thread_ref, entry.seq),
+	}));
+	for (const line of entry.message.msg.split(/\r?\n/)) lines.push(`  > ${line}`);
+	return lines.join("\n");
 }
 
 function renderHistoryRow(row: HistoryMessage, nodeId: string): string {

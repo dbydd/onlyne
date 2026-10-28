@@ -8,6 +8,7 @@ import {
 	type Action,
 	type DeliveryPlan,
 	type Entry,
+	type JoinedThread,
 	type Json,
 	type MessageRef,
 	type MsgInput,
@@ -180,6 +181,8 @@ export interface DeciderDeps {
 	contexts: ContextRegistry;
 	log?(message: string, fields: Record<string, unknown>): void;
 	listThreads(): Promise<Thread[]>;
+	/** The threads this node was invited into; they live on their owner, never here. */
+	listJoinedThreads(): Promise<JoinedThread[]>;
 	listMessages(thread: ThreadRef, cursor?: string): Promise<Page<Entry>>;
 	/** The peers one thread already lists as members; a send reuses the thread a peer belongs to. */
 	threadMembers(thread: ThreadRef): Promise<NodeId[]>;
@@ -592,9 +595,9 @@ export class JudgeDecider {
 		if (typeof value !== "string" || value.length === 0) {
 			throw new OnlyneError("invalid_request", text("error.thread_reference_shape"));
 		}
-		const matches = (await this.deps.listThreads()).filter(thread => thread.thread_ref.id === value || thread.title === value);
+		const matches = (await this.#namedThreads()).filter(thread => thread.ref.id === value || thread.title === value);
 		if (matches.length > 1) throw new OnlyneError("ambiguous_target", text("error.ambiguous_local_thread", { value }));
-		if (matches.length === 1) return matches[0]!.thread_ref;
+		if (matches.length === 1) return matches[0]!.ref;
 		const slash = value.indexOf("/");
 		if (slash > 0 && slash < value.length - 1) {
 			return { owner: value.slice(0, slash), id: value.slice(slash + 1) };
@@ -1336,15 +1339,27 @@ export class JudgeDecider {
 	}
 
 	async #threadByAlias(alias: string): Promise<ThreadRef> {
-		const threads = await this.deps.listThreads();
-		const matches = threads.filter(thread => thread.thread_ref.id === alias || thread.title === alias);
-		if (matches.length === 1) return matches[0]!.thread_ref;
+		const matches = (await this.#namedThreads()).filter(thread => thread.ref.id === alias || thread.title === alias);
+		if (matches.length === 1) return matches[0]!.ref;
 		if (matches.length > 1) throw new OnlyneError("ambiguous_target", text("error.ambiguous_thread", { alias }));
 		if (alias.includes("/")) {
 			const [owner, id] = alias.split("/", 2);
 			if (owner !== undefined && id !== undefined && owner.length > 0 && id.length > 0) return { owner, id };
 		}
 		throw new OnlyneError("not_found", text("error.thread_not_found", { alias }));
+	}
+
+	/**
+	 * Every thread this node can name by id or title: the ones it hosts, plus the ones it was
+	 * invited into. A joined thread lives on its owner, so naming it here is a reference, never
+	 * a claim that this node holds the thread record.
+	 */
+	async #namedThreads(): Promise<Array<{ ref: ThreadRef; title: string | undefined }>> {
+		const [owned, joined] = await Promise.all([this.deps.listThreads(), this.deps.listJoinedThreads()]);
+		return [
+			...owned.map(thread => ({ ref: thread.thread_ref, title: thread.title as string | undefined })),
+			...joined.map(thread => ({ ref: thread.thread_ref, title: thread.title })),
+		];
 	}
 
 	async #target(meta: Record<string, Json> | undefined): Promise<NodeId | undefined> {

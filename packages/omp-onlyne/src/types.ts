@@ -82,6 +82,11 @@ export interface ViewerThread {
 	unread: number;
 	last_seq: string;
 	messages: ViewerMessage[];
+	/**
+	 * A thread another node hosts: this node was invited into it, so the viewer can show it and
+	 * cannot offer the writes that belong to its owner.
+	 */
+	read_only?: boolean;
 }
 
 /** One discovery record row the viewer lists as an automatic-discovery candidate. */
