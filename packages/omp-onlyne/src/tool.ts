@@ -83,7 +83,7 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 				if (typeof parsed.data.meta?.draft_id === "string") {
 					const result = await sendDraft(runtime, ctx, parsed.data.meta.draft_id, signal);
 					recordAwaitResult(pi, toolCallId, result, ctx);
-					return { content: [{ type: "text", text: `${summary(result)}\n\n${JSON.stringify(visibleResult(result), null, 2)}` }], details: { result: visibleResult(result) } };
+					return { content: [{ type: "text", text: `${summary(result, spelling(parsed.data.meta?.to))}\n\n${JSON.stringify(visibleResult(result), null, 2)}` }], details: { result: visibleResult(result) } };
 				}
 				const targets = parsed.data.meta?.to;
 				if (Array.isArray(targets)) {
@@ -101,7 +101,7 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 						}
 					}
 					const text = rows.map(row => row.error === undefined
-						? toolText("multi.delivered", { to: String(row.to), summary: summary(row.outcome) })
+						? toolText("multi.delivered", { to: String(row.to), summary: summary(row.outcome, spelling(row.to)) })
 						: toolText("multi.failed", { to: String(row.to), error: row.error })).join("\n");
 					pi.logger.info("onlyne.msg.multi", { targets: rows.length, failed: rows.filter(row => row.error !== undefined).length });
 					return { content: [{ type: "text", text: `${text}\n\n${JSON.stringify(rows, null, 2)}` }], details: { result: rows } };
@@ -115,7 +115,9 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 				recordAwaitResult(pi, toolCallId, result, ctx);
 				const visible = visibleResult(result);
 				pi.logger.info("onlyne.msg.result", { kind: input.delivery_kind, ms: Date.now() - started, ...outcomeFacts(result) });
-				const text = op === "member_add" || op === "member_remove" ? membershipText(op, visible, parsed.data.meta) : summary(result);
+				const text = op === "member_add" || op === "member_remove"
+					? membershipText(op, visible, parsed.data.meta)
+					: summary(result, spelling(parsed.data.meta?.to));
 				return {
 					content: [{ type: "text", text: `${text}\n\n${JSON.stringify(visible, null, 2)}` }],
 					details: { result: visible },
@@ -136,27 +138,44 @@ export function registerMsgTool(pi: ExtensionAPI): void {
  * `wait: timed_out` beside `admission: accepted` reads as a contradiction until the
  * reader knows the contract — so the delivery fact is stated first and the JSON below
  * it is for the rare case that needs a machine-readable detail.
+ *
+ * `addressed` is the target as the caller wrote it. A receipt names the thread's owner, which
+ * is this node whenever it started the conversation, so leading with it made a message to a
+ * peer read as a message to itself; the addressee comes first and the storage second.
  */
-export function summary(result: unknown): string {
+export function summary(result: unknown, addressed?: string): string {
 	if (result === null || typeof result !== "object") return toolText("summary.no_result");
 	const outcome = result as Partial<SendOutcome>;
-	const owner = outcome.receipt?.thread_ref?.owner ?? outcome.reply?.thread_ref.owner;
-	const where = owner === undefined ? "" : toolText("summary.where", { owner });
+	const receipt = outcome.receipt;
+	// The message's own sender is this node: `send` refuses a message another node authors.
+	const self = receipt?.message_ref.sender;
+	const to = outcome.resolved ?? outcome.requested ?? addressed;
 	// The answer is part of the delivery fact: a reply the receipt cannot attribute is one the
 	// sender cannot prove landed on the message it meant (cyanea report 2, problem 2).
-	const answers = outcome.receipt?.in_reply_to;
+	const answers = receipt?.in_reply_to;
 	const answering = answers === undefined ? "" : toolText("summary.answering", { sender: answers.sender, id: answers.id });
-	const facts = outcome.receipt === undefined
-		? ""
-		: toolText("summary.thread_ref", { thread: outcome.receipt.thread_ref.id, seq: outcome.receipt.seq, answering });
-	// The receipt names the storing owner, which is this node when it started the conversation;
-	// the resolved addressee is what keeps an alias send from reading as a self-send.
-	const addressee = outcome.resolved === undefined || outcome.resolved === outcome.requested
-		? ""
-		: toolText("summary.resolved", { node: outcome.resolved });
-	// The receipt names a thread the receiver owns, which is not a local object; the outbound
-	// record is. Point the reader at the handle that opens (dpdp report, problem 1).
-	const trail = outcome.receipt === undefined ? "" : toolText("summary.outbound", { id: outcome.receipt.message_ref.id });
+	// The receipt names the thread owner, which is this node when it started the conversation;
+	// a peer's thread is stored at the peer, so the two cases are stated apart.
+	const storedHere = receipt !== undefined && receipt.thread_ref.owner === self;
+	const storage = receipt === undefined ? "" : toolText(storedHere ? "summary.stored_here" : "summary.stored_there", {
+		owner: receipt.thread_ref.owner, thread: receipt.thread_ref.id, seq: receipt.seq, answering,
+	});
+	const facts = [
+		to === undefined ? "" : toolText("summary.addressee", { to }),
+		storage,
+		// The resolved addressee is what keeps an alias send from reading as a self-send.
+		outcome.resolved === undefined || outcome.resolved === outcome.requested ? "" : toolText("summary.resolved", { node: outcome.resolved }),
+		// The receipt names a thread the receiver owns, which is not a local object; the outbound
+		// record is. Point the reader at the handle that opens (dpdp report, problem 1).
+		receipt === undefined ? "" : toolText("summary.outbound", { id: receipt.message_ref.id }),
+	].filter(part => part.length > 0).join(toolText("summary.sep"));
+	// A thread this node holds and a peer it addressed: the entry is here, and the peer reaches
+	// it through the grant notice rather than a copy of the body.
+	const mechanism = storedHere && to !== undefined && to !== self
+		? toolText("summary.grant_notice")
+		: "";
+	// With no addressee the sentence opens on the storage fact, so it is capitalized like a lead.
+	const body = to === undefined && facts.length > 0 ? facts.charAt(0).toUpperCase() + facts.slice(1) : facts;
 	if (outcome.admission !== undefined) {
 		if (outcome.admission !== "accepted") {
 			const error = outcome.error;
@@ -168,21 +187,29 @@ export function summary(result: unknown): string {
 				: toolText("summary.recover");
 			return toolText("summary.not_confirmed", { failure, next });
 		}
+		// No receipt means no addressee and no storage to state; the JSON below carries the rest.
+		if (body.length === 0) return toolText("summary.plain");
+		const vars = { facts: body, mechanism };
 		if (outcome.wait === "answered" && outcome.reply !== undefined) {
-			const answer = { author: outcome.reply.authenticated_author, seq: outcome.reply.seq, where, facts, addressee, trail };
+			const answer = { ...vars, author: outcome.reply.authenticated_author, seq: outcome.reply.seq };
 			return outcome.reply_body === "withheld"
 				? toolText("summary.delivered_withheld", answer)
 				: toolText("summary.delivered_answered", answer);
 		}
 		if (outcome.wait === "timed_out") {
-			return toolText("summary.delivered_timed_out", { where, facts, addressee, trail });
+			return toolText("summary.delivered_timed_out", vars);
 		}
 		if (outcome.wait === "cancelled") {
-			return toolText("summary.delivered_cancelled", { where, facts, addressee, trail });
+			return toolText("summary.delivered_cancelled", vars);
 		}
-		return toolText("summary.delivered", { where, facts, addressee, trail });
+		return toolText("summary.delivered", vars);
 	}
 	return toolText("summary.plain");
+}
+
+/** The caller's spelling of one target, when it is a plain name rather than a structured ref. */
+function spelling(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 /** The facts one `msg` call produced, without the reply body. */

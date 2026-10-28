@@ -20,12 +20,53 @@ const delivered: SendOutcome = {
 	},
 };
 
+/** A delivered outcome that landed in a thread the peer owns. */
+const intoPeerThread: SendOutcome = {
+	admission: "accepted",
+	receipt: {
+		message_ref: { sender: SELF, id: "m-2" },
+		receipt_id: "r-2",
+		guarantee: "binding-defined",
+		thread_ref: { owner: PEER, id: "t-2" },
+		seq: "4",
+		plan: { response: "async", execution: "existing" },
+	},
+};
+
 afterAll(() => setLocale("en"));
 
 describe("msg summary", () => {
+	test("a peer addressed through this node's thread reads as a send, not a self-send", () => {
+		setLocale("en");
+		const text = summary(delivered, PEER);
+		expect(text.startsWith("Delivered")).toBe(false);
+		expect(text.startsWith(`Sent to ${PEER}`)).toBe(true);
+		expect(text).toContain("stored in your thread t-1 seq 1");
+		expect(text).toContain("grant notice");
+		expect(text).toContain("read back: onlyne://outbound/m-1 and recorded durably");
+	});
+
+	test("a send into the peer's thread says where it is stored and claims no notice", () => {
+		setLocale("en");
+		const text = summary(intoPeerThread, PEER);
+		expect(text.startsWith(`Sent to ${PEER}`)).toBe(true);
+		expect(text).toContain(`stored at ${PEER} (thread t-2 seq 4)`);
+		expect(text).not.toContain("stored in your thread");
+		expect(text).not.toContain("grant notice");
+	});
+
+	test("a self-addressed send names itself and claims no notice", () => {
+		setLocale("en");
+		const text = summary(delivered, SELF);
+		expect(text.startsWith(`Sent to ${SELF}`)).toBe(true);
+		expect(text).toContain("stored in your thread t-1 seq 1");
+		expect(text).not.toContain("grant notice");
+	});
+
 	test("an alias send reports the node it resolved to", () => {
 		setLocale("en");
 		const text = summary({ ...delivered, requested: "dpdp", resolved: PEER });
+		expect(text).toContain(`Sent to ${PEER}`);
 		expect(text).toContain(`resolved: ${PEER}`);
 		expect(text).toContain(`thread t-1 seq 1`);
 	});
@@ -34,6 +75,29 @@ describe("msg summary", () => {
 		setLocale("en");
 		const text = summary({ ...delivered, requested: PEER, resolved: PEER });
 		expect(text).not.toContain("resolved:");
+	});
+
+	test("zh-CN states the addressee, the storage, the read-back and the notice in that order", () => {
+		setLocale("zh-CN");
+		const text = summary(delivered, PEER);
+		const addressee = text.indexOf(`已发给 ${PEER}`);
+		const storage = text.indexOf("存入你的 thread t-1 seq 1");
+		const trail = text.indexOf("读回: onlyne://outbound/m-1");
+		const notice = text.indexOf("grant 通知");
+		expect(addressee).toBe(0);
+		expect(storage).toBeGreaterThan(addressee);
+		expect(trail).toBeGreaterThan(storage);
+		expect(notice).toBeGreaterThan(trail);
+		expect(text).not.toContain("已送达");
+	});
+
+	test("zh-CN puts a peer-held thread at the peer and drops the notice", () => {
+		setLocale("zh-CN");
+		const text = summary(intoPeerThread, PEER);
+		expect(text.startsWith(`已发给 ${PEER}`)).toBe(true);
+		expect(text).toContain(`存在 ${PEER} 那里`);
+		expect(text).not.toContain("grant 通知");
+		setLocale("en");
 	});
 });
 

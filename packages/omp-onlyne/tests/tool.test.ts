@@ -340,3 +340,30 @@ describe("thread membership through the tool", () => {
 		expect(parties).toEqual([ALPHA, BETA].sort());
 	});
 });
+
+describe("the send receipt", () => {
+	test("names the peer it addressed and where the entry is stored", async () => {
+		// The thread is this node's, the addressee is a peer: the receipt must not read as a self-send.
+		const { node, decider, grants } = rig();
+		const result = await harness({ node, decider }).call({ to: "alpha" });
+		expect(result.isError).toBeUndefined();
+		const text = result.content[0]?.text ?? "";
+		expect(text.startsWith("Delivered")).toBe(false);
+		expect(text.startsWith(`Sent to ${ALPHA}`)).toBe(true);
+		expect(text).toContain("stored in your thread");
+		expect(text).toContain("grant notice");
+		expect(text).toContain("read back: onlyne://outbound/");
+		expect(grants).toEqual([`${ALPHA} /grants`]);
+	});
+
+	test("a self-addressed send names itself and claims no notice", async () => {
+		const { node, decider } = rig();
+		const thread = await node.threads.create(node.auth, { title: "notes", id: "notes", ...mutation() });
+		const result = await harness({ node, decider }).call({ to: "self", thread: thread.thread_ref });
+		expect(result.isError).toBeUndefined();
+		const text = result.content[0]?.text ?? "";
+		expect(text.startsWith(`Sent to ${NODE}`)).toBe(true);
+		expect(text).toContain("stored in your thread");
+		expect(text).not.toContain("grant notice");
+	});
+});
