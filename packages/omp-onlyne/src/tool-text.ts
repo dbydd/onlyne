@@ -42,6 +42,8 @@ Use cases, each a complete call:
 - In a subagent, answer without sending: { delivery_kind: "draft the reply", msg: "Here is the answer.", meta: { op: "draft", to: "dpdp", relation: "reply", in_reply_to: { sender: "urn:onlyne:agent:dpdp", id: "<message id>" } } } returns { draft_id }. The main session sends exactly that draft: { delivery_kind: "send the drafted reply", msg: "send draft", meta: { draft_id: "<draft id>" } }.
 - Approve a peer whose invitation waits for you: { delivery_kind: "accept the trust handshake", msg: "accept the peer", meta: { op: "trust_accept", node_id: "<node>", fingerprint: "<fingerprint>" } }. The acquisition policy judges it first, and a refusal names the rule it matched and leaves the peer as it was.
 - Drop an approval: { delivery_kind: "revoke the trust handshake", msg: "revoke the peer", meta: { op: "trust_revoke", node_id: "<node>" } }. Revocation is never judged by the policy and names no fingerprint.
+- Start an exchange with a discovered peer you are not paired with yet: { delivery_kind: "start the handshake with lazuli", msg: "start the exchange", meta: { op: "trust_begin", node_id: "lazuli" } }. The acquisition policy judges it before anything is sent: a refusal names the rule it matched and leaves the peer as it was, and an allow commits the local approval, sends the statement and reports the phase that followed.
+- Put a peer into a conversation, so the thread carries several members: { delivery_kind: "add dpdp to the plan thread", msg: "add dpdp", meta: { op: "member_add", thread: "<thread id or title>", to: "dpdp" } }; one call per member when meta.to is a list. Take one out with op "member_remove". Adding a member puts them in that thread, so a later meta.to array WITH meta.thread addresses one thread, while without meta.thread each target gets its own.
 - When a send fails with no trusted key, do not retry and do not try to pair: the error names both nodes, the responsible holder and the entry in the host surface. Report it and stop.
 
 The judge role chooses the action and plan from your intent, so never invent message ids, idempotency keys or revisions. A reply or followup states its relation; omitting it is rejected rather than assumed. A reply targets the original reply authority, so a conflicting to is rejected. A subagent session reads its own slice (onlyne://threads, onlyne://inbox, onlyne://contexts) and returns the result to the main session, which does the sending.`,
@@ -67,6 +69,10 @@ The judge role chooses the action and plan from your intent, so never invent mes
 	"multi.failed": "→ {to}: not sent — {error}",
 	"trust.accepted": "Approved {node} ({fingerprint}); the trust phase is now {phase}.",
 	"trust.revoked": "Revoked {node}; local approval is dropped.",
+	"trust.begun": "Started the exchange with {node} ({fingerprint}); the trust phase is now {phase}. The local approval is committed and the statement is sent, so this peer can exchange messages once it approves in turn.",
+	"thread.member_added": "Added {member} to thread {thread}. That member now reads and posts in it, and a later meta.to array with meta.thread {thread} puts every target in this one thread; the same array without meta.thread gives each target its own thread.",
+	"thread.member_removed": "Removed {member} from thread {thread}. The thread stays open and its earlier entries are still its history; a later bare send to {member} opens its own two-party thread.",
+	"failure.trust_node_unknown": "{action} names no known node {node}. Name the node id, or a short alias that exactly one known peer carries.",
 	"failure.trust_fields": "A trust action needs a non-empty string {field}.",
 	"failure.trust_main_only": "Only the main session approves or revokes a peer; a subagent drafts instead.",
 } as const;
@@ -113,6 +119,8 @@ meta.to 接受一个节点或一组节点。一组会逐个目标投递，每个
 - 在子代理里，只写不发：{ delivery_kind: "起草回复", msg: "这是答案。", meta: { op: "draft", to: "dpdp", relation: "reply", in_reply_to: { sender: "urn:onlyne:agent:dpdp", id: "<message id>" } } } 返回 { draft_id }。主会话原样发出这份草稿：{ delivery_kind: "发出起草的回复", msg: "发送草稿", meta: { draft_id: "<draft id>" } }。
 - 批准一个在等你决定的对端：{ delivery_kind: "批准信任握手", msg: "批准这个对端", meta: { op: "trust_accept", node_id: "<node>", fingerprint: "<fingerprint>" } }。先由获取策略判定；被拒时错误里写明命中的规则，对端保持原样。
 - 撤回一次批准：{ delivery_kind: "撤销信任握手", msg: "撤销这个对端", meta: { op: "trust_revoke", node_id: "<node>" } }。撤销永远不受策略限制，也不需要指纹。
+- 与一个已发现但尚未配对的对端发起交换：{ delivery_kind: "与 lazuli 开始握手", msg: "开始交换", meta: { op: "trust_begin", node_id: "lazuli" } }。获取策略会在发出任何请求之前判定：被拒时错误里写明命中的规则，对端保持原样；放行时提交本地批准、发出陈述，并报告其后的信任阶段。
+- 把一个对端加进一段对话，让这个 thread 带多个成员：{ delivery_kind: "把 dpdp 加进 plan thread", msg: "加上 dpdp", meta: { op: "member_add", thread: "<thread id 或标题>", to: "dpdp" } }；meta.to 是列表时每个成员各一次调用。用 op "member_remove" 移出。加入成员就是把他放进那个 thread，所以之后带 meta.thread 的 meta.to 数组只指向一个 thread，不带 meta.thread 时每个目标各得一个。
 - 发送失败且没有可信密钥时，不要重试也不要尝试配对：错误里写明了两个节点、负责的持有者和宿主界面上的入口。报告它，然后停下。
 
 动作和执行计划由 judge 角色根据你的意图选择，所以永远不要自己编 message id、幂等键或版本号。回信或 followup 必须说明关系；省略会被拒绝，而不是被假定。回信只针对原来的回信权限方，所以冲突的 to 会被拒绝。子代理会话读自己的切片（onlyne://threads、onlyne://inbox、onlyne://contexts），把结果交回主会话，由主会话发送。`,
@@ -138,6 +146,10 @@ meta.to 接受一个节点或一组节点。一组会逐个目标投递，每个
 	"multi.failed": "→ {to}: 未发送 —— {error}",
 	"trust.accepted": "已批准 {node}（{fingerprint}），信任阶段现在是 {phase}。",
 	"trust.revoked": "已撤销 {node}；本地批准已撤回。",
+	"trust.begun": "已与 {node}（{fingerprint}）发起交换，信任阶段现在是 {phase}。本地批准已提交、陈述已发出，等对端反向批准后即可互通消息。",
+	"thread.member_added": "已把 {member} 加入 thread {thread}。该成员现在可以读写这个 thread；之后带 meta.thread {thread} 的 meta.to 数组会把每个目标都放进这一个 thread，而不带 meta.thread 的同一数组会让每个目标各得一个 thread。",
+	"thread.member_removed": "已把 {member} 移出 thread {thread}。thread 本身保留、此前的条目仍是它的历史；之后单独发给 {member} 的消息会另开一个两人 thread。",
+	"failure.trust_node_unknown": "{action} 没有指名任何已知节点 {node}。写节点 id，或写只有一个已知对端持有的短别名。",
 	"failure.trust_fields": "信任动作需要非空字符串字段 {field}。",
 	"failure.trust_main_only": "只有主会话可以批准或撤销对端；子代理只能起草。",
 };
