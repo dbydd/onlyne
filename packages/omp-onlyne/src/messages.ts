@@ -38,6 +38,8 @@ interface InboundAttempt {
 	passes?: number;
 	/** Whether the held delivery has already been forced through as a trigger. */
 	escalated?: boolean;
+	/** Set once the second window passed with no confirmation; the warning is written once. */
+	unconfirmed?: boolean;
 	/** How the delivery was submitted: a trigger starts work, a next-turn fragment waits. */
 	delivery?: { via: "trigger" | "nextTurn"; at: number };
 }
@@ -150,24 +152,32 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				inboundAttempts.delete(key);
 				throw new OnlyneError("context_lost", t("contextLost", { alias: holder.alias }), { context: holder.alias });
 			}
-			// A next-turn fragment can genuinely be lost: it waits for an assembly the session may
-			// never reach. Only that shape is retried, only after a window long enough to be sure
-			// the session is not simply working, and only while it is idle right now. A delivery
-			// already submitted as a trigger or an insertion has started its own turn, so waiting
-			// for its confirmation is waiting for the turn to end, not for a queue nobody drains.
+			// A delivery nobody confirmed has two shapes and one bound. A next-turn fragment waits
+			// for an assembly the session may never reach. A trigger starts its own turn, and that
+			// turn can die before the model reads the payload — a provider response at or above 400
+			// drops the observation it recorded — leaving the entry unconfirmed while every pass
+			// reports it delivered. Both are retried once, after a window long enough to be sure the
+			// session is not simply working, and only while it is idle right now.
 			attempt.passes = (attempt.passes ?? 0) + 1;
 			const delivery = attempt.delivery;
-			const waiting = delivery !== undefined && delivery.via === "nextTurn" && now() - delivery.at >= NEXT_TURN_ESCALATE_MS;
+			const waiting = delivery !== undefined && now() - delivery.at >= NEXT_TURN_ESCALATE_MS;
 			if (attempt.landed === deps.main.agent.id && waiting && delivery !== undefined && deps.main.isIdle()) {
 				if (attempt.escalated !== true) {
 					attempt.escalated = true;
+					// The retry opens its own window; measuring the second one from the first send
+					// would report it as unconfirmed on the very next pass.
+					attempt.delivery = { via: "trigger", at: now() };
 					const token = registerPending(entry, deps.main.agent.id, "fragment");
 					deps.pi.sendMessage(payload(entry, INBOUND, token), { triggerTurn: true });
 					deps.pi.logger.info("onlyne.delivery.escalated", {
-						entry: key, reason: "unconfirmed", waited_ms: now() - delivery.at,
+						entry: key, reason: "unconfirmed", via: delivery.via, waited_ms: now() - delivery.at,
 					});
-				} else {
-					deps.pi.logger.warn("onlyne.delivery.unconfirmed", { entry: key, passes: attempt.passes, context: attempt.landed });
+				} else if (attempt.unconfirmed !== true) {
+					// One warning per entry: the reason is recorded once, and the pass stops shouting.
+					attempt.unconfirmed = true;
+					deps.pi.logger.warn("onlyne.delivery.unconfirmed", {
+						entry: key, via: delivery.via, passes: attempt.passes, waited_ms: now() - delivery.at, context: attempt.landed,
+					});
 				}
 			}
 				deps.pi.logger.debug("onlyne.delivery.held", { entry: key, reason: "already-delivered", context: attempt.landed });

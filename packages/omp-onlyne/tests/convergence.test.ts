@@ -49,7 +49,10 @@ interface Host {
 	endpoint: string;
 	/** One entry per message the bridge handed the host. */
 	sends: Array<{ options: Record<string, unknown> | undefined }>;
+	/** Names the bridge logged at info level. */
 	logs: string[];
+	/** Names it logged at warn level: the lines an operator has to act on. */
+	warns: string[];
 	/** Model calls the bridge made; the bound every shape is measured against. */
 	judged: { count: number };
 }
@@ -63,6 +66,7 @@ function serve(
 	decide: () => Promise<Action>,
 	decision: () => Promise<unknown>,
 	idle: () => boolean,
+	now: () => number = Date.now,
 ): Host {
 	let handler: (request: Request) => Promise<Response> = async () => new Response("starting", { status: 503 });
 	const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: request => handler(request) });
@@ -72,14 +76,16 @@ function serve(
 	const contexts = new ContextRegistry(storage, id, "Main");
 	const sends: Array<{ options: Record<string, unknown> | undefined }> = [];
 	const logs: string[] = [];
+	const warns: string[] = [];
 	const judged = { count: 0 };
 	const deps = {
 		nodeId: id,
+		now,
 		pi: {
 			sendMessage: (_message: unknown, options?: Record<string, unknown>) => { sends.push({ options }); },
 			logger: {
 				info: (name: string) => { logs.push(name); },
-				warn: (name: string) => { logs.push(name); },
+				warn: (name: string) => { warns.push(name); },
 				debug: () => {},
 			},
 		} as unknown as ExtensionAPI,
@@ -97,7 +103,7 @@ function serve(
 		contexts, runtime: createRuntimeBridge(deps), clock, decide,
 	});
 	handler = request => node.fetch(request);
-	return { node, endpoint, sends, logs, judged };
+	return { node, endpoint, sends, logs, warns, judged };
 }
 
 async function meet(left: Host, right: Host): Promise<void> {
@@ -175,6 +181,42 @@ describe("delivery convergence", () => {
 
 		await confirm(self);
 		expect((await held(self))[0]?.injected).toBe(true);
+	});
+
+	test("a trigger whose turn dies is offered once more, then reported as unconfirmed", async () => {
+		const at = { value: 1_000_000 };
+		const peer = serve(PEER, async () => ({ kind: "send", to: SELF, response: "async", execution: "existing" }), async () => ({ action: "fragment" }), () => true, () => at.value);
+		const self = serve(SELF, async () => ({ kind: "read", scope: "directory" }), async () => ({ action: "fragment" }), () => true, () => at.value);
+		await meet(peer, self);
+		await peer.node.client.msg({ delivery_kind: "ask", msg: "hello" });
+		await self.node.client.reconcile();
+
+		// The turn the trigger started died before the model read the payload — a provider answer
+		// at or above 400 drops the observation — so nothing ever confirms this entry.
+		await self.node.client.maintain();
+		expect(self.sends).toEqual([{ options: { triggerTurn: true } }]);
+		// Inside the window nothing is resent: the session may simply still be working.
+		at.value += 30_000;
+		await self.node.client.maintain();
+		expect(self.sends).toHaveLength(1);
+
+		// Past the window with the session idle, the entry is offered once more.
+		at.value += 31_000;
+		await self.node.client.maintain();
+		expect(self.sends).toHaveLength(2);
+		expect(self.logs).toContain("onlyne.delivery.escalated");
+
+		// The retry opens its own window, so the next pass does not already report a failure.
+		at.value += 30_000;
+		await self.node.client.maintain();
+		expect(self.warns).toHaveLength(0);
+		// After it, the entry is reported once, with the reason, and no third copy is sent.
+		at.value += 31_000;
+		await self.node.client.maintain();
+		at.value += 120_000;
+		await self.node.client.maintain();
+		expect(self.sends).toHaveLength(2);
+		expect(self.warns.filter(name => name === "onlyne.delivery.unconfirmed")).toHaveLength(1);
 	});
 
 	test("a projection whose resource moved settles with a reason and never reaches the judge", async () => {
