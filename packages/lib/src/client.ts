@@ -4,7 +4,7 @@ import type {
   Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Json, LocalAttention,
   InjectOutcome, Member, Message, MessageQuery, MessageRef, MsgInput, Mutation, Outbound, Page, PageOptions, SendRequest,
   TraceEvent, Thread, ThreadRef, Transaction, Transport, MaintenanceClock, PreparedSend,
-  ResourceReadQuery, ResourceReadResult, ResourceInventory, Resource,
+  ResourceReadQuery, ResourceReadResult, ResourceInventory, Resource, AttentionSettlement,
 } from './types.ts';
 import type { MessageService } from './messages.ts';
 import type { ResourceService } from './resources.ts';
@@ -74,6 +74,8 @@ const TERMINAL: Record<string, true> = {
   unsupported_delivery: true, ambiguous_target: true, ambiguous_resource: true,
 };
 const MAX_CURSOR_PAGES = 10_000;
+/** A binding check must not hold the maintenance pass behind an unreachable resource owner. */
+const RESOURCE_CHECK_MS = 5_000;
 
 /** Anything that is not a recorded refusal leaves the admission unknown, never "undelivered". */
 function admissionOf(failure: Failure): Outbound['state'] {
@@ -919,16 +921,21 @@ export class OnlyneClient {
       // A row keeps the context the entry landed in; the confirmation context only fills in
       // for a row that names none.
       let original: string | undefined;
+      let settled = false;
+      let consumable = false;
       for (const row of await tx.scan<LocalAttention>(key('inbox') + '/')) {
         const held = row.value.attention.entry;
         if (held === undefined) continue;
         if (held.thread_ref.owner !== entry.thread_ref.owner || held.thread_ref.id !== entry.thread_ref.id) continue;
         if (held.seq !== entry.seq) continue;
+        if (row.value.settlement !== undefined) { settled = true; continue; }
+        consumable = true;
         original = original ?? row.value.context;
         if (row.value.injected) continue;
         const landed = row.value.context ?? context;
         await tx.put(row.key, { ...row.value, injected: true, ...(landed === undefined ? {} : { context: landed }) });
       }
+      if (settled && !consumable) return undefined;
       const where = context ?? original ?? this.#ctx.options.node_id;
       const slot = consumptionKey(where, entry.thread_ref, entry.seq);
       const stored = await tx.get<ConsumptionRecord>(slot);
@@ -940,6 +947,10 @@ export class OnlyneClient {
       await this.#oweTodo(tx, entry, where);
       return where;
     });
+    if (consumedIn === undefined) {
+      this.#held.delete(entryKey(entry.thread_ref, entry.seq));
+      return;
+    }
     const identity = entryKey(entry.thread_ref, entry.seq);
     const held = this.#held.get(identity);
     if (held !== undefined) {
@@ -1159,9 +1170,10 @@ export class OnlyneClient {
    * answer with the context it really used, and that is the one the todo follows.
    */
   async #consume(entry: Entry, record: LocalAttention): Promise<void> {
+    if (record.injected) { this.#injectTrace(entry, record, 'skipped', 'injected'); return; }
+    if (await this.#settleResourceAttention(entry, record)) return;
     const runtime = this.#ctx.options.plugins.runtime;
     if (runtime === undefined) { this.#injectTrace(entry, record, 'skipped', 'no-runtime'); return; }
-    if (record.injected) { this.#injectTrace(entry, record, 'skipped', 'injected'); return; }
     const related = entry.message.meta?.in_reply_to;
     const outbound = related?.sender === this.#ctx.options.node_id
       ? await this.#ctx.storage.transaction(tx => tx.get<StoredOutbound>(outboundKey(related.sender, related.id)))
@@ -1185,6 +1197,55 @@ export class OnlyneClient {
     this.#injectTrace(entry, record, injected.outcome ?? (injected.consumed ? 'consumed' : 'delivered'), undefined, injected.context);
     if (!injected.consumed) return;
     await this.confirmConsumption(entry, injected.context, 'fragment');
+  }
+
+  async #settleResourceAttention(entry: Entry, record: LocalAttention): Promise<boolean> {
+    const ref = entry.message.meta?.data?.resource_ref;
+    if (typeof ref !== 'object' || ref === null || Array.isArray(ref)
+      || typeof ref.owner !== 'string' || typeof ref.id !== 'string'
+      || ref.owner !== entry.authenticated_author) return false;
+    const resource_ref = { owner: ref.owner, id: ref.id };
+    let settlement: AttentionSettlement;
+    const at = new Date(this.#ctx.now()).toISOString();
+    try {
+      const resource = await this.readResources(
+        { op: 'describe', resource: resource_ref },
+        { signal: AbortSignal.timeout(RESOURCE_CHECK_MS) },
+      ) as Resource;
+      if (resource.binding.handler === this.#ctx.node) return false;
+      settlement = { via: 'handover', resource_ref, handler: resource.binding.handler, revision: resource.revision, at };
+    } catch (error) {
+      const failure = failureOf(error);
+      if (failure.code !== 'not_found') {
+        const attempts = await this.#ctx.storage.transaction(async tx => {
+          const slot = inboxKey(record.attention.obligation_id);
+          const current = await tx.get<LocalAttention>(slot);
+          if (current === undefined || current.injected) return undefined;
+          const attempts = (current.resource_check_failures ?? 0) + 1;
+          await tx.put(slot, { ...current, resource_check_failures: attempts });
+          return attempts;
+        });
+        if (attempts !== undefined) this.#trace({
+          event: 'inbound.resource-check.failed', thread: entry.thread_ref, seq: entry.seq,
+          resource_ref, code: failure.code, attempts,
+        });
+        throw error;
+      }
+      settlement = { via: 'undeliverable', resource_ref, reason: 'resource-unavailable', at };
+    }
+    const changed = await this.#ctx.storage.transaction(async tx => {
+      const slot = inboxKey(record.attention.obligation_id);
+      const current = await tx.get<LocalAttention>(slot);
+      if (current === undefined || current.injected) return false;
+      await tx.put(slot, { ...current, injected: true, settlement });
+      return true;
+    });
+    if (changed) {
+      this.#held.delete(entryKey(entry.thread_ref, entry.seq));
+      this.#trace({ event: 'inbound.settled', thread: entry.thread_ref, seq: entry.seq, settlement });
+      this.#ctx.options.plugins.runtime?.notify({ event: 'inbound', thread: entry.thread_ref, seq: entry.seq, sender: entry.message.sender });
+    }
+    return true;
   }
 
   /**
@@ -1299,6 +1360,8 @@ export class OnlyneClient {
           ? (attention.plan?.context === undefined ? {} : { context: attention.plan.context })
           : { context: previous.context }),
         injected: previous?.injected === true,
+        ...(previous?.settlement === undefined ? {} : { settlement: previous.settlement }),
+        ...(previous?.resource_check_failures === undefined ? {} : { resource_check_failures: previous.resource_check_failures }),
       };
       if (previous !== undefined && canonical(previous.attention) === canonical(merged.attention)) {
         return previous;

@@ -47,6 +47,8 @@
 
   `b4aee3e` 的第一版用维护轮次（2 次 × 2 秒）当升级窗口，在忙会话上必然重复投递：`wake` 的确认要等整轮 turn 跑完，6 秒不可能。现场是 dpdp 侧 `e91063b1/2`，10:02:59 投进 follow_up 队，10:03:06 又被强制投一次。现在升级只对**当初以 `nextTurn` 投出、已等满 60 秒、且此刻目标 idle** 的条目生效，三条缺一不可；`wake`／`insertion`／`triggerTurn` 投出的条目一律不进升级。
 
+- handover 后的源节点结算：Carly 转报飞书线程 `im-lark-oc_bca04a65e2b3d52972fd67595a2235c6` seq 2 在 2026-10-27 08:12 从 dpdp 交给 caerulea，源节点失去资源读取权限，旧 inbox 行一直是 `injected: false`。维护环现在在重投前检查资源 owner 署名的 `meta.data.resource_ref`。查询到其他 handler 时，旧行写入 `injected: true` 和 `settlement: { via: 'handover', resource_ref, handler, revision, at }`；资源接口返回 `not_found` 时，旧行写入 `via: 'undeliverable'`、`reason: 'resource-unavailable'`。两种结算都发出 `inbound.settled`，历史展示结算依据，不创建消费记录或 todo。网络故障保留待办行，累计 `resource_check_failures`，并记录错误码和尝试次数。旧数据由下一轮维护直接处理。
+
 ## 期望
 
 - 投递进入一个上下文时 MUST 同时登记一次可回收的投递状态；该上下文消失后，这一次投递 MUST 被判定为不可确认，而不是当成已送达反复重报。

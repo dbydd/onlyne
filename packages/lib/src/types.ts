@@ -144,6 +144,7 @@ export interface HistoryMessage {
   message_ref: MessageRef; message: Message; direction: 'in' | 'out';
   thread_ref?: ThreadRef; seq?: string; at: string | null;
   delivery: Outbound['state'] | 'received'; consumption?: 'pending' | 'consumed';
+  settlement?: AttentionSettlement;
   guarantee?: Storage['guarantee']; error?: Failure;
 }
 export interface Conversation {
@@ -151,15 +152,17 @@ export interface Conversation {
   last_at: string | null;
 }
 export interface HistoryQuery extends PageOptions { thread?: ThreadRef; message?: MessageRef }
+export type AttentionSettlement =
+  | { via: 'handover'; resource_ref: ResourceRef; handler: NodeId; revision: string; at: string }
+  | { via: 'undeliverable'; resource_ref: ResourceRef; reason: 'resource-unavailable'; at: string };
 /**
- * One queued obligation and what became of it. `context` is where the delivery was sent;
- * `injected` is **observed**, not submitted: it flips only in `confirmConsumption`, once the
- * host has seen the entry in a provider request. A message submitted into a session that never
- * reads it therefore stays `injected: false` and keeps its place in unread and alerts
- * (caerulea report 3, problem 1). The name predates that rule and is kept because renaming it
- * would read every stored row as unobserved and re-inject what was already read.
+ * `injected` closes the local delivery obligation after observed consumption or an explicit
+ * settlement. A settlement records why delivery ended without claiming model consumption.
  */
-export interface LocalAttention { attention: Attention; context?: string; injected: boolean }
+export interface LocalAttention {
+  attention: Attention; context?: string; injected: boolean; settlement?: AttentionSettlement;
+  resource_check_failures?: number;
+}
 export interface Target { node_id: NodeId; base_url: string; headers?: Record<string, string> }
 export interface Transport {
   request<T>(target: NodeId, method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T>;
@@ -193,6 +196,8 @@ export type TraceEvent =
   | { event: 'inbound.duplicate'; sender: NodeId; message: string }
   | { event: 'inbound.acked'; obligation: string; thread: ThreadRef; seq: string }
   | { event: 'inbound.inject'; thread: ThreadRef; seq: string; context: string; outcome: InjectOutcome; reason?: string }
+  | { event: 'inbound.settled'; thread: ThreadRef; seq: string; settlement: AttentionSettlement }
+  | { event: 'inbound.resource-check.failed'; thread: ThreadRef; seq: string; resource_ref: ResourceRef; code: ErrorCode; attempts: number }
   | { event: 'consumption.confirmed'; thread: ThreadRef; seq: string; context: string; via: 'fragment' | 'tool_result' }
   | { event: 'outbound.admitted'; sender: NodeId; message: string; target: string; state: string; guarantee?: string; code?: string }
   | { event: 'outbound.redriven'; sender: NodeId; message: string; target: string }

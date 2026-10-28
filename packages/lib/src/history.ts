@@ -1,4 +1,4 @@
-import type { Auth, Conversation, Entry, HistoryMessage, HistoryQuery, LocalAttention, MessageRef, Outbound, Page, ThreadRef, Transaction } from './types.ts';
+import type { AttentionSettlement, Auth, Conversation, Entry, HistoryMessage, HistoryQuery, LocalAttention, MessageRef, Outbound, Page, ThreadRef, Transaction } from './types.ts';
 import { fail, key, page, same, type Context } from './core.ts';
 
 const identity = (ref: MessageRef): string => key(ref.sender, ref.id);
@@ -46,21 +46,26 @@ export class HistoryService {
 
   private async collect(tx: Transaction): Promise<Conversation[]> {
     const messages = new Map<string, HistoryMessage>();
-    const addEntry = (entry: Entry, consumed?: boolean): void => {
+    const addEntry = (entry: Entry, injected?: boolean, settlement?: AttentionSettlement): void => {
       const message_ref = { sender: entry.message.sender, id: entry.message.id };
       const id = identity(message_ref);
       const previous = messages.get(id);
+      const closed = previous?.settlement ?? settlement;
       messages.set(id, {
         message_ref, message: entry.message, direction: entry.message.sender === this.#ctx.node ? 'out' : 'in',
         thread_ref: entry.thread_ref, seq: entry.seq, at: entry.at, delivery: previous?.delivery ?? 'received',
         ...(previous?.guarantee === undefined ? {} : { guarantee: previous.guarantee }),
-        ...(consumed === undefined ? previous?.consumption === undefined ? {} : { consumption: previous.consumption }
-          : { consumption: consumed || previous?.consumption === 'consumed' ? 'consumed' : 'pending' }),
+        // A settlement closes the row without asserting a read, so it carries no consumption.
+        ...(closed !== undefined ? { settlement: closed }
+          : injected === undefined ? previous?.consumption === undefined ? {} : { consumption: previous.consumption }
+          : { consumption: injected || previous?.consumption === 'consumed' ? 'consumed' : 'pending' }),
       });
     };
     for (const { value } of await tx.scan<Entry>('entry-ref/')) addEntry(value);
     for (const { value } of await tx.scan<LocalAttention>('inbox/')) {
-      if (value.attention.entry !== undefined && value.attention.disposition !== 'expired') addEntry(value.attention.entry, value.injected);
+      if (value.attention.entry !== undefined && value.attention.disposition !== 'expired') {
+        addEntry(value.attention.entry, value.injected, value.settlement);
+      }
     }
     const confirmed = new Set<string>();
     for (const { value } of await tx.scan<{ thread_ref: ThreadRef; seq: string; confirmed: boolean }>('consumed/')) {
@@ -75,6 +80,7 @@ export class HistoryService {
         delivery: value.state,
         ...(value.receipt === undefined ? {} : { thread_ref: value.receipt.thread_ref, seq: value.receipt.seq, guarantee: value.receipt.guarantee }),
         ...(value.error === undefined ? {} : { error: value.error }),
+        ...(previous?.settlement === undefined ? {} : { settlement: previous.settlement }),
       });
     }
     for (const row of messages.values()) {

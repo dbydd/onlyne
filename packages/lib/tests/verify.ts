@@ -13,7 +13,7 @@ import { canonical, key } from '../src/core.js';
 import { createPrivateKey, sign } from 'node:crypto';
 import type {
   Auth, DeliveryPlan, Entry, ErrorCode, HandoverProbe, Json, KeyMaterial, Mutation, NodeOptions, Plugins, Resource,
-  ResourceDriver, ResourceRef, SendRequest, Target, ThreadRef, Transport, TrustEntry, TrustSeed,
+  ResourceDriver, ResourceRef, SendRequest, Target, ThreadRef, TrustEntry, TrustSeed,
 } from '../src/types.js';
 
 const lazuliNode = 'urn:onlyne:agent:lazuli';
@@ -975,19 +975,19 @@ async function phaseSettlement(): Promise<void> {
     },
     target_endpoint: keeperNode, plan,
   });
-  await project('proj-a-msg', { resource_ref: readable.resource_ref });
-  await project('proj-b-msg', { resource_ref: sealed.resource_ref });
-  await project('proj-c-msg', { resource_ref: flaky.resource_ref });
+  await project('proj-a-msg', { resource_ref: { ...readable.resource_ref } });
+  await project('proj-b-msg', { resource_ref: { ...sealed.resource_ref } });
+  await project('proj-c-msg', { resource_ref: { ...flaky.resource_ref } });
   await project('plain-1');
   // A projection naming a third party's resource is not this node's to settle: the reference is
   // trusted only when its owner is the entry's authenticated author.
   await project('foreign-1', { resource_ref: { owner: caeruliaNode, id: 'elsewhere' } });
 
   await ownerRig.node.client.maintain();
-  await source.node.client.reconcile();
+  await source.client.reconcile();
 
   const projectionIds = ['proj-a-msg', 'proj-b-msg', 'proj-c-msg'];
-  const queued = (await source.node.messages.inbox(authS)).items;
+  const queued = (await source.messages.inbox(authS)).items;
   check('settle.queued', queued.length === 5 && queued.every(row => row.injected === false)
     ? '' : `the idle session holds ${queued.length} rows, ${queued.filter(row => row.injected).length} of them injected`);
   check('settle.queued.no_settlement', projectionIds.every(id =>
@@ -1000,7 +1000,7 @@ async function phaseSettlement(): Promise<void> {
   const move = async (resource: ResourceRef, revision: string): Promise<string> => {
     staged.ref = resource;
     staged.revision = revision;
-    const outcome = await source.node.client.msg({ delivery_kind: '交接资源', msg: `把 ${resource.id} 交给 dpdp。` });
+    const outcome = await source.client.msg({ delivery_kind: '交接资源', msg: `把 ${resource.id} 交给 dpdp。` });
     const state = field(outcome as Json, 'state');
     return typeof state === 'string' ? state : 'none';
   };
@@ -1018,11 +1018,11 @@ async function phaseSettlement(): Promise<void> {
     ? '' : 'a handover left the resource with its former handler');
 
   describeFails.on = true;
-  const failed = await source.node.client.maintain().then(() => undefined, error => error as unknown);
+  const failed = await source.client.maintain().then(() => undefined, error => error as unknown);
   check('settle.describe.transient', failed instanceof OnlyneError && failed.error.code === 'unavailable'
     ? '' : `a failed describe answered ${text(failed)}`);
 
-  const afterFailure = (await source.node.messages.inbox(authS)).items;
+  const afterFailure = (await source.messages.inbox(authS)).items;
   const settledA = afterFailure.find(row => row.attention.message_ref.id === 'proj-a-msg');
   const settledB = afterFailure.find(row => row.attention.message_ref.id === 'proj-b-msg');
   const pendingC = afterFailure.find(row => row.attention.message_ref.id === 'proj-c-msg');
@@ -1051,14 +1051,14 @@ async function phaseSettlement(): Promise<void> {
   check('settle.no_consumption', (await consumedRows()).length === 0 ? '' : 'settling a projection wrote a consumption record');
   check('settle.no_todo', (await owedRows()).length === 0 ? '' : 'settling a projection owed a todo');
 
-  const historyRow = await source.node.history.message(authS, { sender: keeperNode, id: 'proj-a-msg' });
+  const historyRow = await source.history.message(authS, { sender: keeperNode, id: 'proj-a-msg' });
   check('settle.history', historyRow.settlement?.via === 'handover' && historyRow.consumption !== 'consumed'
     ? '' : `history reports settlement=${JSON.stringify(historyRow.settlement)} consumption=${historyRow.consumption ?? 'none'}`);
 
   describeFails.on = false;
   sourceRig.shared.allow = true;
-  await source.node.client.maintain();
-  const afterPass = (await source.node.messages.inbox(authS)).items;
+  await source.client.maintain();
+  const afterPass = (await source.messages.inbox(authS)).items;
   const recovered = afterPass.find(row => row.attention.message_ref.id === 'proj-c-msg');
   const recoveredSettlement = recovered?.settlement;
   check('settle.transient.recovered', recovered?.injected === true && recoveredSettlement?.via === 'handover'
@@ -1082,12 +1082,12 @@ async function phaseSettlement(): Promise<void> {
     ? '' : 'the ordinary message never confirmed its consumption');
 
   const entryA = settledA?.attention.entry;
-  if (entryA !== undefined) await source.node.client.confirmConsumption(entryA, 'Main');
+  if (entryA !== undefined) await source.client.confirmConsumption(entryA, 'Main');
   check('settle.late_confirm.no_slot', (await consumedRows()).every(row => !isProjection(row))
     ? '' : 'a late confirmation wrote a consumption record for a settled row');
 
-  await source.node.client.reconcile();
-  const reconciled = (await source.node.messages.inbox(authS)).items.find(row => row.attention.message_ref.id === 'proj-a-msg');
+  await source.client.reconcile();
+  const reconciled = (await source.messages.inbox(authS)).items.find(row => row.attention.message_ref.id === 'proj-a-msg');
   check('settle.reconcile.preserved',
     reconciled?.injected === true && JSON.stringify(reconciled.settlement) === JSON.stringify(handoverSettlement)
       ? '' : `reconciliation rewrote the settlement as ${JSON.stringify(reconciled?.settlement)}`);
