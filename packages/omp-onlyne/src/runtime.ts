@@ -74,7 +74,11 @@ export async function restartRuntime(config: OnlyneConfig, pi: ExtensionAPI, ctx
 	registerMsgTool(pi);
 	return runtime;
 }
-export async function stopRuntime(): Promise<void> { await active?.close(); }
+export async function stopRuntime(): Promise<void> {
+	const closing = active;
+	active = undefined;
+	await closing?.close();
+}
 
 /** How often the discovery catalog is re-observed; well inside the library's 120 s freshness window. */
 const DISCOVERY_REFRESH_MS = 30_000;
@@ -139,20 +143,32 @@ class OmpRuntime implements PluginRuntime {
 		});
 		// A configured public_url is a promise about where this node answers. Advertising it
 		// without listening there leaves every peer that pinned the address calling a port
-		// nobody serves, so the port is taken unless it is already in use.
-		const wanted = publicPort(this.config.server.public_url);
+		// nobody serves, so the port is taken unless it is already in use. Without a public_url
+		// the port this node last bound is reused: an address that changes on every start is one
+		// every peer has to be taught again, and the operator's only recourse is to pin it by hand.
+		const wanted = publicPort(this.config.server.public_url) ?? this.config.server.port;
 		let fellBack = false;
+		// `server.port` is optional because Bun omits it for a unix socket; this listener is TCP.
+		let bound: number;
 		try {
 			this.server = serve(wanted ?? 0);
+			bound = this.server.port!;
 		} catch (error) {
 			if (wanted === undefined) throw error;
 			fellBack = true;
 			this.server = serve(0);
-			this.pi.logger.warn("onlyne.port.taken", { wanted, bound: this.server.port, error: errorText(error) });
+			bound = this.server.port!;
+			this.pi.logger.warn("onlyne.port.taken", { wanted, bound, error: errorText(error) });
 		}
 		const host = advertisedHost(this.config.server.bind);
-		const actual = `http://${host.includes(":") ? `[${host}]` : host}:${this.server.port}/onlyne/v3`;
+		const actual = `http://${host.includes(":") ? `[${host}]` : host}:${bound}/onlyne/v3`;
 		this.endpoint = this.config.server.public_url === undefined || fellBack ? actual : normalizeServiceUrl(this.config.server.public_url);
+		// The port the system chose is this node's address for as long as it keeps it. Writing it
+		// back is what makes the next start answer where the peers already look, and it costs one
+		// file write on the first start and none afterwards.
+		if (this.config.server.public_url === undefined && this.config.server.port !== bound) {
+			await this.rememberPort(bound);
+		}
 		const instanceId = crypto.randomUUID();
 		// The decider probes peers for their execution contexts, so it must use the node's own
 		// transport: an unsigned probe is refused by every keyed peer.
@@ -418,6 +434,16 @@ class OmpRuntime implements PluginRuntime {
 		if (seeds.includes(seed)) return;
 		const saved = await saveConfig({ ...this.config, discovery: { seeds: [...seeds, seed] } });
 		this.config.discovery = saved.discovery;
+	}
+	/**
+	 * The listening port is configuration for the same reason a seed is: a peer holds the
+	 * address it last reached, and a node that answers somewhere new has moved without telling
+	 * anyone. One write on the first start, and one more only after a port conflict moved it.
+	 */
+	private async rememberPort(port: number): Promise<void> {
+		const saved = await saveConfig({ ...this.config, server: { ...this.config.server, port } });
+		this.config.server = saved.server;
+		this.pi.logger.info("onlyne.port.persisted", { port, path: this.config.path });
 	}
 	/** Stage one of one exchange: the peer's proved fingerprint, and the session that commits it. */
 	async trustBegin(node: string): Promise<KeyExchange> {

@@ -64,7 +64,7 @@
 主会话的 `session_start` 依次执行：
 
 1. 挂状态行（有 UI 时）；读取配置。缺配置是正常的首次状态，不报错，等 `/onlyne init`。
-2. 打开 `omp.db`，`Bun.serve` 绑定 `server.bind` 与端口 `0`；由实际端口生成 endpoint，广播地址取 `advertisedHost(bind)`。
+2. 打开 `omp.db`，`Bun.serve` 绑定 `server.bind` 与 `server.port`；端口为空时取 `0` 由系统分配，绑定成功后把实际端口写回配置，下一次启动复用。被占用时改用系统端口并写回新值，各记一条日志。由实际端口生成 endpoint，广播地址取 `advertisedHost(bind)`。
 3. 构造判定器与 `Runtime` 桥，解析密钥目录（`project`/`global`/`none`），用会话定时器实现 `MaintenanceClock`。
 4. 创建节点；把域成员关系对齐到配置的 region（先退出旧域，再加入新域，各用独立幂等键）。
 5. 启动 DNS-SD（失败只记日志），登记主执行上下文，`client.recover()`，`client.runMaintenance()`。
@@ -82,7 +82,7 @@
 
 | 路径 | 内容 | 谁写 |
 |---|---|---|
-| `.onlyne/config.toml` | region、node id、bind、`key_scope`、`threads.page_size`、可选 language、种子与固定指纹 | bootstrap / config 界面与 language 命令 |
+| `.onlyne/config.toml` | region、node id、bind、`port`、`key_scope`、`threads.page_size`、可选 language、种子与固定指纹 | bootstrap / config 界面、language 命令，以及运行时写回端口 |
 | `.onlyne/omp.db` | `kv` 表：库的全部协议状态 + `contexts/` 执行上下文登记 | 库与插件共用同一事务实现 |
 | `.onlyne/keys/<node-id>/` | `priv.pem`、`pub.key`（`key_scope = "project"`） | 密钥服务 |
 | `~/.config/onlyne/keys/<node-id>/` | 同上（`key_scope = "global"`，缺省） | 密钥服务 |

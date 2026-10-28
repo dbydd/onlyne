@@ -24,6 +24,7 @@ key_scope = "project"
 
 [server]
 bind = "127.0.0.1"
+# port is written by the runtime; set it only to pin one by hand.
 
 [threads]
 page_size = 50
@@ -35,12 +36,15 @@ references. `/onlyne init` suggests region from the current Tern session name
 and leaves the node id empty for the user. A short region is saved as
 `urn:onlyne:region:<encoded name>`.
 
-The listening port is allocated by the operating system at startup; the runtime
-derives the endpoint and publishes it through discovery. Discovery uses a seed
-address supplied during bootstrap and an HTTP candidate exchange stored in
-`.onlyne/omp.db`. DNS-SD is an optional same-link accelerator: install
+The first start lets the operating system choose the listening port, and the
+runtime writes that port back as `server.port`; every later start reuses it, so
+the address a peer recorded keeps answering. A port another process already
+holds moves the node to a system-chosen one, which is written back the same way.
+The runtime derives the endpoint and publishes it through discovery. Discovery
+uses a seed address supplied during bootstrap and an HTTP candidate exchange
+stored in `.onlyne/omp.db`. DNS-SD is an optional same-link accelerator: install
 `bonjour-service` to enable it. The configuration does not contain endpoint,
-port, peers, task-spawn policy or supplement windows.
+peers, task-spawn policy or supplement windows.
 
 `node.key_scope` names where the identity key lives. `project` keeps it in
 `<project>/.onlyne/keys`, which a git work tree must ignore; the node refuses to

@@ -91,7 +91,7 @@
 
 - OMP-4.3 region 接受绝对 URI。用户输入短名时，界面 MUST 展示将保存的 `urn:onlyne:region:<经 URI 编码的短名>` 并请确认。Tern 改名或工作目录变化 MUST NOT 自动修改已保存的协议归属。
 - OMP-4.4 密钥位置的规则：`project` 为 `.onlyne/keys`，`global` 为 `~/.config/onlyne/keys`。选 `project` 时该目录 MUST 已被 git 忽略，否则拒绝创建并说明修复方式。目录权限 MUST 为 0700、私钥 MUST 为 0600，不依赖 umask；加载时私钥组可读或全局可读 MUST 拒绝使用。选中位置拒绝创建时启动 MUST 失败，MUST NOT 静默改用另一位置。
-- OMP-4.5 监听端口 MUST 由操作系统在本次启动分配；endpoint MUST 由实际监听结果生成并发布。配置 MUST NOT 包含 `endpoint`、`port`、`peers`、`default_attention`、`omp.spawn`、`supplement_window`。
+- OMP-4.5 监听端口首次启动 MUST 由操作系统分配；宿主 MUST 把实际绑定的端口写回 `server.port`，此后每次启动 MUST 复用该端口。端口被其他进程占用时，宿主 MUST 改用系统分配的端口并改写 `server.port`，两条事实各自记一条日志：占用为 warn `onlyne.port.taken`，写回为 info `onlyne.port.persisted`。endpoint MUST 由实际监听结果生成并发布。`server.port` 由宿主写入，引导界面不收集它。配置 MUST NOT 包含 `endpoint`、`peers`、`default_attention`、`omp.spawn`、`supplement_window`。
 - OMP-4.6 配置写入项目 `.onlyne/config.toml`。对端地址、公钥与核对记录写入项目 SQLite；`peers` 不作为配置文件条目维护。
 - OMP-4.7 对端 MUST 经网络自动发现。引导 MUST 允许用户提供一个可达节点地址并立即核对，后续候选经 HTTP 取得；多播只是可选加速器。
 - OMP-4.8 region 成员关系 MUST 由本节点自己提交；一个节点同一时间只属于一个域。界面 MUST NOT 把 region 当成密钥、凭据或连接许可。

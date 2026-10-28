@@ -21,7 +21,7 @@ OMP 中的 agent 通过一个 `msg` 工具发信、回复、读取消息、管�
 
 首次加载无需预写配置。`/onlyne init`、`/onlyne menu` 和未配置时的 `/onlyne` 打开同一个 bootstrap 界面，收集 region、node.id、server.bind、node.key_scope 和 threads.page_size，写入宿主配置。region 输入短名时界面展示将保存的 `urn:onlyne:region:<编码后短名>` 并请确认。
 
-监听端口由操作系统在本次启动分配，endpoint 由实际监听结果生成并发布；配置不包含 endpoint、port、peers、default_attention、omp.spawn 或 supplement_window。对端经网络自动发现，地址与核对记录写入本地发现目录。保存配置、启动监听、提交 region 成员关系、发布发现是分别可失败的步骤，界面显示实际完成位置，取消引导不写配置也不启动节点。
+监听端口首次启动由操作系统分配，宿主把实际绑定的端口写回 `server.port`，此后每次启动复用该端口，endpoint 由实际监听结果生成并发布。端口被其他进程占用时，宿主改用系统分配的端口并改写 `server.port`。引导界面不收集端口，这一项由宿主自己维护。配置不包含 endpoint、peers、default_attention、omp.spawn 或 supplement_window。对端经网络自动发现，地址与核对记录写入本地发现目录。保存配置、启动监听、提交 region 成员关系、发布发现是分别可失败的步骤，界面显示实际完成位置，取消引导不写配置也不启动节点。
 
 字段取值与默认值、密钥位置与权限、git ignore 检查、四步失败与续做规则见[《OMP 宿主契约》](../contracts/omp.md)§4；发现与 region 的协议规则见 [RFC 0011](0011-discovery-and-domains.md)。
 

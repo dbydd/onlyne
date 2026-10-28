@@ -21,6 +21,12 @@ export interface OnlyneConfig {
 	};
 	server: {
 		bind: string;
+		/**
+		 * The port this node answers on. Absent asks the operating system for one, and the
+		 * chosen port is written back here: a node whose address changes on every start
+		 * leaves every peer that recorded it calling a port nobody serves.
+		 */
+		port?: number;
 		/** The externally reachable base URL when a reverse proxy fronts the node. */
 		public_url?: string;
 	};

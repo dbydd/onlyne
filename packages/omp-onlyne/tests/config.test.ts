@@ -140,12 +140,24 @@ describe("config", () => {
 	test("rejects retired keys instead of migrating them", () => {
 		const retired = [
 			SAMPLE.replace('key_ref = "env:ONLYNE_NODE_TOKEN"', 'key_ref = "env:ONLYNE_NODE_TOKEN"\nendpoint = "http://127.0.0.1:7801/onlyne/v3"'),
-			SAMPLE.replace('bind = "127.0.0.1"', 'bind = "127.0.0.1"\nport = 7801'),
 			SAMPLE.replace("page_size = 50", 'page_size = 50\ndefault_attention = "inbox"'),
 			`${SAMPLE}\n[peers."urn:onlyne:agent:reviewer"]\nendpoint = "http://127.0.0.1:7802/onlyne/v3"\n`,
 			`${SAMPLE}\n[omp]\nspawn = "async"\n`,
 		];
 		for (const text of retired) expect(() => parseConfig(text, PATH)).toThrow(ConfigError);
+	});
+
+	test("keeps the listening port it was given, and writes it back", () => {
+		const pinned = parseConfig(SAMPLE.replace('bind = "127.0.0.1"', 'bind = "127.0.0.1"\nport = 7801'), PATH);
+		expect(pinned.server.port).toBe(7801);
+		expect(parseConfig(serializeConfig(pinned), pinned.path).server.port).toBe(7801);
+		// Zero is "let the system choose": it is a valid input and nothing to persist.
+		expect(parseConfig(SAMPLE.replace('bind = "127.0.0.1"', 'bind = "127.0.0.1"\nport = 0'), PATH).server.port)
+			.toBeUndefined();
+		expect(() => parseConfig(SAMPLE.replace('bind = "127.0.0.1"', 'bind = "127.0.0.1"\nport = 70000'), PATH))
+			.toThrow(ConfigError);
+		expect(() => parseConfig(SAMPLE.replace('bind = "127.0.0.1"', 'bind = "127.0.0.1"\nport = -1'), PATH))
+			.toThrow(ConfigError);
 	});
 
 	test("round-trips through serializeConfig", () => {

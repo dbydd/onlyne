@@ -137,6 +137,7 @@ export function parseConfig(text: string, path: string): OnlyneConfig {
 	const keyRef = optionalString(node, "key_ref", "node.key_ref");
 	const keyScope = optionalString(node, "key_scope", "node.key_scope");
 	const publicUrl = optionalString(server, "public_url", "server.public_url");
+	const port = optionalInteger(server, "port", "server.port");
 	const seeds = discovery === undefined ? undefined : stringArray(discovery, "seeds", "discovery.seeds");
 	const trust = trustSeeds(raw, path);
 	const acquisition = raw.acquisition === undefined ? undefined : table(raw, "acquisition", path);
@@ -149,7 +150,7 @@ export function parseConfig(text: string, path: string): OnlyneConfig {
 		...(raw.language === undefined ? {} : { language: raw.language as Locale }),
 		region: region ?? "",
 		node: { id: id ?? "", ...(keyRef === undefined ? {} : { key_ref: keyRef }), ...(keyScope === undefined ? {} : { key_scope: keyScope as "project" | "global" | "none" }) },
-		server: { bind: bind ?? DEFAULT_BIND, ...(publicUrl === undefined ? {} : { public_url: publicUrl }) },
+		server: { bind: bind ?? DEFAULT_BIND, ...(port === undefined ? {} : { port }), ...(publicUrl === undefined ? {} : { public_url: publicUrl }) },
 		threads: { page_size: pageSize ?? DEFAULT_PAGE_SIZE },
 		acquisition: { policy: acquirePolicyOf(acquirePolicy), allow: acquireAllow ?? [...DEFAULT_ACQUISITION.allow] },
 		...(seeds === undefined && trust === undefined ? {} : { discovery: { ...(seeds === undefined ? {} : { seeds }), ...(trust === undefined ? {} : { trust }) } }),
@@ -172,6 +173,7 @@ export function serializeConfig(config: OnlyneConfig): string {
 		"",
 		"[server]",
 		`bind = ${tomlString(config.server.bind)}`,
+		...(config.server.port === undefined ? [] : [`port = ${String(config.server.port)}`]),
 		...(config.server.public_url === undefined ? [] : [`public_url = ${tomlString(config.server.public_url)}`]),
 		"",
 		"[threads]",
@@ -200,11 +202,15 @@ function validateConfig(config: OnlyneConfig): OnlyneConfig {
 	const keyRef = config.node.key_ref?.trim();
 	const bind = config.server.bind.trim();
 	const publicUrl = config.server.public_url?.trim();
+	const port = config.server.port;
 	const keyScope = config.node.key_scope;
 	if (keyScope !== undefined && keyScope !== "project" && keyScope !== "global" && keyScope !== "none") {
 		throw new ConfigError("invalid", t("keyScopeInvalid", { value: JSON.stringify(keyScope) }));
 	}
 	if (publicUrl !== undefined && publicUrl.length === 0) throw new ConfigError("invalid", t("publicUrlEmpty"));
+	if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) {
+		throw new ConfigError("invalid", t("portRange", { value: String(port) }));
+	}
 	// A seed is contacted at every start, so it is stored in the one spelling the node uses.
 	const seeds = [...new Set((config.discovery?.seeds ?? []).map(seed => seed.trim()).filter(seed => seed.length > 0).map(normalizeServiceUrl))];
 	if (bind.length === 0) throw new ConfigError("invalid", t("bindEmpty"));
@@ -231,7 +237,7 @@ function validateConfig(config: OnlyneConfig): OnlyneConfig {
 		...(config.language === undefined ? {} : { language: config.language }),
 		region,
 		node: { id, ...(keyRef === undefined || keyRef.length === 0 ? {} : { key_ref: keyRef }), ...(keyScope === undefined ? {} : { key_scope: keyScope }) },
-		server: { bind, ...(publicUrl === undefined ? {} : { public_url: publicUrl }) },
+		server: { bind, ...(port === undefined || port === 0 ? {} : { port }), ...(publicUrl === undefined ? {} : { public_url: publicUrl }) },
 		threads: { page_size: pageSize },
 		acquisition,
 		...(seeds.length === 0 ? {} : { discovery: { seeds } }),
@@ -246,7 +252,6 @@ function rejectRetired(
 	threads: Record<string, unknown>,
 ): void {
 	rejectKey(node, "endpoint", t("retiredEndpoint"));
-	rejectKey(server, "port", t("retiredPort"));
 	rejectKey(raw, "peers", t("retiredPeers"));
 	rejectKey(raw, "omp", t("retiredOmp"));
 	rejectKey(threads, "default_attention", t("retiredAttention"));

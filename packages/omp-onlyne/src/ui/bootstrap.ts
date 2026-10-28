@@ -172,7 +172,11 @@ export class OnlyneBootstrap implements Component {
 				// The form does not edit these; saving must not erase them.
 				...(previous?.node.key_ref === undefined ? {} : { key_ref: previous.node.key_ref }),
 			},
-			server: { bind, ...(previous?.server.public_url === undefined ? {} : { public_url: previous.server.public_url }) },
+			server: {
+				bind,
+				...(previous?.server.port === undefined ? {} : { port: previous.server.port }),
+				...(previous?.server.public_url === undefined ? {} : { public_url: previous.server.public_url }),
+			},
 			threads: { page_size: Number(this.value("pageSize")) },
 			...(seeds.length === 0 ? {} : { discovery: { seeds } }),
 			...(previous?.trust === undefined ? {} : { trust: previous.trust }),
