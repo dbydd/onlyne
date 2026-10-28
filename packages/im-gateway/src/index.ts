@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import {
   OnlyneNode, OnlyneError, MemoryStorage, type Auth, type MaintenanceClock, type NodeId,
   type KeyHook, type OperationRequest, type Plugins, type Resource, type ResourceRef, type Storage,
-  type ThreadRef, type Transport,
+  type ThreadRef, type TraceEvent, type Transport,
 } from '@onlyne/lib';
-import { coordinateOf, createDriverBridge, type Connector, type ImEvent, type SendOutcome } from '@onlyne/im-core';
+import { coordinateOf, createDriverBridge, resourceIdOf, type Connector, type ImEvent, type SendOutcome } from '@onlyne/im-core';
+import { leveled, type LeveledLog, type LogLine, type LogSink } from '@onlyne/node-host';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { DEFAULT_WEBHOOK_PATH, type ChannelConfig, type GatewayConfig } from './config.js';
@@ -12,7 +14,7 @@ import { EventPusher } from './pusher.js';
 import { ThreadRenderer, type RenderTarget } from './render.js';
 import {
   connectorStatus, statusLines,
-  type ChannelStatus, type StatusCounters,
+  type ChannelStatus, type GatewayStatusReport, type StatusCounters,
 } from './status.js';
 import { t } from './gateway-text.js';
 
@@ -21,20 +23,35 @@ export type ConnectorFactory = (config: GatewayConfig, channel: ChannelConfig) =
 
 export type { ChannelConfig, ChannelTransport, GatewayConfig } from './config.js';
 export { gatewayNodeId, DEFAULT_WEBHOOK_PATH } from './config.js';
-export { statusLines, type ChannelStatus, type ConnectorStatus, type StatusConnector } from './status.js';
+export {
+  statusLines,
+  type ChannelStatus, type ConnectorStatus, type GatewayResourceStatus, type GatewayStatusReport, type StatusConnector,
+} from './status.js';
 
 /** The factory export each connector package carries; the gateway never imports a platform SDK. */
 const CONNECTOR_EXPORTS: Record<string, string> = {
   fake: 'createFakeConnector', lark: 'createLarkConnector', qq: 'createQqConnector', wechat: 'createWechatConnector',
 };
 
+/** Connectors that report their own transitions, so the maintenance pass must not poll a second opinion. */
+const STATE_REPORTING: Record<string, true> = { qq: true, lark: true };
+
+/** At most one maintenance summary per minute: the pass count is what the operator reads, not every pass. */
+const SUMMARY_WINDOW_MS = 60_000;
+
 /**
  * The constructor argument each platform package expects. `im-fake` takes a script; a real
  * platform takes the v2 credential chain (explicit value, then credential file, then its
- * conventional environment pair, which the connector reads from `env`), plus the host log and
- * the inbound transport — with its callback path only when that transport is the webhook.
+ * conventional environment pair, which the connector reads from `env`), plus the host log,
+ * the inbound transport — with its callback path only when that transport is the webhook —
+ * and the callback a connector reports its own state transitions to.
  */
-function connectorOptions(config: GatewayConfig, channel: ChannelConfig, log: (message: string, fields?: Record<string, unknown>) => void): unknown {
+function connectorOptions(
+  config: GatewayConfig,
+  channel: ChannelConfig,
+  log: LogLine,
+  onState: (to: string, detail?: Record<string, unknown> | Error) => void,
+): unknown {
   if (channel.platform === 'fake') {
     const script = channel.script;
     const field = (name: 'events' | 'answers'): unknown[] => {
@@ -60,6 +77,7 @@ function connectorOptions(config: GatewayConfig, channel: ChannelConfig, log: (m
     ...(webhookPath === undefined ? {} : { webhookPath }),
     env: process.env,
     log,
+    onState,
   };
 }
 
@@ -69,7 +87,12 @@ function connectorOptions(config: GatewayConfig, channel: ChannelConfig, log: (m
  * runtime-resolved and a missing package answers `unsupported_delivery` instead of failing the
  * install of a host that serves another platform.
  */
-async function builtinFactory(config: GatewayConfig, channel: ChannelConfig, log: (message: string, fields?: Record<string, unknown>) => void): Promise<Connector> {
+async function builtinFactory(
+  config: GatewayConfig,
+  channel: ChannelConfig,
+  log: LogLine,
+  onState: (to: string, detail?: Record<string, unknown> | Error) => void,
+): Promise<Connector> {
   const specifier: string = `@onlyne/im-${channel.platform}`;
   const mod: unknown = await import(specifier).catch(() => undefined);
   const name = CONNECTOR_EXPORTS[channel.platform] ?? 'createConnector';
@@ -77,7 +100,7 @@ async function builtinFactory(config: GatewayConfig, channel: ChannelConfig, log
   if (typeof create !== 'function') {
     throw new OnlyneError('unsupported_delivery', t('error.noConnectorPackage', { platform: channel.platform }));
   }
-  return (create as (options: unknown) => Connector)(connectorOptions(config, channel, log));
+  return (create as (options: unknown) => Connector)(connectorOptions(config, channel, log, onState));
 }
 
 /**
@@ -106,6 +129,8 @@ export interface ImGateway {
   maintain(): Promise<void>;
   /** The host-side status view: platform state, counters, onboarding and the last failure. */
   status(): Promise<ChannelStatus>;
+  /** The live readout a local listener answers: bindings, cursors and the owed-push count. */
+  statusReport(): Promise<GatewayStatusReport>;
   /** The status view as display lines, for the node host's panel. */
   statusLines(): Promise<string[]>;
   stop(): Promise<void>;
@@ -124,10 +149,31 @@ export interface ImGatewayOptions {
    * binding that trusts a declared `Onlyne-Actor`. The CLI always supplies one.
    */
   keys?: KeyHook;
-  log?: (message: string, fields?: Record<string, unknown>) => void;
+  /** The host's log. A logger from `createLogger` also carries the level entry points. */
+  log?: LogSink;
 }
 
-/** RFC 0012 §1: the thread that mirrors one conversation, derived so a restart resolves the same one. */
+/** `len` and `sha8` name a body in the log without putting it there. */
+function digest(body: string): { len: number; sha8: string } {
+  return { len: body.length, sha8: createHash('sha256').update(body, 'utf8').digest('hex').slice(0, 8) };
+}
+
+/** The library's source row for one platform event id (`key('resource', owner, id, 'source', source)`). */
+const sourceRow = (ref: ResourceRef, source: string): string =>
+  ['resource', ref.owner, ref.id, 'source', source].map(encodeURIComponent).join('/');
+
+/** Where the host records the binding it last saw, so a handover becomes one line, not a snapshot. */
+const bindingRow = (ref: ResourceRef): string =>
+  `im/binding/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`;
+
+interface BindingRow { handler: NodeId; revision: string; cursor: string }
+
+/** One conversation this endpoint serves, with the coordinate its id was derived from. */
+interface ConversationResource { resource: Resource; conversation: string }
+
+/**
+ * RFC 0012 §1: the thread that mirrors one conversation, derived so a restart resolves the same one.
+ */
 const threadRefOf = (ref: ResourceRef): ThreadRef => ({ owner: ref.owner, id: `im-${ref.id}` });
 
 /** The resource definition one conversation gets, whether it was adopted or pre-bound (RFC 0012 §3). */
@@ -172,11 +218,19 @@ async function ensureThread(node: OnlyneNode, ref: ThreadRef, title: string): Pr
   }
 }
 
+/** The operation result's own codes, so `platform.send` names the failure the caller is told. */
+function platformOutcome(outcome: SendOutcome): { outcome: 'committed' | 'refused' | 'unknown'; code?: string } {
+  if (outcome.state === 'committed' && outcome.error === undefined) return { outcome: 'committed' };
+  if (outcome.state === 'committed') return { outcome: 'refused', code: 'capacity_exceeded' };
+  return { outcome: 'unknown', code: 'unavailable' };
+}
+
 /**
- * Counts platform calls for the status view without changing `Connector`: the bridge, the
- * renderer and the pusher all keep talking to the connector they were handed.
+ * Counts platform calls for the status view and records every outbound platform send, without
+ * changing `Connector`: the bridge, the renderer and the pusher all keep talking to the
+ * connector they were handed.
  */
-function countedConnector(inner: Connector, counters: StatusCounters): Connector {
+function countedConnector(inner: Connector, counters: StatusCounters, out: LeveledLog): Connector {
   const record = async (work: () => Promise<SendOutcome>): Promise<SendOutcome> => {
     counters.sends += 1;
     counters.last_send_at = new Date().toISOString();
@@ -193,7 +247,30 @@ function countedConnector(inner: Connector, counters: StatusCounters): Connector
     platform: inner.platform,
     start: () => inner.start(),
     onEvent: listener => inner.onEvent(listener),
-    send: request => record(() => inner.send(request)),
+    async send(request) {
+      const body = digest(request.text);
+      let outcome: SendOutcome;
+      try {
+        outcome = await record(() => inner.send(request));
+      } catch (error) {
+        const at = error instanceof OnlyneError ? error.error.code : undefined;
+        out.warn('platform.send', {
+          conversation: request.conversation, outcome: 'unknown',
+          ...(at === undefined ? {} : { code: at }), ...body,
+        });
+        throw error;
+      }
+      const settled = platformOutcome(outcome);
+      const fields = {
+        conversation: request.conversation,
+        ...settled,
+        ...(outcome.message_id === undefined ? {} : { message_id: outcome.message_id }),
+        ...body,
+      };
+      if (settled.outcome === 'committed') out.log('platform.send', fields);
+      else out.warn('platform.send', fields);
+      return outcome;
+    },
     stop: () => inner.stop(),
     ...(inner.operations === undefined ? {} : { operations: inner.operations }),
     ...(inner.validate === undefined ? {} : { validate: (operation, data) => inner.validate!(operation, data) }),
@@ -206,35 +283,160 @@ function hasWebhook(connector: Connector): connector is WebhookConnector {
 }
 
 /**
+ * The reconcile failure the library reports once per `(owner, thread, code)` window. Declared
+ * beside the library's own trace union because the host is the side that renders it.
+ */
+export interface ReconcileFailureTrace {
+  event: 'reconcile.failed';
+  owner: NodeId;
+  thread: string;
+  code: string;
+  message: string;
+  attempts: number;
+}
+
+/** Everything the host renders from the library's trace. */
+export type HostTrace = TraceEvent | ReconcileFailureTrace;
+
+/** One log line for a trace the host renders itself, or `undefined` when the line is not its job. */
+export interface TraceLine {
+  level: 'debug' | 'warn';
+  message: 'reconcile.failed' | 'inbound.acked';
+  fields: Record<string, unknown>;
+}
+
+/**
+ * The two traces the host renders: a failed reconcile pull is a degraded node, so it is a warning
+ * with the reason and the number of failures the library collapsed into it; an ack that closes an
+ * obligation is per-pass detail.
+ */
+export function traceLine(event: HostTrace): TraceLine | undefined {
+  if (event.event === 'reconcile.failed') {
+    return {
+      level: 'warn',
+      message: 'reconcile.failed',
+      fields: {
+        owner: event.owner, thread: event.thread, code: event.code, message: event.message, attempts: event.attempts,
+      },
+    };
+  }
+  if (event.event === 'inbound.acked') {
+    return {
+      level: 'debug',
+      message: 'inbound.acked',
+      fields: { owner: event.thread.owner, thread: event.thread.id, seq: event.seq, obligation: event.obligation },
+    };
+  }
+  return undefined;
+}
+
+interface StateReporter {
+  /** A transition the connector reported itself, carrying the shard and session it held. */
+  report(to: string, fields?: Record<string, unknown>): void;
+  /** A state read from `status()`, for a connector that cannot report its own transitions. */
+  observe(state: string, error?: string): void;
+}
+
+/**
+ * One line per connector state transition. RFC 0012 §4 keeps the connector a translation layer,
+ * so the host owns the line: a connector that reports its own transitions (qq, lark) feeds this
+ * with the shard and session it held, and anything else is observed from `status()` once per
+ * maintenance pass, so a connector that cannot report still shows its transitions.
+ */
+function stateReporter(platform: string, out: LeveledLog): StateReporter {
+  let last: string | undefined;
+  const report = (to: string, fields: Record<string, unknown> = {}): void => {
+    if (last === to) return;
+    // A connector that reports nothing yet is not transitioning to `unknown`; the first real
+    // state is what the operator needs to see.
+    if (last === undefined && to === 'unknown') return;
+    out.log('connector.state', { platform, from: last ?? 'unknown', to, ...fields });
+    last = to;
+  };
+  return { report, observe: (state, error) => report(state, error === undefined ? {} : { error }) };
+}
+
+/**
  * Assembles the gateway: bridge first (the library captures the driver at service
  * construction, resources.ts:159, so the resource accessor is lazy), then the node.
  */
 export async function createImGateway(config: GatewayConfig, options: ImGatewayOptions = {}): Promise<ImGateway> {
-  const log = options.log ?? (() => undefined);
+  const out = leveled(options.log);
+  const log = out.log;
   const storage: Storage = options.storage === 'memory' ? new MemoryStorage() : new FileStorage(config.storage_path);
   const owner: NodeId = config.node.id;
   const channel = config.channel;
   const counters: StatusCounters = { events: 0, sends: 0, send_failures: 0 };
   const startedAt = Date.now();
+  const states = stateReporter(channel.platform, out);
+  /** qq and lark carry the same callback shape to their connectors; the second argument is a field set or an error. */
+  const reportState = (to: string, detail?: Record<string, unknown> | Error): void => {
+    states.report(to, detail instanceof Error ? { error: detail.message } : detail);
+  };
   let startFailure: string | undefined;
 
   // The connector comes first: the bridge pins its platform table at construction, while the
   // resource service stays a lazy accessor because the library captures the driver when
   // the service is built (resources.ts:159).
+  const builtin = options.factories?.[channel.platform] === undefined;
   const factory = options.factories?.[channel.platform]
-    ?? ((cfg: GatewayConfig, entry: ChannelConfig) => builtinFactory(cfg, entry, log));
+    ?? ((cfg: GatewayConfig, entry: ChannelConfig) => builtinFactory(cfg, entry, log, reportState));
   const platformConnector = await factory(config, channel);
   if (platformConnector.platform !== channel.platform) {
     throw new OnlyneError('invalid_request', t('error.noConnectorPlatform', { platform: channel.platform, event: platformConnector.platform }));
   }
-  const connector = countedConnector(platformConnector, counters);
+  const connector = countedConnector(platformConnector, counters, out);
+  const rememberBinding = async (resource: Resource): Promise<void> => {
+    await storage.transaction(async tx => {
+      await tx.put(bindingRow(resource.resource_ref), {
+        handler: resource.binding.handler, revision: resource.revision, cursor: resource.binding.cursor,
+      } satisfies BindingRow);
+    });
+  };
+  /**
+   * One line per binding change this pass observes. The library commits a handover inside its
+   * own service, so the host compares the binding it last recorded with the live one; a cursor
+   * that moved on its own (an ack) updates the record without being a binding transition.
+   */
+  const watchBindings = async (entries: ConversationResource[]): Promise<void> => {
+    for (const { resource } of entries) {
+      const key = bindingRow(resource.resource_ref);
+      const current: BindingRow = {
+        handler: resource.binding.handler, revision: resource.revision, cursor: resource.binding.cursor,
+      };
+      const prior = await storage.transaction(async tx => tx.get<BindingRow>(key));
+      if (prior === undefined || (prior.handler === current.handler && prior.revision === current.revision && prior.cursor === current.cursor)) {
+        if (prior === undefined) await rememberBinding(resource);
+        continue;
+      }
+      if (prior.handler !== current.handler) {
+        out.log('resource.binding', {
+          action: 'handover', resource: `${resource.resource_ref.owner}/${resource.resource_ref.id}`,
+          old_handler: prior.handler, new_handler: current.handler,
+          revision: current.revision, cursor: current.cursor,
+        });
+      }
+      await rememberBinding(resource);
+    }
+  };
   const adopt = async (ref: ResourceRef, conversation: string): Promise<void> => {
     const coordinate = coordinateOf(ref.id);
     if (coordinate === undefined || coordinate.platform !== channel.platform) {
       throw new OnlyneError('invalid_request', t('error.noConnectorResource', { resource: ref.id }));
     }
-    await node.resources.register(node.auth, definitionOf(owner, channel, ref, conversation, connector));
+    const existing = await node.resources.describe(node.auth, ref).then(resource => resource, (error: unknown) => {
+      if (error instanceof OnlyneError && error.error.code === 'not_found') return undefined;
+      throw error;
+    });
+    const resource = await node.resources.register(node.auth, definitionOf(owner, channel, ref, conversation, connector));
     await ensureThread(node, threadRefOf(ref), conversation);
+    if (existing !== undefined) return;
+    out.log('resource.binding', {
+      action: 'bind', resource: `${ref.owner}/${ref.id}`,
+      old_handler: null, new_handler: resource.binding.handler,
+      revision: resource.revision, cursor: resource.binding.cursor,
+    });
+    await rememberBinding(resource);
   };
   const bridge = createDriverBridge({
     node: owner,
@@ -300,6 +502,12 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
       // ledger, and the gateway holds no context to await a reply in.
       supports: async plan => plan.response !== 'await',
       inject: async () => { throw new OnlyneError('unsupported_delivery', t('error.noContext')); },
+      // The library reports each lifecycle transition once: a reconcile failure that keeps its
+      // rows is a degraded node, and an ack that closes an obligation is a per-pass detail.
+      trace: (event: HostTrace) => {
+        const line = traceLine(event);
+        if (line !== undefined) out[line.level](line.message, line.fields);
+      },
     },
   };
   node = new OnlyneNode({
@@ -323,30 +531,37 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
     // An event names no recipient (RFC 0006 §5), so the push asks the binding each time and a
     // handover moves the target with it.
     handlerOf: async ref => (await node.resources.describe(node.auth, ref)).binding.handler,
-    log,
+    log: out,
   });
   /**
    * Every conversation this endpoint serves, read from the resources themselves: a conversation
    * adopted after startup must render its replies without the renderer being told about it.
    */
-  const renderTargets = async (): Promise<RenderTarget[]> => {
-    const targets: RenderTarget[] = [];
+  const conversationResources = async (): Promise<ConversationResource[]> => {
+    const resources: ConversationResource[] = [];
     let cursor: string | undefined;
     for (;;) {
       const page = await node.resources.list(node.auth, { page_size: 100, ...(cursor === undefined ? {} : { cursor }) });
       for (const resource of page.items) {
         const coordinate = coordinateOf(resource.resource_ref.id);
         if (coordinate === undefined || coordinate.platform !== channel.platform) continue;
-        targets.push({
-          ref: resource.resource_ref, thread: threadRefOf(resource.resource_ref),
-          connector, conversation: coordinate.conversation,
-        });
+        resources.push({ resource, conversation: coordinate.conversation });
       }
-      if (page.next_cursor === null) return targets;
+      if (page.next_cursor === null) return resources;
       cursor = page.next_cursor;
     }
   };
-  const renderer = new ThreadRenderer({ node, storage, bridge, log });
+  const targetsOf = (entries: ConversationResource[]): RenderTarget[] => entries.map(({ resource, conversation }) => ({
+    ref: resource.resource_ref,
+    thread: threadRefOf(resource.resource_ref),
+    connector,
+    conversation,
+  }));
+  const renderer = new ThreadRenderer({ node, storage, bridge, log: out });
+  let summaryAt = 0;
+  let summaryPasses = 0;
+  let summaryReplayed = 0;
+  let summaryFailures = 0;
   const gateway: ImGateway = {
     node, config, storage, pusher, connector,
     async receive(event: ImEvent): Promise<void> {
@@ -355,9 +570,17 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
       }
       // A duplicate `source_id` reuses the stored event; the push is idempotent by
       // message identity, and the owed row is keyed by event id, so this is safe.
+      // The library's source row is the deduplication point, so reading it names the
+      // disposition without a second dedupe rule or a changed service signature.
+      const ref: ResourceRef = { owner, id: resourceIdOf(event.platform, event.conversation) };
+      const seen = await storage.transaction(async tx => tx.get<string>(sourceRow(ref, event.source_id)));
       const stored = await bridge.receive(event);
       counters.events += 1;
       counters.last_event_at = event.at;
+      log('inbound.event', {
+        conversation: event.conversation, kind: event.kind, source_id: event.source_id,
+        event_seq: stored.event_id, dedupe: seen === undefined ? 'new' : 'duplicate', ...digest(event.text),
+      });
       await pusher.afterReceive(stored.resource_ref, stored);
     },
     async fetch(request: Request): Promise<Response> {
@@ -375,8 +598,27 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
       return platformConnector.handleWebhook(request);
     },
     async maintain(): Promise<void> {
+      const before = pusher.stats();
+      const resources = await conversationResources();
+      await watchBindings(resources);
+      if (!(builtin && STATE_REPORTING[channel.platform] === true)) {
+        const observed = connectorStatus(platformConnector);
+        states.observe(observed.state, observed.error);
+      }
       await pusher.retryOwed();
-      await renderer.pass(await renderTargets());
+      await renderer.pass(targetsOf(resources));
+      const after = pusher.stats();
+      summaryPasses += 1;
+      summaryReplayed += after.attempts - before.attempts;
+      summaryFailures += after.failures - before.failures;
+      const now = Date.now();
+      if (summaryAt === 0 || now - summaryAt >= SUMMARY_WINDOW_MS) {
+        log('gateway.maintain.summary', { passes: summaryPasses, replayed: summaryReplayed, failures: summaryFailures });
+        summaryAt = now;
+        summaryPasses = 0;
+        summaryReplayed = 0;
+        summaryFailures = 0;
+      }
     },
     async status(): Promise<ChannelStatus> {
       const observed = connectorStatus(platformConnector);
@@ -403,6 +645,41 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
         uptime_ms: Date.now() - startedAt,
       };
     },
+    async statusReport(): Promise<GatewayStatusReport> {
+      const status = await gateway.status();
+      const resources = await conversationResources();
+      const owed = (await storage.transaction(async tx => tx.scan('im/push/'))).length;
+      return {
+        node: status.node,
+        platform: status.platform,
+        transport: status.transport ?? channel.transport ?? 'platform',
+        connector: {
+          state: status.state,
+          connected: status.connected,
+          reconnects: status.reconnects,
+          rate_limits: status.rate_limits,
+          ...(status.onboarding === undefined ? {} : { onboarding: status.onboarding }),
+          ...(status.error === undefined ? {} : { error: status.error }),
+        },
+        counters: {
+          events: status.events,
+          sends: status.sends,
+          send_failures: status.send_failures,
+          uptime_ms: status.uptime_ms,
+          ...(status.last_event_at === undefined ? {} : { last_event_at: status.last_event_at }),
+          ...(status.last_send_at === undefined ? {} : { last_send_at: status.last_send_at }),
+        },
+        resources: resources.map(({ resource, conversation }) => ({
+          resource: `${resource.resource_ref.owner}/${resource.resource_ref.id}`,
+          platform: channel.platform,
+          conversation,
+          handler: resource.binding.handler,
+          cursor: resource.binding.cursor,
+          revision: resource.revision,
+        })),
+        owed,
+      };
+    },
     async statusLines(): Promise<string[]> {
       return statusLines(await gateway.status());
     },
@@ -418,7 +695,9 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
   // before the next event of the same chat, so `receive` calls land in arrival order.
   connector.onEvent(event =>
     gateway.receive(event).catch(failure => {
-      log('im.receive.failed', { platform: event.platform, source: event.source_id, error: String(failure) });
+      // The platform event reached the connector but this endpoint lost it, so the line is an
+      // error rather than a degraded state.
+      out.error('im.receive.failed', { platform: event.platform, source: event.source_id, error: String(failure) });
     }));
   try {
     await platformConnector.start();
@@ -426,12 +705,18 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
     // A channel that cannot start is an operator-visible state, not a reason to kill the node:
     // its status and log carry the failure, and a credential fix reconnects on the next start.
     startFailure = error instanceof Error ? error.message : String(error);
-    log('im.connector.start.failed', { platform: channel.platform, error: startFailure });
+    out.warn('im.connector.start.failed', { platform: channel.platform, error: startFailure });
   }
 
   for (const seed of config.peers ?? []) {
-    try { await node.discovery.observe(seed, 'bootstrap'); } catch (error) { log('im.discovery.failed', { seed, error: String(error) }); }
+    try { await node.discovery.observe(seed, 'bootstrap'); } catch (error) { out.warn('im.discovery.failed', { seed, error: String(error) }); }
   }
+  // Static only: node, endpoint, platform, transport and store. Everything that moves is read
+  // from `statusReport()` or the TUI, never from a line written once at startup.
+  log('im.gateway.listening', {
+    node: owner, endpoint: base_url, platform: channel.platform,
+    transport: channel.transport ?? 'platform', storage: config.storage_path,
+  });
   return gateway;
 }
 

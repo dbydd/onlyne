@@ -1,4 +1,5 @@
 import type { Json, NodeId, OnlyneClient, ResourceEvent, ResourceRef, Storage, ThreadRef } from '@onlyne/lib';
+import { leveled, type LeveledLog, type LogSink } from '@onlyne/node-host';
 
 /** One event whose notify message has not been confirmed delivered. */
 interface OwedPush {
@@ -10,7 +11,12 @@ interface OwedPush {
    * identity for a push some peer may already have accepted (offline migration, migrate.ts).
    */
   message_id?: string;
+  /** Attempts already made, so the log names this one instead of restarting at one. */
+  attempts?: number;
 }
+
+/** How one delivery attempt ended, in the push log's vocabulary. */
+type PushOutcome = 'accepted' | 'refused' | 'timeout' | 'error';
 
 /** The deterministic projection identity for one received event. */
 export function notifyMessageId(ref: ResourceRef, eventId: string): string {
@@ -51,7 +57,9 @@ export class EventPusher {
   readonly #sender: string;
   readonly #threadOf: (ref: ResourceRef) => ThreadRef | undefined;
   readonly #handlerOf: (ref: ResourceRef) => Promise<NodeId | undefined>;
-  readonly #log: (message: string, fields?: Record<string, unknown>) => void;
+  readonly #log: LeveledLog;
+  #attempts = 0;
+  #failures = 0;
 
   constructor(options: {
     client: () => OnlyneClient;
@@ -59,21 +67,26 @@ export class EventPusher {
     sender: string;
     threadOf?: (ref: ResourceRef) => ThreadRef | undefined;
     handlerOf?: (ref: ResourceRef) => Promise<NodeId | undefined>;
-    log?: (message: string, fields?: Record<string, unknown>) => void;
+    log?: LogSink;
   }) {
     this.#client = options.client;
     this.#storage = options.storage;
     this.#sender = options.sender;
     this.#threadOf = options.threadOf ?? (() => undefined);
     this.#handlerOf = options.handlerOf ?? (async () => undefined);
-    this.#log = options.log ?? (() => undefined);
+    this.#log = leveled(options.log);
+  }
+
+  /** Attempt and failure totals so far, for the maintenance summary. */
+  stats(): { attempts: number; failures: number } {
+    return { attempts: this.#attempts, failures: this.#failures };
   }
 
   /** Records the owed push before sending, then attempts it. A failure stays owed for the ring. */
   async afterReceive(ref: ResourceRef, event: ResourceEvent): Promise<void> {
     const message_id = notifyMessageId(ref, event.event_id);
     await this.#storage.transaction(async tx => {
-      await tx.put(owedKey(ref, event.event_id), { ref, event, message_id } satisfies OwedPush);
+      await tx.put(owedKey(ref, event.event_id), { ref, event, message_id, attempts: 0 } satisfies OwedPush);
     });
     await this.deliverOne(ref, event.event_id);
   }
@@ -81,21 +94,45 @@ export class EventPusher {
   /** One attempt; the owed row is deleted only when the notify message was accepted. */
   async deliverOne(ref: ResourceRef, eventId: string): Promise<void> {
     const client = this.#client();
+    const stored = await this.#storage.transaction(async tx =>
+      tx.get<OwedPush>(owedKey(ref, eventId)));
+    const attempt = (stored?.attempts ?? 0) + 1;
+    if (stored !== undefined) {
+      await this.#storage.transaction(async tx => {
+        await tx.put(owedKey(ref, eventId), { ...stored, attempts: attempt } satisfies OwedPush);
+      });
+    }
+    let target: NodeId | undefined;
+    let seq: string | undefined;
+    /** One line per attempt: the outcome vocabulary is the same for the ring and the first send. */
+    const record = (outcome: PushOutcome, error?: string): void => {
+      this.#attempts += 1;
+      if (outcome !== 'accepted') this.#failures += 1;
+      const fields = {
+        target: target ?? null,
+        ...(seq === undefined ? {} : { seq }),
+        event_id: eventId,
+        outcome,
+        attempt,
+        ...(error === undefined ? {} : { error }),
+      };
+      if (outcome === 'accepted') this.#log.log('resource.push', fields);
+      else this.#log.warn('resource.push', fields);
+    };
     try {
-      const stored = await this.#storage.transaction(async tx =>
-        tx.get<OwedPush>(owedKey(ref, eventId)));
       const thread = this.#threadOf(ref);
       if (thread === undefined) {
         // Registration creates the thread before connectors start, so this is a misconfigured
         // resource rather than a transient fault; the owed row stays and is retried.
-        this.#log('im.push.no_thread', { ref: `${ref.owner}/${ref.id}`, event: eventId });
+        record('error', 'no thread');
         return;
       }
       const recipient = await this.#handlerOf(ref);
       if (recipient === undefined) {
-        this.#log('im.push.no_handler', { ref: `${ref.owner}/${ref.id}`, event: eventId });
+        record('error', 'no handler');
         return;
       }
+      target = recipient;
       const data = (stored?.event.data ?? {}) as Record<string, Json>;
       const messageId = stored?.message_id ?? notifyMessageId(ref, eventId);
       const outcome = await client.send(
@@ -126,6 +163,7 @@ export class EventPusher {
         },
         { response: 'none', execution: 'existing' },
       );
+      seq = outcome.receipt?.seq;
       // `client.send` reports a refused delivery instead of throwing; only an accepted
       // notify clears the owed row, so the ring retries the rest.
       if (outcome.error === undefined) {
@@ -133,11 +171,13 @@ export class EventPusher {
           await tx.put(projectionKey(ref, messageId), { event_id: eventId });
           await tx.delete(owedKey(ref, eventId));
         });
+        record('accepted');
       } else {
-        this.#log('im.push.refused', { ref: `${ref.owner}/${ref.id}`, event: eventId, code: outcome.error.code });
+        // An unreachable peer gave no answer; any other failure is the peer's own refusal.
+        record(outcome.error.code === 'unavailable' ? 'timeout' : 'refused', outcome.error.message);
       }
     } catch (error) {
-      this.#log('im.push.failed', { ref: `${ref.owner}/${ref.id}`, event: eventId, error: String(error) });
+      record('error', String(error));
     }
   }
 

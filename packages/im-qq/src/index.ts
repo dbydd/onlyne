@@ -66,7 +66,7 @@ export interface QqStatus {
 }
 
 /** The gateway transport's knobs; the connector supplies the port, the log and the clock. */
-export type QqGatewayTuning = Omit<QqGatewayOptions, 'port' | 'log' | 'now'>;
+export type QqGatewayTuning = Omit<QqGatewayOptions, 'port' | 'log' | 'onState' | 'now'>;
 
 export interface QqConnectorOptions {
   /** Explicit `appId:appSecret`; wins over the file and the environment pair. */
@@ -78,6 +78,11 @@ export interface QqConnectorOptions {
   /** The HTTP boundary; production leaves it unset and one is built from the credential. */
   port?: QqPort;
   log?: (message: string, fields?: Record<string, unknown>) => void;
+  /**
+   * One call per connection state transition, with the shard and session the transition knew;
+   * the host that owns the log renders it as `connector.state`.
+   */
+  onState?: (to: string, fields?: Record<string, unknown>) => void;
   /**
    * Inbound transport. The gateway socket is QQ's own receive path and needs no public endpoint;
    * `webhook` serves the signed HTTP callback instead. Default `websocket`.
@@ -206,6 +211,7 @@ export function createQqConnector(options: QqConnectorOptions = {}): QqConnector
           port,
           log,
           now,
+          ...(options.onState === undefined ? {} : { onState: options.onState }),
           ...(options.gateway ?? {}),
         });
         // Not awaited to a socket: a gateway that cannot reach QQ stays a retrying state, and
@@ -216,6 +222,11 @@ export function createQqConnector(options: QqConnectorOptions = {}): QqConnector
             if (event === undefined) return;
             // A rejection leaves the sequence number where it was: the platform replays the event.
             await emit(event);
+            log('qq.dispatch', {
+              conversation: event.conversation, source_id: event.source_id, kind: event.kind,
+              ...(typeof payload.t === 'string' ? { type: payload.t } : {}),
+              ...(typeof payload.s === 'number' ? { seq: payload.s } : {}),
+            });
             lastEventAt = event.at;
           },
         });
@@ -338,6 +349,10 @@ export function createQqConnector(options: QqConnectorOptions = {}): QqConnector
             log('qq inbound listener failed', { source_id: event.source_id, error: detail });
             return refuse('unavailable', `The inbound event was not stored: ${detail}`, 500);
           }
+          log('qq.dispatch', {
+            conversation: event.conversation, source_id: event.source_id, kind: event.kind,
+            ...(typeof envelope.t === 'string' ? { type: envelope.t } : {}),
+          });
           lastEventAt = event.at;
         }
         return Response.json({ op: 12 });

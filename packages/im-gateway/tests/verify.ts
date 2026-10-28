@@ -305,7 +305,7 @@ scripted.get('ghost:oc_ghost')!.emit(platformEvent('ghost', 'g-1', 'oc_ghost'));
 await settle();
 const owedGhost = await ghostGateway.storage.transaction(async tx => tx.scan('im/push/'));
 ok('an unreachable recipient leaves the push owed and logs it', owedGhost.length === 1
-  && logs.some(entry => entry.message === 'im.push.refused'));
+  && logs.some(entry => entry.message === 'resource.push' && entry.fields?.outcome === 'timeout'));
 await ghostGateway.maintain();
 const stillOwed = await ghostGateway.storage.transaction(async tx => tx.scan('im/push/'));
 ok('the maintenance ring retries the owed push', stillOwed.length === 1);

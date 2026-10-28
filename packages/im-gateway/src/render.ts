@@ -1,5 +1,6 @@
 import type { OnlyneNode, ResourceRef, Storage, ThreadRef } from '@onlyne/lib';
 import type { Connector } from '@onlyne/im-core';
+import { leveled, type LeveledLog, type LogSink } from '@onlyne/node-host';
 
 /** One configured conversation the renderer watches. */
 export interface RenderTarget {
@@ -34,18 +35,18 @@ export class ThreadRenderer {
   readonly #node: OnlyneNode;
   readonly #storage: Storage;
   readonly #bridge: { platformHandle(ref: ResourceRef, eventId: string): Promise<{ message_id: string; ref_handle: string } | undefined> };
-  readonly #log: (message: string, fields?: Record<string, unknown>) => void;
+  readonly #log: LeveledLog;
 
   constructor(options: {
     node: OnlyneNode;
     storage: Storage;
     bridge: { platformHandle(ref: ResourceRef, eventId: string): Promise<{ message_id: string; ref_handle: string } | undefined> };
-    log?: (message: string, fields?: Record<string, unknown>) => void;
+    log?: LogSink;
   }) {
     this.#node = options.node;
     this.#storage = options.storage;
     this.#bridge = options.bridge;
-    this.#log = options.log ?? (() => undefined);
+    this.#log = leveled(options.log);
   }
 
   async pass(targets: RenderTarget[]): Promise<void> {
@@ -85,7 +86,7 @@ export class ThreadRenderer {
     const record = await this.#storage.transaction(async tx => tx.get<RenderRecord>(recordKey(ref, seq)));
     if (record?.state === 'rendered') return true;
     if (record?.state === 'rendering') {
-      this.#log('im.render.ambiguous', { ref: `${ref.owner}/${ref.id}`, seq });
+      this.#log.warn('im.render.ambiguous', { ref: `${ref.owner}/${ref.id}`, seq });
       return true;
     }
 
@@ -107,14 +108,14 @@ export class ThreadRenderer {
     } catch (error) {
       // The platform may or may not have taken it; the `rendering` mark keeps a retry from
       // posting a duplicate, and the log is the operator's evidence.
-      this.#log('im.render.failed', { ref: `${ref.owner}/${ref.id}`, seq, error: String(error) });
+      this.#log.warn('im.render.failed', { ref: `${ref.owner}/${ref.id}`, seq, error: String(error) });
       return true;
     }
 
     if (outcome.error !== undefined) {
       // An explicit refusal means nothing was sent; drop the mark so the next pass retries.
       await this.#storage.transaction(async tx => { await tx.delete(recordKey(ref, seq)); });
-      this.#log('im.render.refused', { ref: `${ref.owner}/${ref.id}`, seq, error: outcome.error });
+      this.#log.warn('im.render.refused', { ref: `${ref.owner}/${ref.id}`, seq, error: outcome.error });
       return false;
     }
 

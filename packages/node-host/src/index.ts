@@ -5,8 +5,8 @@ import { GatewayTui } from './tui.ts';
 
 export { createNodeKey } from './keys.ts';
 export { NetworkDiscovery } from './network.ts';
-export { createLogger } from './log.ts';
-export type { GatewayLogger, LogRing } from './log.ts';
+export { createLogger, leveled, resolveLogLevel } from './log.ts';
+export type { GatewayLogger, LeveledLog, LogLevel, LogLine, LogRing, LogSink } from './log.ts';
 export { GatewayTui } from './tui.ts';
 
 export interface NodeHostOptions {

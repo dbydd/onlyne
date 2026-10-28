@@ -52,11 +52,41 @@ and the trust terminal shows that state.
 Install the connector package for the platform you serve: `@onlyne/im-lark`, `@onlyne/im-qq`, or
 `@onlyne/im-wechat`.
 
-## Status
+## Diagnosis
 
-The terminal's status area shows the channel, its connection state, event and send counts,
-reconnect count, rate-limit hits, the time of the last event, onboarding fields, and the last
-error. `ImGateway.statusLines()` returns the same lines for a host without a terminal.
+Read live state from the gateway's own listener, never from a startup log line:
+
+```sh
+curl http://127.0.0.1:3991/im/status
+```
+
+The answer is JSON: the node, platform and transport; the connector's state and counters; every
+conversation resource with its handler, cursor and revision; and how many pushes are still owed.
+`transport` is the receive path the connector reports, then the configured `channel.transport`,
+then `platform` for a platform with a single built-in path.
+`/im/status` is a local host surface — the `/onlyne/v3` protocol routes are untouched. The trust
+terminal (`onlyne-im-gateway` on a TTY) renders the same view through `ImGateway.statusLines()`,
+which a host without a terminal can call directly. `ImGateway.statusReport()` returns the JSON.
+
+`im.gateway.listening` is written once at startup with static fields only — `node`, `endpoint`,
+`platform`, `transport`, `storage`. It is not a state snapshot: it never names the connector's
+state, the counters or a binding.
+
+## Log levels
+
+The host logger writes JSON lines. `ONLYNE_LOG_LEVEL` selects the threshold (`debug`, `info`,
+`warn`, `error`); the default is `info`, and the ring the TUI renders plus the file sink keep
+every line that gets through.
+
+| Level | Meaning | Examples |
+|---|---|---|
+| `debug` | Per-pass and protocol internals, off by default | `inbound.acked`, a reconcile pull, a replayed todo |
+| `info` | State transitions and business milestones, one line each | `im.gateway.listening`, `connector.state`, `inbound.event`, `resource.binding`, `resource.push` accepted, `platform.send` committed, `gateway.maintain.summary` |
+| `warn` | Degraded but running | `connector.state` to an error, `resource.push` refused or timed out, `resource.push` with no thread or handler, `platform.send` refused, `im.render.ambiguous`, `reconcile.failed`, a channel that could not start |
+| `error` | The operation failed and the caller lost something | `im.receive.failed` |
+
+Message bodies never appear in a log line: `len` and `sha8` (the first eight hex digits of the
+SHA-256 of the UTF-8 body) identify a body instead.
 
 ## Library use
 
@@ -65,8 +95,9 @@ import { createImGateway } from '@onlyne/im-gateway';
 ```
 
 `createImGateway` returns the node, the connector, the push ring, a `fetch` handler, a `webhook`
-handler, `maintain()`, and `statusLines()`. A host that embeds the gateway supplies its own
-listener, and routes the platform callback path to `webhook`.
+handler, `maintain()`, `status()`, `statusReport()`, and `statusLines()`. A host that embeds the
+gateway supplies its own listener, routes the platform callback path to `webhook`, and may route
+`/im/status` to `statusReport()`.
 
 ## Migrating an aggregated store
 

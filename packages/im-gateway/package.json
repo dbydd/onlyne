@@ -28,7 +28,7 @@
   "files": ["src", "README.md", "LICENSE"],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "bun tests/verify.ts && bun tests/channels.ts && bun tests/migration.ts"
+    "test": "bun tests/verify.ts && bun tests/channels.ts && bun tests/migration.ts && bun tests/observability.ts"
   },
   "dependencies": {
     "@onlyne/im-core": "^3.0.0",

@@ -53,6 +53,11 @@ export interface QqGatewayOptions {
   /** The intents bitmask; defaults to `QQ_INTENTS`. */
   intents?: number;
   log?: (message: string, fields?: Record<string, unknown>) => void;
+  /**
+   * One call per state transition, with the shard, session and attempt the transition knew.
+   * A gateway whose host owns the log reports here instead of writing its own line.
+   */
+  onState?: (to: QqGatewayState, fields: Record<string, unknown>) => void;
   now?: () => number;
   /** First reconnect waits this long before the exponential starts; 0 reconnects at once. */
   reconnectBaseMs?: number;
@@ -108,6 +113,7 @@ function detailOf(error: unknown): string {
 export function createQqGateway(options: QqGatewayOptions): QqGateway {
   const port = options.port;
   const log = options.log ?? (() => {});
+  const onState = options.onState;
   const now = options.now ?? Date.now;
   const intents = options.intents ?? QQ_INTENTS;
   const baseMs = options.reconnectBaseMs ?? DEFAULT_RECONNECT_BASE_MS;
@@ -138,7 +144,8 @@ export function createQqGateway(options: QqGatewayOptions): QqGateway {
     if (state === next) return;
     const from = state;
     state = next;
-    log('qq gateway state', { from, to: next, ...fields });
+    if (onState !== undefined) onState(next, fields);
+    else log('connector.state', { platform: 'qq', from, to: next, ...fields });
   }
 
   /** Sleeps, but a stop wakes it: `stop` must not wait out a 30 s backoff. */
@@ -455,14 +462,16 @@ export function createQqGateway(options: QqGatewayOptions): QqGateway {
         target = await info(refresh);
       } catch (error) {
         log('qq gateway discovery failed', { shard: index, error: detailOf(error), attempt });
-        transition('connecting', { shard: index });
+        transition('connecting', { shard: index, attempt, error: detailOf(error) });
         await pause(backoff(attempt));
         attempt += 1;
         continue;
       }
       const release = await acquire(index);
       if (release === undefined) return;
-      transition(shard.sessionId === undefined ? 'connecting' : 'resuming', { shard: index, seq: shard.seq });
+      transition(shard.sessionId === undefined ? 'connecting' : 'resuming', {
+        shard: index, seq: shard.seq, attempt, ...(shard.sessionId === undefined ? {} : { session_id: shard.sessionId }),
+      });
       const online = await connect(shard, target.url, Math.max(1, target.shards), release);
       if (stopping) return;
       reconnects += 1;
@@ -490,7 +499,7 @@ export function createQqGateway(options: QqGatewayOptions): QqGateway {
         return;
       } catch (error) {
         log('qq gateway discovery failed', { error: detailOf(error), attempt });
-        transition('connecting');
+        transition('connecting', { attempt, error: detailOf(error) });
         await pause(backoff(attempt));
         attempt += 1;
       }

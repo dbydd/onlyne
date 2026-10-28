@@ -54,6 +54,45 @@ export interface StatusCounters {
   last_send_at?: string;
 }
 
+/** One conversation as the live readout shows it: its binding, its revision and its cursor. */
+export interface GatewayResourceStatus {
+  resource: string;
+  platform: string;
+  conversation: string;
+  handler: NodeId;
+  cursor: string;
+  revision: string;
+}
+
+/**
+ * The live readout a local listener answers (`GET /im/status`). It is host state only: the
+ * connector's own counters, the resource bindings, and how many pushes are still owed.
+ */
+export interface GatewayStatusReport {
+  node: NodeId;
+  platform: string;
+  transport: string;
+  connector: {
+    state: string;
+    connected: boolean;
+    reconnects: number;
+    rate_limits: number;
+    onboarding?: string[];
+    error?: string;
+  };
+  counters: {
+    events: number;
+    sends: number;
+    send_failures: number;
+    uptime_ms: number;
+    last_event_at?: string;
+    last_send_at?: string;
+  };
+  resources: GatewayResourceStatus[];
+  /** Push rows still waiting for an accepted notify. */
+  owed: number;
+}
+
 const empty: ConnectorStatus = { state: 'unknown', connected: false, reconnects: 0, rate_limits: 0 };
 
 const text = (value: unknown): string | undefined =>
