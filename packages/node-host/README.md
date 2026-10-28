@@ -20,6 +20,11 @@ library is not allowed to do.
 30 seconds, and on a terminal hands the operator the trust screen. Discovery only adds
 candidates: a key exchange still needs both fingerprints confirmed.
 
+`startNodeHost({ status })` accepts an async callback that returns gateway-specific display lines.
+The terminal refreshes these lines with its trust view once per second. Hosts use them for connection
+state, server tool counts, scheduled tasks, and delivery queues. `ONLYNE_NO_TUI=1` keeps JSON logging
+and skips terminal startup.
+
 ## Language
 
 `resolveLocale` reads an explicit value first, then `ONLYNE_LANG`, then `LC_ALL` or `LANG`, and

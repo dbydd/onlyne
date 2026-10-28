@@ -1,10 +1,12 @@
 # 资源网关实验场景（dpdp + lazuli）
 
-两个真实资源网关：飞书资源的 handler 是 `urn:onlyne:agent:dpdp`，MCP 资源的 handler 是 `urn:onlyne:agent:lazuli`。两个网关各自是一个 Onlyne 节点，独立启动，没有中心服务。
+飞书、QQ、微信分别运行独立的 IM 节点，默认 handler 是 `urn:onlyne:agent:dpdp`。MCP 资源的 handler 是 `urn:onlyne:agent:lazuli`。各节点独立启动并持有各自的端口、store 和 trust 表。
 
 ```mermaid
 flowchart LR
-    im[IM 网关<br/>urn:onlyne:gateway:im<br/>3991] -->|handler| dpdp[urn:onlyne:agent:dpdp]
+    im[飞书 im-lark<br/>3991] -->|handler| dpdp[urn:onlyne:agent:dpdp]
+    qq[QQ im-qq<br/>3993] -->|handler| dpdp
+    wechat[微信 im-wechat<br/>3994] -->|handler| dpdp
     mcp[MCP 网关<br/>urn:onlyne:gateway:mcp<br/>3992] -->|handler| lazuli[urn:onlyne:agent:lazuli]
     lark[飞书平台] <--> im
     hindsight[Hindsight MCP<br/>8888] <--> mcp
@@ -16,7 +18,9 @@ dpdp 与 lazuli 是 agent 节点，由 OMP 插件持有。在角色目录里跑 
 
 | 路径 | 内容 |
 |---|---|
-| `gateways/im.json` | IM 网关配置：飞书连接器，handler dpdp，不预设会话 |
+| `gateways/im-lark.json` | 飞书独立节点，handler dpdp，不预设会话 |
+| `gateways/im-qq.json` | QQ 独立节点，webhook 路径 `/im/webhook` |
+| `gateways/im-wechat.json` | 微信 iLink 独立节点，长轮询接收消息 |
 | `gateways/mcp.json` | MCP 网关配置：Hindsight 服务、handler lazuli |
 | `credentials/feishu` | 飞书凭据引用文件，内容是 `$FEISHU_CREDENTIAL` |
 | `.env.example` | 凭据变量模板，复制成 `.env` 后填值 |
@@ -47,6 +51,8 @@ Hindsight 的端点按本机实际改 `gateways/mcp.json` 里的 `servers[0].url
 
 ```sh
 examples/cluster/run-im.sh
+examples/cluster/run-im.sh qq
+examples/cluster/run-im.sh wechat
 examples/cluster/run-mcp.sh
 ```
 
@@ -69,13 +75,13 @@ examples/cluster/run-mcp.sh
 
 网关配置的顶层 `language` 可设为 `en` 或 `zh-CN`。省略时按 `ONLYNE_LANG`、`LC_ALL` 或 `LANG` 选择语言，默认使用英文。临时启动中文界面可运行 `ONLYNE_LANG=zh-CN examples/cluster/run-im.sh`。OMP 节点通过 `/onlyne language zh-CN` 切换并保存项目语言。
 
-`run-im.sh` 在本地 `.env` 存在时 source 它，否则只读环境变量，并在两处可能踩空的地方打印提示：`FEISHU_CREDENTIAL` 未定义，以及 `conversation` 还是占位值。两条提示都不阻止启动，注册与读取照常可用。
+`run-im.sh` 在本地 `.env` 存在时 source 它，否则只读环境变量。飞书使用 `FEISHU_CREDENTIAL`，QQ 使用 `QQ_BOT_APP_ID` 与 `QQ_BOT_APP_SECRET`，微信使用 `WECHAT_ILINK_BOT_TOKEN`。
 
-IM 网关需要 `@onlyne/im-lark` 已安装，MCP 网关需要 Hindsight 服务在监听。凭据缺失时 IM 网关以 `The Lark credential is app_id:app_secret.` 退出；`$FEISHU_CREDENTIAL` 未定义会让凭据文件解析成字面量，得到同一条错误。
+每个 IM 节点装载对应的平台包。凭据缺失时节点保持运行，并显示 onboarding 所需字段。QQ 的 webhook 需要平台可达的公网地址，通常由 HTTPS 反向代理转发到该节点。微信 iLink 从节点主动长轮询，无需入站 webhook。MCP 网关按配置连接 Hindsight。
 
 一个连接器服务它这条连接上的全部会话。机器人被拉进哪个群、谁私聊它，都是运行时事实：第一条事件到达时网关 adopt 那条会话，建资源与 thread，不需要重启，也不需要改配置。
 
-资源 id 从平台坐标派生，`lark-<坐标>`。`gateways/im.json` 因此不写 `conversation`，也不写 `resource_ref`。要预绑定某条会话时，在连接器里加 `"conversation": "oc_xxx"`，它在启动时就建好资源。
+资源 id 从平台坐标派生，`lark-<坐标>`。`gateways/im-lark.json` 因此不写 `conversation`，也不写 `resource_ref`。要预绑定某条会话时，在 `channel` 里加 `"conversation": "oc_xxx"`，它在启动时就建好资源。
 
 交接以会话为最小单位：把一条群转给别的 agent，其他群的绑定与游标不受影响。
 

@@ -6,27 +6,23 @@
 
 ## 1. 部署形态：独立进程，网络交互
 
-IM gateway 是一个独立的 Onlyne 节点进程，运行 `@onlyne/lib` 的完整服务面，与 agent 侧（OMP 插件或任何宿主）只经网络交互。
+每个 IM 通道运行一个独立的 Onlyne 节点进程，运行 `@onlyne/lib` 的完整服务面，与 agent 侧只经网络交互。飞书、QQ、微信分别使用 `urn:onlyne:gateway:im-lark`、`urn:onlyne:gateway:im-qq`、`urn:onlyne:gateway:im-wechat`，各自持有端口、store、身份密钥和 trust 表。聚合模式退役；每个进程只装载一个通道。长连接、webhook、限频和重连策略由各平台分别处理。
 
 ```mermaid
 flowchart LR
-    subgraph im_gateway[IM gateway 进程（Node.js LTS）]
-        node[OnlyneNode<br/>lib ResourceService]
-        bridge[DriverBridge]
-        lark[im-lark 连接器]
-        qq[im-qq 连接器]
-        fake[im-fake 连接器]
+    subgraph lark_node[im-lark 进程]
+        lark[飞书连接器] --> lark_resource[OnlyneNode / store]
     end
-    platform[IM 平台<br/>飞书 / QQ / Slack / Telegram]
-    agents[agent 节点<br/>OMP 或其他宿主]
-
-    platform <--> lark
-    platform <--> qq
-    lark --> bridge
-    qq --> bridge
-    fake --> bridge
-    bridge --> node
-    node <-->|HTTP /onlyne/v3 + RFC 0017 签名| agents
+    subgraph qq_node[im-qq 进程]
+        qq[QQ 连接器] --> qq_resource[OnlyneNode / store]
+    end
+    subgraph wechat_node[im-wechat 进程]
+        wechat[微信连接器] --> wechat_resource[OnlyneNode / store]
+    end
+    agents[agent 节点]
+    lark_resource <-->|签名 HTTP| agents
+    qq_resource <-->|签名 HTTP| agents
+    wechat_resource <-->|签名 HTTP| agents
 ```
 
 这个形态的依据：
@@ -62,11 +58,13 @@ CLI 首次启动自动生成身份密钥，保存在用户的 Onlyne 密钥目�
 ```
 packages/im-core      连接器契约：ImEvent、ImReply、SendOutcome、Connector 接口、凭据链
 packages/im-lark      飞书连接器（打样）
+packages/im-qq        QQ 连接器
+packages/im-wechat    微信连接器
 packages/im-fake      脚本化假连接器（验收夹具，继承 v2 fake 后端语义）
 packages/im-gateway   进程组装：配置、存储、节点、连接器装载、事件推送环
 ```
 
-依赖方向单向：`im-gateway` → `im-lark`/`im-fake` → `im-core` → `@onlyne/lib`。平台 SDK 只出现在 `im-<platform>` 包的依赖里；`im-core` 与 `im-gateway` 不 import 任何平台 SDK。QQ、Slack 等后续平台各起 `im-<platform>` 包，不共用统一抽象之外的任何东西——分平台找完整能力是既定决策（用户 2026-10-26 指示），`im-core` 只抽「平台无关的那一半」（v2 清单 §1.3 的 payload/事件/回复坐标语义平移）。
+依赖方向单向：`im-gateway` → `im-lark`/`im-qq`/`im-wechat`/`im-fake` → `im-core` → `@onlyne/lib`。每个进程装载其中一个平台连接器。平台 SDK 只出现在 `im-<platform>` 包的依赖里。`im-core` 的 `Connector` 契约保持不变，去重、游标与 binding 继续由资源服务和驱动桥持有。
 
 ## 3. 连接器契约（im-core）
 
@@ -185,9 +183,9 @@ handler 看到的入站是一条普通消息，`msg` 是平台正文，`meta.dat
   "delivery_kind": "notify",
   "msg": "图里的单位是什么",
   "meta": {
-    "thread": { "owner": "urn:onlyne:gateway:im", "id": "im-chat-01" },
+    "thread": { "owner": "urn:onlyne:gateway:im-lark", "id": "im-chat-01" },
     "data": {
-      "resource_ref": { "owner": "urn:onlyne:gateway:im", "id": "chat-01" },
+      "resource_ref": { "owner": "urn:onlyne:gateway:im-lark", "id": "chat-01" },
       "event_id": "7", "source_id": "om_x100", "platform": "lark",
       "conversation": "oc_6b14", "from": "ou_sender",
       "attachments": [{ "kind": "image", "path": "/var/im/media/oc_6b14/om_x100-0-chart.png", "platform_handle": "img_v3_..." }],
@@ -278,4 +276,20 @@ handler 看到的入站是一条普通消息，`msg` 是平台正文，`meta.dat
 - 事件推送与回复回流（已决，见 §4.1）：投影消息进会话 thread，渲染环按游标把 agent 回复送出去。这一节是飞书侧选择，换平台时替换。
 - **意图判定（decider）属于 IM 节点的内部实现，不归 RFC。** 飞书暴露的能力面很宽（23 种消息类型、卡片、按钮、回应），把原始能力原样交给模型会造成很大的判断压力；节点需要时再引入自己的判定层（例如先收敛成少数几种动作），这与 v2 把 SystemOne 塞进网关的做法相反。目前不做，等实际遇到这种复杂度再加。
 - `event_id → 平台句柄` 索引的保留期：与资源事件共享 `retention_ms`，超期清理的扫描挂在维护环上。
-- QQ、Slack、Telegram 连接器未开工；每个接入前先核对社区调研报告对应小节的版本与平台事实。
+- Slack、Telegram 等新连接器接入前，先核对平台接口与访问模式，再分配独立节点。
+
+## 8. 从聚合节点迁移
+
+聚合模式退役。旧进程以 `urn:onlyne:gateway:im` 同时服务多个平台，新进程一平台一个节点。资源、thread、绑定与事件日志都带 owner，所以迁移是一次离线重写。
+
+迁移步骤：
+
+1. 停止旧网关，确认没有进程持有 `<store>`。
+2. 运行 `bun packages/im-gateway/src/migrate-main.ts plan <store> --from urn:onlyne:gateway:im --to urn:onlyne:gateway:im-lark --platform lark`。plan 只读，报告将迁移的资源、thread、会话与绑定数量，以及目标身份缺失的密钥。
+3. 用 `--pair <node id>` 完成新旧身份配对。远端保存的旧 owner 引用不会因本地迁移而改变；对端必须重新发现并信任新身份。
+4. `apply <store> --from … --to … --platform lark --yes` 先在 `<store>` 旁写快照，再在一个事务里改写 owner 引用。中途失败保留原文件。
+5. 用新配置启动 `im-lark` 节点，确认原有会话仍能收发，`binding.handler` 与游标不变。
+
+回滚：`rollback <store> --snapshot <snapshot>` 恢复快照，再用旧配置与旧身份启动聚合进程。回滚只恢复本地 store；对端已经把信任换成新身份时，需要重新配对一次。
+
+快照与 store 同目录，`inspect <store>` 列出可用快照。迁移保留资源 id、事件 id 与平台会话坐标，只改 owner，因此迁移后的资源路径是 `/resources/urn:onlyne:gateway:im-lark/<原资源 id>`。

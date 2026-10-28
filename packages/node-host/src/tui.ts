@@ -46,12 +46,14 @@ export class GatewayTui {
   #busy = false;
   #closed = false;
   #refreshTimer?: ReturnType<typeof setInterval>;
+  #statusLines: string[] = [];
 
   constructor(
     private readonly node: OnlyneNode,
     private readonly ring: LogRing,
     private readonly endpoint: string,
     private readonly onChange: () => void = () => undefined,
+    private readonly status?: () => Promise<string[]>,
   ) {}
 
   async start(): Promise<void> {
@@ -119,10 +121,12 @@ export class GatewayTui {
   async #refresh(): Promise<void> {
     if (this.#closed) return;
     try {
-      const [trust, records] = await Promise.all([
+      const [trust, records, status] = await Promise.all([
         this.node.trust.list(this.node.auth),
         this.node.discovery.listRecords(),
+        this.status?.() ?? [],
       ]);
+      this.#statusLines = status;
       const handlers = new Map<string, string[]>();
       const resources = await this.node.resources.list(this.node.auth, { page_size: 100 });
       for (const resource of resources.items) {
@@ -230,6 +234,13 @@ export class GatewayTui {
 
     push(t('title', { actor: this.node.auth.actor, endpoint: this.endpoint }));
     push(rule(width));
+
+    if (this.#statusLines.length > 0) {
+      const budget = Math.max(3, Math.floor(height / 3));
+      for (const line of this.#statusLines.slice(0, budget)) push(line);
+      if (this.#statusLines.length > budget) push('…');
+      push(rule(width));
+    }
 
     const peerHeader = this.#rows.length === 0 ? t('peers.none') : t('peers.count', { count: this.#rows.length });
     push(peerHeader);

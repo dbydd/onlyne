@@ -1,0 +1,11 @@
+{
+  "node": { "id": "urn:onlyne:gateway:im-wechat" },
+  "server": { "bind": "127.0.0.1", "port": 3994 },
+  "storage": { "path": "examples/cluster/var/im-wechat/store.json" },
+  "media_dir": "examples/cluster/var/im-wechat/media",
+  "channel": {
+    "platform": "wechat",
+    "assignee": "urn:onlyne:agent:dpdp"
+  },
+  "peers": []
+}

@@ -70,7 +70,8 @@
       "name": "@onlyne/im-gateway",
       "version": "3.0.0",
       "bin": {
-        "onlyne-im-gateway": "./src/main.ts",
+        "onlyne-im-gateway": "src/main.ts",
+        "onlyne-im-migrate": "src/migrate-main.ts",
       },
       "dependencies": {
         "@onlyne/im-core": "^3.0.0",
@@ -80,14 +81,20 @@
       },
       "devDependencies": {
         "@onlyne/im-lark": "^3.0.0",
+        "@onlyne/im-qq": "^3.0.0",
+        "@onlyne/im-wechat": "^3.0.0",
         "@types/bun": "^1.3.0",
         "typescript": "^5.9.0",
       },
       "peerDependencies": {
         "@onlyne/im-lark": "^3.0.0",
+        "@onlyne/im-qq": "^3.0.0",
+        "@onlyne/im-wechat": "^3.0.0",
       },
       "optionalPeers": [
         "@onlyne/im-lark",
+        "@onlyne/im-qq",
+        "@onlyne/im-wechat",
       ],
     },
     "packages/im-lark": {
@@ -98,6 +105,30 @@
         "@onlyne/im-core": "^3.0.0",
         "@onlyne/lib": "^3.0.0",
         "@onlyne/node-host": "^3.0.0",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.0",
+        "typescript": "^5.9.0",
+      },
+    },
+    "packages/im-qq": {
+      "name": "@onlyne/im-qq",
+      "version": "3.0.0",
+      "dependencies": {
+        "@onlyne/im-core": "^3.0.0",
+        "@onlyne/lib": "^3.0.0",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.0",
+        "typescript": "^5.9.0",
+      },
+    },
+    "packages/im-wechat": {
+      "name": "@onlyne/im-wechat",
+      "version": "3.0.0",
+      "dependencies": {
+        "@onlyne/im-core": "^3.0.0",
+        "@onlyne/lib": "^3.0.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -352,6 +383,10 @@
     "@onlyne/im-gateway": ["@onlyne/im-gateway@workspace:packages/im-gateway"],
 
     "@onlyne/im-lark": ["@onlyne/im-lark@workspace:packages/im-lark"],
+
+    "@onlyne/im-qq": ["@onlyne/im-qq@workspace:packages/im-qq"],
+
+    "@onlyne/im-wechat": ["@onlyne/im-wechat@workspace:packages/im-wechat"],
 
     "@onlyne/lib": ["@onlyne/lib@workspace:packages/lib"],
 

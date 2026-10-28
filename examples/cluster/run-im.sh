@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Starts the IM gateway of the cluster experiment.
+# Starts one IM channel of the cluster experiment.
 #
 # The gateway is not packaged as a CLI yet, so this runs the package entry through bun.
 # The configuration holds repo-root-relative paths, so the process starts from the root.
@@ -19,8 +19,10 @@ if [[ -f "$env_file" ]]; then
   printf 'run-im: environment from %s\n' "${env_file#"$root"/}" >&2
 fi
 
-if [[ -z "${FEISHU_CREDENTIAL:-}" ]]; then
-  printf 'run-im: FEISHU_CREDENTIAL is unset. The lark connector starts unauthenticated and the gateway logs tenant_access_token failures.\n' >&2
-fi
+channel="${1:-lark}"
+case "$channel" in
+  lark|qq|wechat) ;;
+  *) printf 'usage: run-im.sh [lark|qq|wechat]\n' >&2; exit 2 ;;
+esac
 cd "$root"
-exec bun packages/im-gateway/src/main.ts examples/cluster/gateways/im.json
+exec bun packages/im-gateway/src/main.ts "examples/cluster/gateways/im-$channel.json"

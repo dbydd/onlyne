@@ -14,7 +14,7 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dir, "..");
 const PACKAGES = join(ROOT, "packages");
 const BIN_DIR = join(homedir(), ".bun", "bin");
-const BINS = ["onlyne-im-gateway", "onlyne-mcp-gateway"];
+const BINS = ["onlyne-im-gateway", "onlyne-im-migrate", "onlyne-mcp-gateway"];
 
 function run(cmd: string[], cwd: string): boolean {
   const result = Bun.spawnSync({ cmd, cwd, stdout: "pipe", stderr: "pipe" });

@@ -18,6 +18,8 @@ export interface NodeHostOptions {
   ring?: LogRing;
   /** Defaults to the terminal surface when both ends of the process are a TTY. */
   interactive?: boolean;
+  /** Gateway-specific state rendered with the trust terminal. */
+  status?: () => Promise<string[]>;
   log(message: string, fields?: Record<string, unknown>): void;
 }
 
@@ -58,7 +60,7 @@ export async function startNodeHost(options: NodeHostOptions): Promise<{ close()
   // `ONLYNE_NO_TUI=1` keeps the plain JSON log on stdout, for a pipe or a screen a TUI would spoil.
   const interactive = (options.interactive ?? true) && process.env.ONLYNE_NO_TUI !== '1';
   if (interactive && options.ring !== undefined && process.stdin.isTTY && process.stdout.isTTY) {
-    const surface = new GatewayTui(node, options.ring, options.endpoint);
+    const surface = new GatewayTui(node, options.ring, options.endpoint, undefined, options.status);
     try {
       log('onlyne.tui.starting');
       await surface.start();

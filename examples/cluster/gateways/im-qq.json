@@ -1,0 +1,12 @@
+{
+  "node": { "id": "urn:onlyne:gateway:im-qq" },
+  "server": { "bind": "127.0.0.1", "port": 3993 },
+  "storage": { "path": "examples/cluster/var/im-qq/store.json" },
+  "media_dir": "examples/cluster/var/im-qq/media",
+  "channel": {
+    "platform": "qq",
+    "assignee": "urn:onlyne:agent:dpdp",
+    "webhook_path": "/im/webhook"
+  },
+  "peers": []
+}

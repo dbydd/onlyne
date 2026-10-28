@@ -37,16 +37,20 @@ flowchart LR
 
 MCP 网关和 IM 网关共用 `@onlyne/node-host` 的发现、身份与终端信任界面。CLI 自动保存身份密钥，发布实际监听地址并持续发现 OMP 节点。用户在 `/onlyne` 和网关终端完成指纹确认：终端列出候选与交换阶段，`t`/`a` 先展示指纹再等确认，`c` 输入地址联系跨网络节点。信任状态写入网关存储。
 
-与 IM 的关键差异：MCP 资源没有平台事件流（RFC 0015 §1：server 是无状态工具提供者），因此没有推送环、没有渲染环、没有事件日志；也没有 handler 绑定（RFC 0015 §6），所以没有交接，也没有日志读取接口。资源操作只有 `tools/call` 的映射。这使 MCP 节点比 IM gateway 简单一个量级。
+MCP server 继续提供工具调用。网关另外持有挂载任务、运行记录与结果推送队列。定时执行产出通过 Onlyne 消息交给 controller，使用 `response: none`、`execution: existing`。任务输出无需伪造平台事件，也不写资源 event ring。controller 的 inbox 与消息历史保存可读结果。
+
+任务支持 cron、固定间隔和一次性触发。store 保存定义、修改者、下次触发、开始与结束时间、退出码、输出摘要和失败原因。进程重启保留任务与记录。重启发现的未结束运行记录为中断，避免自动重做可能产生副作用的脚本。每个任务同一时刻最多运行一次。
+
+挂载权限由签名身份与 controller 配置判定。shell 执行体从节点本机配置的允许清单选择，远端请求引用清单 id。MCP 调用限定在 controller 已获准访问的 server 和允许工具内。每次运行使用稳定的消息 id，推送记录先写 store，再投递；暂时失败保留待重试，明确拒绝记录终态原因。接纳回执证明 controller 已保存消息，模型消费仍由原有宿主投递路径确认。
 
 ## 2. 包结构
 
 ```
 packages/mcp-core      会话层：HTTP streamable transport、initialize、tools/list、tools/call、错误分类
-packages/mcp-gateway    进程组装：多 server 配置、每 server 一个资源、节点、CLI
+packages/mcp-gateway    多 server 组装、持久定时任务、运行记录、controller 推送、CLI
 ```
 
-`mcp-gateway` 复用 `im-gateway` 的组装形状（`FileStorage`、`nodeClock`、`ensureThread` 不需要——无 thread；配置加载同构）。MCP server 连接器不单独成包：与 IM 不同，MCP 的 server 是标准协议，不需要每家一个翻译层——会话层就是连接层，`mcp-core` 一份实现覆盖全部 server。特殊 server 的适配（如 Hindsight 的 per-bank URL）只是配置项。
+`mcp-gateway` 复用 `FileStorage` 与 `node-host` 的发现和信任终端。网关状态区显示 server 与工具数、任务与下次触发时间、推送队列与最近结果。`ONLYNE_NO_TUI=1` 保留 JSON 日志。MCP server 连接器不单独成包：`mcp-core` 的标准协议实现覆盖各 server，特殊 URL 和认证头由配置提供。
 
 ## 3. 资源映射
 

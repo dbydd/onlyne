@@ -13,6 +13,9 @@ The constructor accepts the credential in this order: an explicit `app_id:app_se
 credential file (a `$VAR` reference resolves from the environment), then the pair
 `FEISHU_APP_ID` and `FEISHU_APP_SECRET`.
 
+A missing credential keeps the connector running in onboarding state. It reports the variables
+it needs in the gateway status area instead of stopping the node.
+
 ## Example
 
 ```ts
