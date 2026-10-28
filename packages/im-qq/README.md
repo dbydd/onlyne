@@ -1,8 +1,9 @@
 # @onlyne/im-qq
 
 The QQ connector for the Onlyne IM gateway. It implements translation for the official QQ Bot
-OpenAPI v2: it authenticates with an app id and secret, verifies webhook signatures, normalizes
-inbound messages, and sends text, Markdown, and quote replies.
+OpenAPI v2: it authenticates with an app id and secret, receives events on the platform's
+WebSocket gateway (or on the signed callback), normalizes inbound messages, and sends text,
+Markdown, and quote replies.
 
 ## Credential
 
@@ -11,10 +12,19 @@ credential file, then the pair `QQ_BOT_APP_ID` and `QQ_BOT_APP_SECRET`.
 
 ## Transport
 
-The platform sends events to an HTTP callback, so the connector exposes a port through
-`createQqPort`. The gateway serves that port on its own listener at `/im/webhook` by default. The
-callback answers the platform's challenge, verifies `X-Signature-Ed25519` over the timestamp and
-raw body, and acknowledges accepted event batches.
+`transport: 'websocket'` is the default: QQ's own receive path. The connector fetches the access
+token, asks `GET /gateway/bot` for the shard count and the session-start budget, and opens one
+socket per shard. Each socket runs Hello → Identify → Ready, heartbeats on the negotiated interval
+and treats a missing `op 11` acknowledgement as a dead connection, and resumes with `op 6` from the
+last sequence number a listener accepted — a delivery that failed is replayed, never skipped.
+Reconnects back off with jitter, and `session_start_limit` gates how many sessions start at once
+and waits out `reset_after` instead of hammering the gateway.
+
+`transport: 'webhook'` serves the signed HTTP callback instead: `handleWebhook` answers the
+platform's challenge, verifies `X-Signature-Ed25519` over the timestamp and raw body, and
+acknowledges accepted event batches. The gateway serves it at `/im/webhook` by default.
+
+Outbound calls take the OpenAPI HTTP path under either transport.
 
 ## Supported
 

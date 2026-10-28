@@ -317,7 +317,7 @@ same('an unreadable credential file reports the resolve problem', {
 
 const fake = new FakePort();
 fake.rateLimits = 3;
-const connector = createQqConnector({ credential: 'app_1:secret_1', port: fake, env: {} });
+const connector = createQqConnector({ credential: 'app_1:secret_1', port: fake, transport: 'webhook', env: {} });
 await connector.start();
 same('a resolved credential proves the token and connects', {
   state: connector.status().state,

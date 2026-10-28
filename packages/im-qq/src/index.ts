@@ -1,7 +1,7 @@
 /**
- * The QQ official Bot OpenAPI v2 connector. QQ delivers events over HTTP, so this connector owns
- * no socket: the host hands each callback to `handleWebhook`, and every platform call goes through
- * the injected port.
+ * The QQ official Bot OpenAPI v2 connector. Inbound events arrive either on the platform's
+ * WebSocket gateway (the default, owned by `gateway.ts`) or on the signed HTTP callback the host
+ * hands to `handleWebhook`; every outbound platform call goes through the injected port either way.
  */
 
 import { readFile as nodeReadFile } from 'node:fs/promises';
@@ -12,6 +12,7 @@ import { createQqPort, messagePath, type QqMessageBody, type QqPort, type QqSend
 import { normalizeEvent } from './normalize.js';
 import { createSendState, outcomeOf, parseConversation, sendMessage } from './send.js';
 import { challenge, verifyHex } from './webhook.js';
+import { createQqGateway, type QqGateway, type QqGatewayOptions, type QqGatewayState } from './gateway.js';
 
 export {
   createQqPort, messagePath, QqPortError,
@@ -21,17 +22,30 @@ export {
 export { normalizeEvent } from './normalize.js';
 export { challenge, deriveEd25519, signHex, verifyHex, type QqEd25519Keys } from './webhook.js';
 export { createSendState, parseConversation, sendMessage, type QqMessagePort, type SendState } from './send.js';
+export {
+  createQqGateway, QQ_INTENTS,
+  type QqGateway, type QqGatewayHandlers, type QqGatewayOptions, type QqGatewayState, type QqGatewayStatus,
+  type QqSessionStartLimit,
+} from './gateway.js';
 
 export const QQ_CREDENTIAL_VARIABLES = ['QQ_BOT_APP_ID', 'QQ_BOT_APP_SECRET'] as const;
 /** Platform operations the connector implements beyond `send`; a resource lists them. */
 export const QQ_OPERATIONS = ['recall', 'typing'] as const;
+
+/** Where inbound events come from: the platform's gateway socket, or its signed HTTP callback. */
+export type QqTransport = 'websocket' | 'webhook';
 
 /** QQ signs every dispatch over its timestamp; a callback older than this is a replay. */
 const SIGNATURE_WINDOW_MS = 5 * 60 * 1000;
 /** What QQ's `input_notify` shows the user; the platform caps the hint at 60 seconds. */
 const TYPING_SECONDS = 60;
 
-export type QqConnectionState = 'onboarding' | 'connecting' | 'connected' | 'error' | 'stopped';
+export type QqConnectionState =
+  | 'onboarding'
+  /** The webhook transport is authenticated and ready; the platform calls in. */
+  | 'connected'
+  | QqGatewayState
+  | 'error';
 
 /** The optional platform-status surface the gateway duck-types; not part of `Connector`. */
 export interface QqStatus {
@@ -42,7 +56,17 @@ export interface QqStatus {
   last_event_at?: string;
   onboarding?: string[];
   error?: string;
+  /** The inbound transport in force. */
+  transport: QqTransport;
+  /** WebSocket gateway counters; present once the gateway transport has started. */
+  heartbeat_timeouts?: number;
+  resumes?: number;
+  resume_failures?: number;
+  shards?: number;
 }
+
+/** The gateway transport's knobs; the connector supplies the port, the log and the clock. */
+export type QqGatewayTuning = Omit<QqGatewayOptions, 'port' | 'log' | 'now'>;
 
 export interface QqConnectorOptions {
   /** Explicit `appId:appSecret`; wins over the file and the environment pair. */
@@ -54,6 +78,13 @@ export interface QqConnectorOptions {
   /** The HTTP boundary; production leaves it unset and one is built from the credential. */
   port?: QqPort;
   log?: (message: string, fields?: Record<string, unknown>) => void;
+  /**
+   * Inbound transport. The gateway socket is QQ's own receive path and needs no public endpoint;
+   * `webhook` serves the signed HTTP callback instead. Default `websocket`.
+   */
+  transport?: QqTransport;
+  /** Gateway transport tuning: the reconnect backoff, and the intents bitmask. */
+  gateway?: QqGatewayTuning;
   /** The inbound path the operator registers with QQ; reported once at start. */
   webhookPath?: string;
   now?: () => number;
@@ -77,18 +108,22 @@ function recordOf(value: unknown): Record<string, unknown> | undefined {
 export function createQqConnector(options: QqConnectorOptions = {}): QqConnector {
   const now = options.now ?? Date.now;
   const log = options.log ?? (() => {});
+  const transport: QqTransport = options.transport ?? 'websocket';
   const listeners: Array<(event: ImEvent) => void | Promise<void>> = [];
   /** One chain per conversation: the endpoint's `receive` calls land in arrival order. */
   const queues = new Map<string, Promise<void>>();
   const sendState = createSendState();
 
   let port: QqPort | undefined;
+  let gateway: QqGateway | undefined;
   let lifecycle: QqConnectionState = 'onboarding';
   let onboarding: string[] | undefined;
   let failure: string | undefined;
   let lastEventAt: string | undefined;
   let appId: string | undefined;
   let appSecret: string | undefined;
+  /** The credential resolved and the token was proven: outbound calls can go. */
+  let ready = false;
 
   function emit(event: ImEvent): Promise<void> {
     const previous = queues.get(event.conversation) ?? Promise.resolve();
@@ -155,14 +190,39 @@ export function createQqConnector(options: QqConnectorOptions = {}): QqConnector
         await port.start();
         // Fetching the token proves the pair: QQ answers a bad secret here and nowhere earlier.
         await port.token();
-        lifecycle = 'connected';
+        ready = true;
         onboarding = undefined;
         failure = undefined;
-        log('qq connector is connected', {
-          app_id: appId,
-          webhook_path: options.webhookPath ?? 'unset',
+        if (transport === 'webhook') {
+          lifecycle = 'connected';
+          log('qq connector is connected', {
+            app_id: appId,
+            transport,
+            webhook_path: options.webhookPath ?? 'unset',
+          });
+          return;
+        }
+        gateway = createQqGateway({
+          port,
+          log,
+          now,
+          ...(options.gateway ?? {}),
         });
+        // Not awaited to a socket: a gateway that cannot reach QQ stays a retrying state, and
+        // the host's status panel shows it, instead of a failed start.
+        await gateway.start({
+          dispatch: async payload => {
+            const event = normalizeEvent(payload, now);
+            if (event === undefined) return;
+            // A rejection leaves the sequence number where it was: the platform replays the event.
+            await emit(event);
+            lastEventAt = event.at;
+          },
+        });
+        lifecycle = 'connecting';
+        log('qq connector is dialing the gateway', { app_id: appId, transport });
       } catch (error) {
+        ready = false;
         lifecycle = 'error';
         failure = error instanceof Error ? error.message : String(error);
         log('qq connector could not authenticate', { error: failure });
@@ -174,7 +234,7 @@ export function createQqConnector(options: QqConnectorOptions = {}): QqConnector
     },
 
     async send(request: SendRequest): Promise<SendOutcome> {
-      if (port === undefined || lifecycle !== 'connected') {
+      if (port === undefined || !ready) {
         const hint = onboarding === undefined ? '' : `; provide ${onboarding.join(', ')}`;
         return { state: 'unknown', error: `The QQ connector is not connected${hint}.` };
       }
@@ -195,7 +255,7 @@ export function createQqConnector(options: QqConnectorOptions = {}): QqConnector
     },
 
     async operate(operation: string, data: Json): Promise<SendOutcome> {
-      if (port === undefined || lifecycle !== 'connected') {
+      if (port === undefined || !ready) {
         return { state: 'unknown', error: 'The QQ connector is not connected.' };
       }
       const raw = recordOf(data) ?? {};
@@ -288,22 +348,32 @@ export function createQqConnector(options: QqConnectorOptions = {}): QqConnector
     },
 
     status(): QqStatus {
+      const observed = gateway?.status();
       return {
-        state: lifecycle,
-        connected: lifecycle === 'connected',
-        // QQ events arrive over HTTP: there is no long connection to reconnect.
-        reconnects: 0,
+        state: observed?.state ?? lifecycle,
+        connected: observed === undefined ? lifecycle === 'connected' : observed.state === 'online',
+        reconnects: observed?.reconnects ?? 0,
         rate_limits: port?.status().rate_limits ?? 0,
+        transport,
         ...(lastEventAt === undefined ? {} : { last_event_at: lastEventAt }),
         ...(onboarding === undefined || onboarding.length === 0 ? {} : { onboarding }),
         ...(failure === undefined ? {} : { error: failure }),
+        ...(observed === undefined ? {} : {
+          heartbeat_timeouts: observed.heartbeat_timeouts,
+          resumes: observed.resumes,
+          resume_failures: observed.resume_failures,
+          shards: observed.shards,
+        }),
       };
     },
 
     async stop(): Promise<void> {
       listeners.length = 0;
       queues.clear();
+      await gateway?.stop();
+      gateway = undefined;
       await port?.stop();
+      ready = false;
       lifecycle = 'stopped';
     },
   };

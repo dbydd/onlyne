@@ -34,12 +34,15 @@ config.server.port = server.port ?? config.server.port;
 // already confirmed. A gateway that cannot hold a key does not run.
 const keys = await createNodeKey(config.node.id);
 const gateway: ImGateway = await createImGateway(config, { keys, log });
-// One channel, one callback path, one port: the platform webhook and the protocol endpoint
-// share the bound server, and every other path stays the library's.
-const webhookPath = config.channel.webhook_path ?? DEFAULT_WEBHOOK_PATH;
+// One channel, one receive path, one port: a webhook channel's callback and the protocol endpoint
+// share the bound server, and every other path stays the library's. The QQ gateway socket needs
+// no path at all, so a configured `webhook_path` beside it addresses nothing.
+const webhookPath = config.channel.transport === 'websocket'
+  ? undefined
+  : config.channel.webhook_path ?? DEFAULT_WEBHOOK_PATH;
 handler = request => {
   const pathname = new URL(request.url).pathname;
-  return pathname === webhookPath ? gateway.webhook(request) : gateway.fetch(request);
+  return webhookPath !== undefined && pathname === webhookPath ? gateway.webhook(request) : gateway.fetch(request);
 };
 gateway.node.client.runMaintenance();
 const endpoint = `http://${config.server.bind}:${config.server.port}/onlyne/v3`;
@@ -83,6 +86,6 @@ log('im.gateway.listening', {
   node: config.node.id,
   endpoint,
   platform: config.channel.platform,
-  webhook: webhookPath,
+  ...(webhookPath === undefined ? { transport: config.channel.transport } : { webhook: webhookPath }),
   status: await gateway.statusLines(),
 });

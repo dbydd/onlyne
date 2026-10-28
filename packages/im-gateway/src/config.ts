@@ -2,6 +2,13 @@ import { OnlyneError, type Json, type NodeId } from '@onlyne/lib';
 import type { Locale } from '@onlyne/node-host/i18n';
 import { t } from './gateway-text.js';
 
+/** How a channel receives platform events. QQ offers both paths; the other platforms offer one. */
+export type ChannelTransport = 'websocket' | 'webhook';
+
+const TRANSPORTS: readonly ChannelTransport[] = ['websocket', 'webhook'];
+/** The one connector that speaks a platform gateway socket today. */
+const GATEWAY_PLATFORMS: Record<string, true> = { qq: true };
+
 /**
  * One channel: this process serves exactly one platform, on one port, over one store and one
  * node identity (RFC 0012 §2). Every platform conversation it serves becomes a resource of its
@@ -22,6 +29,12 @@ export interface ChannelConfig {
   credential?: string;
   /** A credential file path, resolved under `credentials_dir` when relative. */
   credential_file?: string;
+  /**
+   * The inbound receive path. Defaults to `websocket` on QQ — the platform's own gateway — and is
+   * unset elsewhere, where the platform has a single transport. `webhook` serves the signed
+   * callback instead, which is what `webhook_path` addresses.
+   */
+  transport?: ChannelTransport;
   /** The HTTP path this channel's inbound webhook answers on. Default `/im/webhook`. */
   webhook_path?: string;
 }
@@ -101,6 +114,7 @@ function parseChannel(raw: Json | undefined): ChannelConfig {
   if (!PLATFORM_NAME.test(platform)) {
     throw new OnlyneError('invalid_request', t('config.platformName', { platform }));
   }
+  const transport = parseTransport(item.transport, platform);
   const webhook = item.webhook_path;
   if (webhook !== undefined && (typeof webhook !== 'string' || !webhook.startsWith('/'))) {
     throw new OnlyneError('invalid_request', t('config.webhookPath', { value: JSON.stringify(webhook) }));
@@ -112,8 +126,26 @@ function parseChannel(raw: Json | undefined): ChannelConfig {
     ...(item.script === undefined ? {} : { script: item.script }),
     ...(typeof item.credential === 'string' && item.credential.length > 0 ? { credential: item.credential } : {}),
     ...(typeof item.credential_file === 'string' && item.credential_file.length > 0 ? { credential_file: item.credential_file } : {}),
+    ...(transport === undefined ? {} : { transport }),
     ...(webhook === undefined ? {} : { webhook_path: webhook }),
   };
+}
+
+/**
+ * A platform that has no gateway socket would ignore `websocket` silently, so the value is
+ * refused instead of parsed and dropped.
+ */
+function parseTransport(value: Json | undefined, platform: string): ChannelTransport | undefined {
+  if (value === undefined) return GATEWAY_PLATFORMS[platform] === true ? 'websocket' : undefined;
+  if (value !== 'websocket' && value !== 'webhook') {
+    throw new OnlyneError('invalid_request', t('config.transport', {
+      accepted: TRANSPORTS.join(', '), value: JSON.stringify(value),
+    }));
+  }
+  if (value === 'websocket' && GATEWAY_PLATFORMS[platform] !== true) {
+    throw new OnlyneError('invalid_request', t('config.transportPlatform', { platform, accepted: 'webhook' }));
+  }
+  return value;
 }
 
 /** `language` is exactly `en` or `zh-CN`: a near miss would silently pick a different console language. */

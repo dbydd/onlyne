@@ -9,8 +9,9 @@ The process also publishes itself over DNS-SD and draws a trust terminal: peer l
 stage, fingerprints, and the four actions that change one relation.
 
 Run one process per platform. Lark, QQ, and WeChat use separate node ids, ports, stores, identity
-keys, and trust tables. Their connection models differ: Lark holds a WebSocket, QQ receives
-webhooks, and WeChat long-polls the platform.
+keys, and trust tables. Their connection models differ: Lark holds a WebSocket, QQ holds one
+WebSocket per shard on the platform gateway (or receives the signed callback, see
+`channel.transport`), and WeChat long-polls the platform.
 
 ## Run
 
@@ -36,8 +37,11 @@ instance of the same platform may add a suffix, as in `urn:onlyne:gateway:im-qq-
 `en` or `zh-CN` and otherwise follows `ONLYNE_LANG`, `LC_ALL`, or `LANG`.
 
 `connectors` is refused. Split a file with several connectors into one file per platform. The
-`channel.webhook_path` setting defaults to `/im/webhook` and applies to platforms that receive
-platform callbacks, which is QQ today.
+`channel.transport` setting names the receive path. It defaults to `websocket` on QQ — the
+platform's own gateway, which needs no public endpoint — and `webhook` selects the signed callback
+instead; any other platform has a single transport and refuses `websocket`. `channel.webhook_path`
+defaults to `/im/webhook` and addresses the callback only: with the gateway socket selected no
+path is routed to the connector, and the connector's status reports the transport it runs.
 
 Credentials resolve in this order: `channel.credential`, `channel.credential_file`, then the
 platform variables. Lark uses `FEISHU_APP_ID` with `FEISHU_APP_SECRET`. QQ uses

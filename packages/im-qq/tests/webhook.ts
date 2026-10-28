@@ -63,6 +63,7 @@ function connectorWith(listener?: (sourceId: string) => void | Promise<void>): Q
   const connector = createQqConnector({
     credential: `${APP_ID}:${SECRET}`,
     port: new FakePort(),
+    transport: 'webhook',
     env: {},
     now: () => clock,
   });

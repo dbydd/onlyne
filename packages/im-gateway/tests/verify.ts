@@ -53,6 +53,13 @@ class OnboardingConnector extends ScriptedConnector {
   }
 }
 
+/** A connector that offers the signed callback path, as the QQ webhook transport does. */
+class CallbackConnector extends ScriptedConnector {
+  async handleWebhook(): Promise<Response> {
+    return Response.json({ op: 12 });
+  }
+}
+
 const platformEvent = (platform: string, source: string, conversation: string, extra: Partial<ImEvent> = {}): ImEvent => ({
   platform, source_id: source, conversation, kind: 'message',
   from: 'ou_sender', text: '你好', attachments: [], message_handle: `fk_${source}`, at: new Date().toISOString(),
@@ -397,6 +404,40 @@ ok('a node identity for another platform is refused', mismatch instanceof Onlyne
   && String(mismatch.message).includes('urn:onlyne:gateway:im-lark'));
 const derived = await loadConfig(await writeConfig({ ...base, node: undefined }), {});
 ok('an omitted identity derives from the platform', derived.node.id === 'urn:onlyne:gateway:im-lark');
+
+// The receive path: QQ's gateway socket is the default, the signed callback stays selectable.
+const qqBase = { ...base, node: undefined, channel: { platform: 'qq' } };
+const qqDefault = await loadConfig(await writeConfig(qqBase), {});
+ok('qq defaults to the websocket gateway', qqDefault.channel.transport === 'websocket'
+  && qqDefault.node.id === 'urn:onlyne:gateway:im-qq');
+const qqWebhook = await loadConfig(await writeConfig({ ...qqBase, channel: { platform: 'qq', transport: 'webhook' } }), {});
+ok('qq still selects the webhook callback', qqWebhook.channel.transport === 'webhook');
+ok('a platform without a gateway socket names no transport', loaded.channel.transport === undefined);
+const otherTransport = await loadConfig(await writeConfig({ ...base, channel: { platform: 'lark', transport: 'websocket' } }), {})
+  .then(() => undefined, error => error);
+ok('the websocket transport is refused for another platform', otherTransport instanceof OnlyneError
+  && otherTransport.error.code === 'invalid_request' && String(otherTransport.message).includes('webhook'));
+const unknownTransport = await loadConfig(await writeConfig({ ...qqBase, channel: { platform: 'qq', transport: 'socket' } }), {})
+  .then(() => undefined, error => error);
+ok('an unknown transport names the accepted values', unknownTransport instanceof OnlyneError
+  && unknownTransport.error.code === 'invalid_request' && String(unknownTransport.message).includes('websocket, webhook'));
+
+// One receive path at a time: the callback path is not served beside the gateway socket.
+const transportConfig = (transport: 'websocket' | 'webhook'): GatewayConfig => ({
+  node: { id: 'urn:onlyne:gateway:im-qq' },
+  server: { bind: '127.0.0.1', port: 3997 },
+  storage_path: join(dir, `store-qq-${transport}.json`),
+  channel: { platform: 'qq', transport, webhook_path: '/qq/callback' },
+});
+const callbackFactory = async (): Promise<CallbackConnector> => new CallbackConnector('qq');
+const socketGateway = await createImGateway(transportConfig('websocket'), { factories: { qq: callbackFactory }, log });
+const socketCallback = await socketGateway.webhook(new Request('http://127.0.0.1/qq/callback', { method: 'POST' }));
+ok('a websocket channel does not serve the callback path', socketCallback.status === 404);
+await socketGateway.stop();
+const webhookGateway = await createImGateway(transportConfig('webhook'), { factories: { qq: callbackFactory }, log });
+const servedCallback = await webhookGateway.webhook(new Request('http://127.0.0.1/qq/callback', { method: 'POST' }));
+ok('a webhook channel still serves the callback path', servedCallback.status === 200);
+await webhookGateway.stop();
 
 await rm(dir, { recursive: true, force: true });
 

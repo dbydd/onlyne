@@ -19,7 +19,7 @@ import { t } from './gateway-text.js';
 /** A connector factory the gateway knows how to build from configuration alone. */
 export type ConnectorFactory = (config: GatewayConfig, channel: ChannelConfig) => Promise<Connector>;
 
-export type { ChannelConfig, GatewayConfig } from './config.js';
+export type { ChannelConfig, ChannelTransport, GatewayConfig } from './config.js';
 export { gatewayNodeId, DEFAULT_WEBHOOK_PATH } from './config.js';
 export { statusLines, type ChannelStatus, type ConnectorStatus, type StatusConnector } from './status.js';
 
@@ -32,7 +32,7 @@ const CONNECTOR_EXPORTS: Record<string, string> = {
  * The constructor argument each platform package expects. `im-fake` takes a script; a real
  * platform takes the v2 credential chain (explicit value, then credential file, then its
  * conventional environment pair, which the connector reads from `env`), plus the host log and
- * the inbound webhook path a callback channel serves.
+ * the inbound transport — with its callback path only when that transport is the webhook.
  */
 function connectorOptions(config: GatewayConfig, channel: ChannelConfig, log: (message: string, fields?: Record<string, unknown>) => void): unknown {
   if (channel.platform === 'fake') {
@@ -49,11 +49,15 @@ function connectorOptions(config: GatewayConfig, channel: ChannelConfig, log: (m
     : channel.credential_file.startsWith('/') || config.credentials_dir === undefined
       ? channel.credential_file
       : join(config.credentials_dir, channel.credential_file);
+  const webhookPath = channel.transport === 'websocket'
+    ? undefined
+    : channel.webhook_path ?? DEFAULT_WEBHOOK_PATH;
   return {
     ...(channel.credential === undefined ? {} : { credential: channel.credential }),
     ...(credentialFile === undefined ? {} : { credentialFile }),
     ...(config.media_dir === undefined ? {} : { mediaDir: config.media_dir }),
-    webhookPath: channel.webhook_path ?? DEFAULT_WEBHOOK_PATH,
+    ...(channel.transport === undefined ? {} : { transport: channel.transport }),
+    ...(webhookPath === undefined ? {} : { webhookPath }),
     env: process.env,
     log,
   };
@@ -360,7 +364,9 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
       return node.fetch(request);
     },
     async webhook(request: Request): Promise<Response> {
-      if (!hasWebhook(platformConnector)) {
+      // The gateway socket and the signed callback are alternative receive paths: serving both
+      // would deliver every event twice, so the callback answers 404 while the socket is in force.
+      if (channel.transport === 'websocket' || !hasWebhook(platformConnector)) {
         return Response.json(
           { error: { code: 'not_found', message: t('error.noWebhook', { platform: channel.platform }) } },
           { status: 404 },
@@ -381,6 +387,10 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
         connected: observed.connected,
         reconnects: observed.reconnects,
         rate_limits: observed.rate_limits,
+        ...(observed.transport === undefined ? {} : { transport: observed.transport }),
+        ...(observed.heartbeat_timeouts === undefined ? {} : { heartbeat_timeouts: observed.heartbeat_timeouts }),
+        ...(observed.resumes === undefined ? {} : { resumes: observed.resumes }),
+        ...(observed.resume_failures === undefined ? {} : { resume_failures: observed.resume_failures }),
         ...(counters.last_event_at === undefined && observed.last_event_at === undefined
           ? {}
           : { last_event_at: counters.last_event_at ?? observed.last_event_at }),

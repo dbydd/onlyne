@@ -14,6 +14,14 @@ export interface ConnectorStatus {
   reconnects: number;
   /** Platform rate-limit answers observed (HTTP 429 and equivalents). */
   rate_limits: number;
+  /** The receive path the connector runs, for a platform that offers more than one. */
+  transport?: string;
+  /** Socket transports: heartbeats that went unanswered, each one a dead connection. */
+  heartbeat_timeouts?: number;
+  /** Socket transports: sessions continued after a drop. */
+  resumes?: number;
+  /** Socket transports: resume attempts the platform rejected. */
+  resume_failures?: number;
   /** The last inbound platform event's platform timestamp. */
   last_event_at?: string;
   /** Exact fields the operator still has to provide; empty once the channel can run. */
@@ -58,11 +66,20 @@ function normalize(raw: unknown): ConnectorStatus {
   const onboarding = Array.isArray(value.onboarding)
     ? value.onboarding.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
     : undefined;
+  const counter = (field: unknown): number | undefined =>
+    typeof field === 'number' && Number.isFinite(field) && field >= 0 ? Math.floor(field) : undefined;
+  const heartbeatTimeouts = counter(value.heartbeat_timeouts);
+  const resumes = counter(value.resumes);
+  const resumeFailures = counter(value.resume_failures);
   return {
     state: text(value.state) ?? 'unknown',
     connected: value.connected === true,
     reconnects: typeof value.reconnects === 'number' && value.reconnects >= 0 ? Math.floor(value.reconnects) : 0,
     rate_limits: typeof value.rate_limits === 'number' && value.rate_limits >= 0 ? Math.floor(value.rate_limits) : 0,
+    ...(text(value.transport) === undefined ? {} : { transport: text(value.transport)! }),
+    ...(heartbeatTimeouts === undefined ? {} : { heartbeat_timeouts: heartbeatTimeouts }),
+    ...(resumes === undefined ? {} : { resumes }),
+    ...(resumeFailures === undefined ? {} : { resume_failures: resumeFailures }),
     ...(text(value.last_event_at) === undefined ? {} : { last_event_at: text(value.last_event_at)! }),
     ...(onboarding === undefined || onboarding.length === 0 ? {} : { onboarding }),
     ...(text(value.error) === undefined ? {} : { error: text(value.error)! }),
@@ -84,12 +101,16 @@ export function connectorStatus(connector: Connector): ConnectorStatus {
  * Order is state, counters, onboarding, error; the first two always render.
  */
 export function statusLines(status: ChannelStatus): string[] {
-  const head = `im ${status.platform} · ${status.node} · ${status.state}`;
+  const head = `im ${status.platform} · ${status.node} · ${status.state}`
+    + (status.transport === undefined ? '' : ` (${status.transport})`);
   const counters = [
     `events ${status.events}`,
     `sends ${status.sends}`,
     `reconnects ${status.reconnects}`,
     `rate-limited ${status.rate_limits}`,
+    ...(status.heartbeat_timeouts === undefined ? [] : [`heartbeat timeouts ${status.heartbeat_timeouts}`]),
+    ...(status.resumes === undefined ? [] : [`resumes ${status.resumes}`]),
+    ...(status.resume_failures === undefined ? [] : [`resume failures ${status.resume_failures}`]),
     status.last_event_at === undefined ? 'last event none' : `last event ${status.last_event_at}`,
   ].join(' · ');
   const lines = [head, counters];
