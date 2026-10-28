@@ -141,6 +141,11 @@ export function summary(result: unknown): string {
 	const facts = outcome.receipt === undefined
 		? ""
 		: toolText("summary.thread_ref", { thread: outcome.receipt.thread_ref.id, seq: outcome.receipt.seq, answering });
+	// The receipt names the storing owner, which is this node when it started the conversation;
+	// the resolved addressee is what keeps an alias send from reading as a self-send.
+	const addressee = outcome.resolved === undefined || outcome.resolved === outcome.requested
+		? ""
+		: toolText("summary.resolved", { node: outcome.resolved });
 	// The receipt names a thread the receiver owns, which is not a local object; the outbound
 	// record is. Point the reader at the handle that opens (dpdp report, problem 1).
 	const trail = outcome.receipt === undefined ? "" : toolText("summary.outbound", { id: outcome.receipt.message_ref.id });
@@ -156,18 +161,18 @@ export function summary(result: unknown): string {
 			return toolText("summary.not_confirmed", { failure, next });
 		}
 		if (outcome.wait === "answered" && outcome.reply !== undefined) {
-			const answer = { author: outcome.reply.authenticated_author, seq: outcome.reply.seq, where, facts, trail };
+			const answer = { author: outcome.reply.authenticated_author, seq: outcome.reply.seq, where, facts, addressee, trail };
 			return outcome.reply_body === "withheld"
 				? toolText("summary.delivered_withheld", answer)
 				: toolText("summary.delivered_answered", answer);
 		}
 		if (outcome.wait === "timed_out") {
-			return toolText("summary.delivered_timed_out", { where, facts, trail });
+			return toolText("summary.delivered_timed_out", { where, facts, addressee, trail });
 		}
 		if (outcome.wait === "cancelled") {
-			return toolText("summary.delivered_cancelled", { where, facts, trail });
+			return toolText("summary.delivered_cancelled", { where, facts, addressee, trail });
 		}
-		return toolText("summary.delivered", { where, facts, trail });
+		return toolText("summary.delivered", { where, facts, addressee, trail });
 	}
 	return toolText("summary.plain");
 }

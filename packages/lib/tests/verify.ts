@@ -9,6 +9,7 @@
  * Storage instance, never a crash.
  */
 import { CLOCK_SKEW_MS, EXCHANGE_RETRY_MS, REFUSED_RETRY_MS, FetchTransport, MemoryStorage, OnlyneError, OnlyneNode, generateKeyMaterial, trustPhase } from '../src/index.js';
+import type { SendOutcome } from '../src/index.js';
 import { canonical, key } from '../src/core.js';
 import { createPrivateKey, sign } from 'node:crypto';
 import type {
@@ -1599,6 +1600,69 @@ async function phaseAuth(): Promise<void> {
 
 }
 
+// =============================================================================
+// 7. the two facts a caller cannot read off the receipt
+// =============================================================================
+
+/**
+ * A caller names an alias and the decision resolves it before delivery, while the receipt
+ * names the thread owner — this node, because it started the conversation. The outcome has to
+ * carry both spellings, or the alias send is indistinguishable from a message this node
+ * addressed to itself.
+ */
+async function phaseAddressee(): Promise<void> {
+  const aliases: Record<string, string> = { dpdp: dpdpNode };
+  const sender = serve(lazuliNode, base_url => rig(lazuliNode, base_url, {
+    decide: async input => {
+      const spelled = input.meta?.to;
+      const to = typeof spelled === 'string' ? aliases[spelled] ?? spelled : undefined;
+      if (to === undefined) throw new OnlyneError('decision_unavailable', 'The input named no target.');
+      return { kind: 'send', to, response: 'async', execution: 'existing' };
+    },
+  }));
+  serve(dpdpNode, base_url => rig(dpdpNode, base_url));
+
+  const aliased = await sender.node.client.msg({ delivery_kind: '问候', msg: '你好 dpdp。', meta: { to: 'dpdp' } }) as SendOutcome;
+  check('client.msg.resolved', aliased.admission === 'accepted' && aliased.requested === 'dpdp' && aliased.resolved === dpdpNode
+    && aliased.receipt?.thread_ref.owner === lazuliNode
+    ? '' : `an alias send reported ${JSON.stringify(aliased)}`);
+  const named = await sender.node.client.msg({ delivery_kind: '问候', msg: '你好 dpdp。', meta: { to: dpdpNode } }) as SendOutcome;
+  check('client.msg.named', named.admission === 'accepted' && named.resolved === undefined && named.requested === undefined
+    ? '' : `a node-id send reported ${JSON.stringify(named)}`);
+}
+
+/**
+ * A pending exchange is confirmed by the acquisition policy on the side that owes the
+ * approval, or by that node's holder. The failure must not prescribe a panel step, because
+ * with policy all or segment the host submits the approval on the next attempt.
+ */
+async function phasePendingCopy(): Promise<void> {
+  const row = (local_approved: boolean): TrustEntry => ({
+    node_id: dpdpNode, public_key: '', fingerprint: '0123456789abcdef', state: 'pending',
+    first_seen: new Date(clock.value).toISOString(), last_checked: new Date(clock.value).toISOString(),
+    local_approved, remote_approved: !local_approved, base_url: 'http://127.0.0.1:9/onlyne/v3',
+  });
+  const pendingFailure = async (local_approved: boolean): Promise<string> => {
+    const transport = new FetchTransport(
+      async (node: string): Promise<Target> => ({ node_id: node, base_url: 'http://127.0.0.1:9/onlyne/v3' }),
+      fetch,
+      { trust: { entry: async () => row(local_approved), signRequest: async () => {}, verifyResponse: async () => {} } },
+    );
+    try {
+      await transport.request(dpdpNode, 'POST', 'messages', {});
+      return 'the request was signed';
+    } catch (error) {
+      return `${codeOf(error)}: ${text(error)}`;
+}
+  };
+  for (const [branch, local_approved] of [['peer', true], ['local', false]] as const) {
+    const copy = await pendingFailure(local_approved);
+    check(`net.pending-copy.${branch}`, copy.startsWith('unavailable: ') && copy.includes('pending')
+      && copy.includes('acquisition policy') && !copy.includes('Onlyne surface')
+      ? '' : `the pending failure read: ${copy}`);
+}
+}
+
 // ---- run --------------------------------------------------------------------
 
 /**
@@ -1634,6 +1698,8 @@ try {
   await phaseHandoverRecovery();
   await phaseSettlement();
   await phaseAuth();
+  await phaseAddressee();
+  await phasePendingCopy();
   await phaseMaintenance();
 } catch (error) {
   const problem = `unexpected error: ${text(error)}`;

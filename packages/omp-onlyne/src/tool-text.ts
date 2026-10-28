@@ -44,19 +44,20 @@ Use cases, each a complete call:
 - Drop an approval: { delivery_kind: "revoke the trust handshake", msg: "revoke the peer", meta: { op: "trust_revoke", node_id: "<node>" } }. Revocation is never judged by the policy and names no fingerprint.
 - Start an exchange with a discovered peer you are not paired with yet: { delivery_kind: "start the handshake with lazuli", msg: "start the exchange", meta: { op: "trust_begin", node_id: "lazuli" } }. The acquisition policy judges it before anything is sent: a refusal names the rule it matched and leaves the peer as it was, and an allow commits the local approval, sends the statement and reports the phase that followed.
 - Put a peer into a conversation, so the thread carries several members: { delivery_kind: "add dpdp to the plan thread", msg: "add dpdp", meta: { op: "member_add", thread: "<thread id or title>", to: "dpdp" } }; one call per member when meta.to is a list. Take one out with op "member_remove". Adding a member puts them in that thread, so a later meta.to array WITH meta.thread addresses one thread, while without meta.thread each target gets its own.
-- When a send fails with no trusted key, do not retry and do not try to pair: the error names both nodes, the responsible holder and the entry in the host surface. Report it and stop.
+- When a send fails with no trusted key, do not retry: the error names both nodes, and a pending invitation is confirmed by the acquisition policy or by that node's holder, not by another send. Report it and stop.
 
 The judge role chooses the action and plan from your intent, so never invent message ids, idempotency keys or revisions. A reply or followup states its relation; omitting it is rejected rather than assumed. A reply targets the original reply authority, so a conflicting to is rejected. A subagent session reads its own slice (onlyne://threads, onlyne://inbox, onlyne://contexts) and returns the result to the main session, which does the sending.`,
 	"summary.no_result": "Onlyne returned no structured result.",
 	"summary.where": " to {owner}",
 	"summary.thread_ref": " (thread {thread} seq {seq}{answering})",
 	"summary.answering": ", answering {sender}/{id}",
+	"summary.resolved": " · resolved: {node}",
 	"summary.outbound": " · read back: onlyne://outbound/{id}",
-	"summary.delivered": "Delivered{where}{facts}{trail} and recorded durably.",
-	"summary.delivered_answered": "Delivered{where}{facts}{trail}. {author} answered at seq {seq}.",
-	"summary.delivered_withheld": "Delivered{where}{facts}{trail}. {author} answered at seq {seq}, but that body was already shown in this context, so only its arrival is reported.",
-	"summary.delivered_timed_out": "Delivered{where}{facts}{trail} and recorded durably. No reply arrived within the wait; it will arrive on its own as an inbound message.",
-	"summary.delivered_cancelled": "Delivered{where}{facts}{trail} and recorded durably. The wait was cancelled; a reply will arrive on its own as an inbound message.",
+	"summary.delivered": "Delivered{where}{facts}{addressee}{trail} and recorded durably.",
+	"summary.delivered_answered": "Delivered{where}{facts}{addressee}{trail}. {author} answered at seq {seq}.",
+	"summary.delivered_withheld": "Delivered{where}{facts}{addressee}{trail}. {author} answered at seq {seq}, but that body was already shown in this context, so only its arrival is reported.",
+	"summary.delivered_timed_out": "Delivered{where}{facts}{addressee}{trail} and recorded durably. No reply arrived within the wait; it will arrive on its own as an inbound message.",
+	"summary.delivered_cancelled": "Delivered{where}{facts}{addressee}{trail} and recorded durably. The wait was cancelled; a reply will arrive on its own as an inbound message.",
 	"summary.not_confirmed": "Not confirmed: {failure}. {next}",
 	"summary.retry": "The record stays open and the runtime retries it; sending again would commit a second intent.",
 	"summary.recover": "The record stays open for recovery; do not re-send the same intent.",
@@ -121,19 +122,20 @@ meta.to 接受一个节点或一组节点。一组会逐个目标投递，每个
 - 撤回一次批准：{ delivery_kind: "撤销信任握手", msg: "撤销这个对端", meta: { op: "trust_revoke", node_id: "<node>" } }。撤销永远不受策略限制，也不需要指纹。
 - 与一个已发现但尚未配对的对端发起交换：{ delivery_kind: "与 lazuli 开始握手", msg: "开始交换", meta: { op: "trust_begin", node_id: "lazuli" } }。获取策略会在发出任何请求之前判定：被拒时错误里写明命中的规则，对端保持原样；放行时提交本地批准、发出陈述，并报告其后的信任阶段。
 - 把一个对端加进一段对话，让这个 thread 带多个成员：{ delivery_kind: "把 dpdp 加进 plan thread", msg: "加上 dpdp", meta: { op: "member_add", thread: "<thread id 或标题>", to: "dpdp" } }；meta.to 是列表时每个成员各一次调用。用 op "member_remove" 移出。加入成员就是把他放进那个 thread，所以之后带 meta.thread 的 meta.to 数组只指向一个 thread，不带 meta.thread 时每个目标各得一个。
-- 发送失败且没有可信密钥时，不要重试也不要尝试配对：错误里写明了两个节点、负责的持有者和宿主界面上的入口。报告它，然后停下。
+- 发送失败且没有可信密钥时，不要重试：错误里写明了两个节点；待确认的邀请由获取策略或那一侧的持有者确认，再发一次不会。报告它，然后停下。
 
 动作和执行计划由 judge 角色根据你的意图选择，所以永远不要自己编 message id、幂等键或版本号。回信或 followup 必须说明关系；省略会被拒绝，而不是被假定。回信只针对原来的回信权限方，所以冲突的 to 会被拒绝。子代理会话读自己的切片（onlyne://threads、onlyne://inbox、onlyne://contexts），把结果交回主会话，由主会话发送。`,
 	"summary.no_result": "Onlyne 没有返回结构化结果。",
 	"summary.where": "，投递给 {owner}",
 	"summary.thread_ref": "（thread {thread} seq {seq}{answering}）",
 	"summary.answering": "，回复 {sender}/{id}",
+	"summary.resolved": " · resolved: {node}",
 	"summary.outbound": "；读回: onlyne://outbound/{id}",
-	"summary.delivered": "已送达{where}{facts}，并已持久记录{trail}。",
-	"summary.delivered_answered": "已送达{where}{facts}，并已持久记录{trail}。{author} 在 seq {seq} 回复了。",
-	"summary.delivered_withheld": "已送达{where}{facts}，并已持久记录{trail}。{author} 在 seq {seq} 回复了，但那段正文已经在这个上下文里展示过，所以只报告它到达。",
-	"summary.delivered_timed_out": "已送达{where}{facts}，并已持久记录{trail}。等待期内没有回信；回信会作为入站消息自己到达。",
-	"summary.delivered_cancelled": "已送达{where}{facts}，并已持久记录{trail}。等待被取消；回信会作为入站消息自己到达。",
+	"summary.delivered": "已送达{where}{facts}{addressee}，并已持久记录{trail}。",
+	"summary.delivered_answered": "已送达{where}{facts}{addressee}，并已持久记录{trail}。{author} 在 seq {seq} 回复了。",
+	"summary.delivered_withheld": "已送达{where}{facts}{addressee}，并已持久记录{trail}。{author} 在 seq {seq} 回复了，但那段正文已经在这个上下文里展示过，所以只报告它到达。",
+	"summary.delivered_timed_out": "已送达{where}{facts}{addressee}，并已持久记录{trail}。等待期内没有回信；回信会作为入站消息自己到达。",
+	"summary.delivered_cancelled": "已送达{where}{facts}{addressee}，并已持久记录{trail}。等待被取消；回信会作为入站消息自己到达。",
 	"summary.not_confirmed": "未确认：{failure}。{next}",
 	"summary.retry": "记录保持打开，运行时自己重试；再发一次会提交第二个意图。",
 	"summary.recover": "记录保持打开，等待恢复；不要再发同一个意图。",

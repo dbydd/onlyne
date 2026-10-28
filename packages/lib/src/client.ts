@@ -2,7 +2,7 @@ import type { Context } from './core.ts';
 import { canonical, decimal, fail, key, requireValue, utc } from './core.ts';
 import type {
   Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Json, LocalAttention,
-  InjectOutcome, Member, Message, MessageQuery, MessageRef, MsgInput, Mutation, Outbound, Page, PageOptions, SendRequest,
+  InjectOutcome, Member, Message, MessageQuery, MessageRef, MsgInput, Mutation, NodeId, Outbound, Page, PageOptions, SendRequest,
   TraceEvent, Thread, ThreadRef, Transaction, Transport, MaintenanceClock, PreparedSend,
   ResourceReadQuery, ResourceReadResult, ResourceInventory, Resource, AttentionSettlement,
 } from './types.ts';
@@ -17,6 +17,14 @@ export interface SendOutcome {
   receipt?: Outbound['receipt'];
   admission: Outbound['state'];
   reply?: Entry;
+  /** The target as the caller spelled it, present only with `resolved` when the two differ. */
+  requested?: string;
+  /**
+   * The node `requested` resolved to. A receipt names the thread owner, which is this node
+   * whenever it started the conversation, so without this pair an alias send reads as a
+   * message this node addressed to itself.
+   */
+  resolved?: NodeId;
   /**
    * Whether the reply body is safe to render. `withheld` means the same body is already
    * confirmed consumed in this context through another path (RFC 0008 §5), so the caller
@@ -681,7 +689,7 @@ export class OnlyneClient {
     const action = await this.#decide(input);
     if (action.kind !== 'send') return this.#dispatch(action, options);
     const prepared = this.#prepare(input, action);
-    return this.send(prepared.to, prepared.message, prepared.plan, options);
+    return this.#addressed(await this.send(prepared.to, prepared.message, prepared.plan, options), input.meta?.to, prepared.to);
   }
 
   async prepare(input: MsgInput): Promise<PreparedSend> {
@@ -756,6 +764,14 @@ export class OnlyneClient {
     // A thread this node owns stores the entry locally; `action.to` is the participant the
     // message addresses, and the two differ whenever an initiator writes to a member.
     return { to: action.to, message, plan };
+  }
+
+  /**
+   * The caller's own spelling beside the node the decision resolved it to. Equal spellings say
+   * nothing new; a bare alias that resolved to a peer is the case the receipt cannot show.
+   */
+  #addressed(outcome: SendOutcome, requested: Json | undefined, resolved: NodeId): SendOutcome {
+    return typeof requested !== 'string' || requested === resolved ? outcome : { ...outcome, requested, resolved };
   }
 
   // ---- internals ---------------------------------------------------------------

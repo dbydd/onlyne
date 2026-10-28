@@ -64,11 +64,15 @@ function failureRecord(parsed: unknown): unknown {
 /**
  * RFC 0017 §3: what a signed request hits when this node holds no trusted key for the peer.
  * Both node ids travel in the text and in `details`, because a missing key here says nothing
- * about whether the peer runs. The agent cannot pair the nodes — only the node's holder can,
- * through the host surface — and the runtime re-sends the record that stays open, so the code
- * is `unavailable` and the message keeps that retry apart from an agent repeating the send.
- * The failure names the responsible holder and the act; the host's `guidance` adds the menu
- * entry, so every trust case ends at one concrete surface instead of a search.
+ * about whether the peer runs. The runtime re-sends the record that stays open, so the code is
+ * `unavailable` and the message keeps that retry apart from an agent repeating the send.
+ *
+ * A pending exchange is not a task for the reader: the invitation is already recorded on the
+ * side that owes the approval, and the acquisition policy there submits the approval on the
+ * next attempt, or that node's holder confirms it (RFC 0018 §4). The text says that instead of
+ * prescribing a menu step, because with policy `all` or `segment` no one has to act. The
+ * `no_record` and `revoked` cases keep the host's `guidance` menu, since nothing records them
+ * yet and only a holder can start or restore the exchange.
  */
 function missingTrust(
   self: NodeId | null, target: NodeId, peer: TrustEntry | undefined,
@@ -95,8 +99,8 @@ function missingTrust(
       failure);
   }
   const message = peer!.local_approved
-    ? `${target} has not answered the exchange ${here} requested, so this request cannot be signed yet. This agent cannot complete the pairing; the holder of ${target} confirms it through that node's Onlyne surface${surface}. ${retry}`
-    : `${target} requested an exchange with ${here} and this node has not approved it, so this request cannot be signed yet. This agent cannot approve it; the holder of ${here} confirms the fingerprint through this node's Onlyne surface${surface}. ${retry}`;
+    ? `${target} has not answered the exchange ${here} requested, so this request cannot be signed yet. The invitation is recorded at ${target} as pending; the acquisition policy on that node submits the approval on the next attempt, or its holder confirms it${surface}. ${retry}`
+    : `${target} requested an exchange with ${here} and this node has not approved it, so this request cannot be signed yet. The invitation is recorded here as pending; this node's acquisition policy submits the approval on the next attempt, or its holder confirms it${surface}. ${retry}`;
   return new OnlyneError('unavailable', message, failure);
 }
 
