@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createLogger, createNodeKey, startNodeHost } from '@onlyne/node-host';
+import { createLogger, createNodeKey, startNodeHost, type NodeHostOptions } from '@onlyne/node-host';
 import { resolveLocale, setLocale } from '@onlyne/node-host/i18n';
 import { dirname, join } from 'node:path';
 import { loadConfig } from './config.js';
@@ -17,9 +17,11 @@ const config = await loadConfig(path);
 // logger and the node host below are built after this point so their text follows it too.
 setLocale(resolveLocale(config.language));
 // On a terminal the TUI owns the screen, so log lines go to the ring it renders and to a file
-// beside the store; the ring alone would vanish with the process.
+// beside the store; the ring alone would vanish with the process. `ONLYNE_NO_TUI=1` asks for
+// the JSON log even on a terminal, so the operator keeps a machine-readable stream.
+const forceJson = process.env.ONLYNE_NO_TUI === '1';
 const { log, ring } = createLogger(
-  !(process.stdin.isTTY && process.stdout.isTTY), 200, join(dirname(config.storage_path), 'gateway.log'),
+  forceJson || !(process.stdin.isTTY && process.stdout.isTTY), 200, join(dirname(config.storage_path), 'gateway.log'),
 );
 // RFC 0017 §2: the CLI is always keyed, and a missing key is generated and saved under
 // ~/.config/onlyne/keys/<node-id>/ instead of being a hand-written prerequisite.
@@ -37,7 +39,14 @@ handler = request => gateway.node.fetch(request);
 gateway.node.client.runMaintenance();
 // Discovery starts only once the real handler is served: a candidate probe aimed at this
 // node must reach the gateway instead of the starting stub.
-const host = await startNodeHost({ node: gateway.node, endpoint, bind: config.server.bind, ring, log });
+// The scheduler's status lines ride into the shared trust TUI through the host's status hook;
+// the node host owns how they are drawn.
+type NodeHostSurface = NodeHostOptions & { status?: () => Promise<string[]> };
+const hostOptions: NodeHostSurface = {
+  node: gateway.node, endpoint, bind: config.server.bind, ring, log,
+  status: () => gateway.status(),
+};
+const host = await startNodeHost(hostOptions);
 
 const shutdown = async (): Promise<void> => {
   await host.close();

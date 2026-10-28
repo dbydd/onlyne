@@ -23,7 +23,9 @@
   "files": ["src", "README.md", "LICENSE"],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "bun tests/verify.ts"
+    "test": "bun tests/verify.ts && bun tests/mounts-verify.ts",
+    "smoke": "bun tests/mounts-smoke.ts",
+    "smoke:fast": "MOUNT_SMOKE_INTERVAL_MS=3000 bun tests/mounts-smoke.ts"
   },
   "dependencies": {
     "@onlyne/im-gateway": "^3.0.0",
