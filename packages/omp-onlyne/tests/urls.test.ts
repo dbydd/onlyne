@@ -4,6 +4,7 @@ import type { Action, OnlyneNode, Outbound } from "@onlyne/lib";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ResolveContext } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { createOnlyneNode } from "../src/node.ts";
+import { TRUST_THREAD } from "../src/handshake.ts";
 import { setRuntime, type PluginRuntime } from "../src/runtime.ts";
 import { ContextRegistry } from "../src/store.ts";
 import type { OnlyneConfig } from "../src/types.ts";
@@ -186,6 +187,41 @@ describe("onlyne:// threads", () => {
 		expect(page).toContain("Read-only");
 		expect(page).toContain("hello");
 		expect(page).toContain("urn:onlyne:agent:b");
+	});
+
+	test("the handshake thread stays out of the listing and opens by reference", async () => {
+		const x = await exchange();
+		setRuntime(x.a);
+		// Written the way the runtime writes it: this node's own thread, one entry, self-mentioned.
+		await x.a.node.threads.create(x.a.node.auth, {
+			title: TRUST_THREAD, id: TRUST_THREAD, idempotency_key: crypto.randomUUID(),
+			retry_until: new Date(Date.now() + 60_000).toISOString(),
+		});
+		const sent = await x.a.node.client.send("urn:onlyne:agent:a", {
+			id: "trust-1", sender: "urn:onlyne:agent:a", delivery_kind: "trust", msg: "握手邀请：请核对指纹。",
+			meta: {
+				thread: { owner: "urn:onlyne:agent:a", id: TRUST_THREAD }, mentions: ["urn:onlyne:agent:a"],
+				data: { trust: { node_id: "urn:onlyne:agent:b", fingerprint: "0123456789abcdef", phase: "invited", pending: true } },
+			},
+		}, { response: "none", execution: "existing" });
+		expect(sent.admission).toBe("accepted");
+
+		// The inbox row an agent sees names the entry it can open, not a separate notice id.
+		const rows = (await x.a.node.messages.inbox(x.a.node.auth, { page_size: 10 })).items;
+		// A reply by the id a row shows has to resolve, so the row and its entry name one message.
+		expect(rows.every(item => item.attention.message_ref.id === item.attention.entry?.message.id)).toBe(true);
+		const row = rows
+			.find(item => item.attention.thread_ref.id === TRUST_THREAD);
+		expect(row?.attention.message_ref.id).toBe("trust-1");
+		expect(row?.attention.entry?.message.id).toBe(row?.attention.message_ref.id);
+
+		// Every reference the inbox row offers resolves: id alone, owner/id, and the entry path.
+		for (const alias of [TRUST_THREAD, `urn%3Aonlyne%3Aagent%3Aa/${TRUST_THREAD}`, "urn:onlyne:agent:a/trust"]) {
+			expect(await readView(`onlyne://threads/${alias}`)).toContain("握手邀请");
+		}
+		expect(await readView(`onlyne://threads/${TRUST_THREAD}/messages/1`)).toContain("握手邀请");
+		// The conversation listings still leave it out: it is this node's record, not a conversation.
+		expect(await readView("onlyne://threads")).not.toContain("/trust");
 	});
 });
 

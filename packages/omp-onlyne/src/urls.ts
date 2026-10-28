@@ -31,7 +31,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { resourceQuery } from "./resources.ts";
 import { getRuntime, type PluginRuntime } from "./runtime.ts";
-import { isTrustThread } from "./handshake.ts";
+import { isTrustThread, trustThread } from "./handshake.ts";
 import type { ContextRecord } from "./types.ts";
 import { urlsText } from "./urls-text.ts";
 
@@ -827,8 +827,22 @@ async function findThread(runtime: PluginRuntime, caller: Caller, alias: string)
 	}
 	if (matches.length === 1) return matches[0]!;
 	if (matches.length > 1) throw new Error(t("manyThreadsNamed", { alias }));
+	// RFC 0018 §3.2 keeps the handshake thread out of the conversation listings. An inbox row
+	// for a handshake entry still links straight to it, and a link that opens nothing is worse
+	// than a listing nobody needs: a reference that names it exactly resolves here.
+	const direct = caller.main ? await trustThreadNamed(runtime, alias) : undefined;
+	if (direct !== undefined) return direct;
 	if (!caller.main && caller.agent_id !== undefined) throw new Error(t("noThreadSlice", { alias }));
 	throw new Error(t("noThreadNamed", { alias }));
+}
+
+/** The handshake thread, when the alias names it exactly; the listings never offer it. */
+async function trustThreadNamed(runtime: PluginRuntime, alias: string): Promise<Thread | undefined> {
+	const ref = trustThread(runtime.config.node.id);
+	const names = new Set([ref.id, threadKey(ref), `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`]);
+	if (!names.has(alias)) return undefined;
+	const described = await runtime.node.threads.describe(runtime.node.auth, ref).catch(() => undefined);
+	return described?.thread;
 }
 
 /** Contexts this caller may see: every node-local record for the main session, its own records otherwise. */
