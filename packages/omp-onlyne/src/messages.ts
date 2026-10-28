@@ -21,6 +21,8 @@ export interface BridgeDeps {
 	decider: JudgeDecider;
 	contexts: ContextRegistry;
 	nodeId: string;
+	/** Wall clock, so the escalation window can be tested without waiting for it. */
+	now?: () => number;
 }
 /**
  * One inbound entry is judged once per process. A retry replays the recorded decision
@@ -36,10 +38,16 @@ interface InboundAttempt {
 	passes?: number;
 	/** Whether the held delivery has already been forced through as a trigger. */
 	escalated?: boolean;
+	/** How the delivery was submitted: a trigger starts work, a next-turn fragment waits. */
+	delivery?: { via: "trigger" | "nextTurn"; at: number };
 }
 
-/** Passes a main-session delivery may stay unconfirmed before the host forces it through. */
-const MAIN_RETRY_PASSES = 2;
+/**
+ * How long a next-turn fragment may stay unread before the host offers it again. A turn takes at
+ * least one provider round trip, so a window measured in maintenance passes fires while the
+ * session is still working and duplicates the delivery (dpdp report, follow_up queue).
+ */
+const NEXT_TURN_ESCALATE_MS = 60_000;
 /** Times an entry may be decided again after its binding went away before it is delivered instead. */
 const MAX_REDECISIONS = 2;
 const inboundAttempts = new Map<string, InboundAttempt>();
@@ -70,6 +78,7 @@ function inboundKey(entry: Entry): string {
 const TRACE_DEBUG = new Set(["inbound.inject", "inbound.duplicate"]);
 
 export function createRuntimeBridge(deps: BridgeDeps): Runtime {
+	const now = deps.now ?? Date.now;
 	return {
 		/**
 		 * Admission is the last cheap place to refuse a plan this host cannot honor (RFC 0005
@@ -141,17 +150,22 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				inboundAttempts.delete(key);
 				throw new OnlyneError("context_lost", t("contextLost", { alias: holder.alias }), { context: holder.alias });
 			}
-			// A delivery the session never picked up leaves the entry owed and its row
-			// `injected: false`. Reporting it delivered again does nothing, so a bounded retry
-			// forces it through as a trigger once, and after that the entry is reported as
-			// unconfirmed instead of disappearing into the queue (RFC 0008 §7).
+			// A next-turn fragment can genuinely be lost: it waits for an assembly the session may
+			// never reach. Only that shape is retried, only after a window long enough to be sure
+			// the session is not simply working, and only while it is idle right now. A delivery
+			// already submitted as a trigger or an insertion has started its own turn, so waiting
+			// for its confirmation is waiting for the turn to end, not for a queue nobody drains.
 			attempt.passes = (attempt.passes ?? 0) + 1;
-			if (attempt.landed === deps.main.agent.id && attempt.passes > MAIN_RETRY_PASSES) {
+			const delivery = attempt.delivery;
+			const waiting = delivery !== undefined && delivery.via === "nextTurn" && now() - delivery.at >= NEXT_TURN_ESCALATE_MS;
+			if (attempt.landed === deps.main.agent.id && waiting && delivery !== undefined && deps.main.isIdle()) {
 				if (attempt.escalated !== true) {
 					attempt.escalated = true;
 					const token = registerPending(entry, deps.main.agent.id, "fragment");
 					deps.pi.sendMessage(payload(entry, INBOUND, token), { triggerTurn: true });
-					deps.pi.logger.info("onlyne.delivery.escalated", { entry: key, reason: "unconfirmed", passes: attempt.passes });
+					deps.pi.logger.info("onlyne.delivery.escalated", {
+						entry: key, reason: "unconfirmed", waited_ms: now() - delivery.at,
+					});
 				} else {
 					deps.pi.logger.warn("onlyne.delivery.unconfirmed", { entry: key, passes: attempt.passes, context: attempt.landed });
 				}
@@ -198,6 +212,7 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 					payload(entry, INBOUND, token),
 					mode === undefined ? { triggerTurn: true } : { deliverAs: mode === "steer" ? "steer" : "followUp" },
 				);
+				attempt.delivery = { via: "trigger", at: now() };
 			} else {
 				// RFC 0008 §7: a fragment enters the next context assembly without starting a turn.
 				// An idle session never reaches that assembly by itself, so the entry would sit in
@@ -205,6 +220,7 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				const idle = deps.main.isIdle();
 				deps.pi.sendMessage(payload(entry, INBOUND, token), idle ? { triggerTurn: true } : { deliverAs: "nextTurn" });
 				if (idle) deps.pi.logger.info("onlyne.delivery.escalated", { entry: key, reason: "idle-fragment" });
+				attempt.delivery = { via: idle ? "trigger" : "nextTurn", at: now() };
 			}
 			attempt.landed = deps.main.agent.id;
 			deps.pi.logger.info("onlyne.delivery.sent", {
