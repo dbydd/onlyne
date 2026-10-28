@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Entry } from "@onlyne/lib";
+import { OnlyneError, type Entry } from "@onlyne/lib";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { createRuntimeBridge, type BridgeDeps } from "../src/messages.ts";
 import type { ContextRegistry } from "../src/store.ts";
@@ -66,5 +66,35 @@ describe("delivery of a fragment", () => {
 		await runtime.inject(entry);
 		expect(sent).toHaveLength(2);
 		expect(logged).toContain("onlyne.delivery.unconfirmed");
+	});
+
+	test("a binding that is gone stops being judged and lands in the main session", async () => {
+		const sent: Array<{ options: unknown }> = [];
+		const logged: string[] = [];
+		let judgements = 0;
+		const deps = {
+			nodeId: "urn:onlyne:agent:self",
+			pi: {
+				sendMessage: (_message: unknown, options: unknown) => { sent.push({ options }); },
+				logger: { info: (name: string) => logged.push(name), debug: () => {}, warn: () => {} },
+			},
+			main: { agent: { id: "Main" }, isIdle: () => false } as unknown as ExtensionContext,
+			decider: {
+				decideInbound: async () => {
+					judgements += 1;
+					throw new OnlyneError("context_lost", "gone");
+				},
+			} as unknown as JudgeDecider,
+			contexts: { list: async () => [] } as unknown as ContextRegistry,
+		} as unknown as BridgeDeps;
+		const runtime = createRuntimeBridge(deps);
+		const entry = entryAt("4");
+		for (const _ of [1, 2, 3]) await runtime.inject(entry).catch(() => undefined);
+		// Past the budget the entry is delivered to the main session instead of judged again.
+		expect(await runtime.inject(entry)).toMatchObject({ context: "Main", outcome: "delivered" });
+		expect(judgements).toBe(1);
+		expect(sent).toHaveLength(1);
+		expect(sent[0]!.options).toEqual({ triggerTurn: true });
+		expect(logged).toContain("onlyne.delivery.escalated");
 	});
 });

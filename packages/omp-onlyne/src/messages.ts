@@ -40,7 +40,28 @@ interface InboundAttempt {
 
 /** Passes a main-session delivery may stay unconfirmed before the host forces it through. */
 const MAIN_RETRY_PASSES = 2;
+/** Times an entry may be decided again after its binding went away before it is delivered instead. */
+const MAX_REDECISIONS = 2;
 const inboundAttempts = new Map<string, InboundAttempt>();
+/**
+ * Deliveries attempted per entry, kept outside the attempt record: dropping that record is what
+ * makes the next pass decide again, and it must not reset the budget that bounds the deciding.
+ */
+const deliveryAttempts = new Map<string, number>();
+
+function countedAttempt(key: string): number {
+	const next = (deliveryAttempts.get(key) ?? 0) + 1;
+	deliveryAttempts.set(key, next);
+	return next;
+}
+
+/** The end of the line for an entry nothing can hold: the main session takes it once, visibly. */
+function escalate(deps: BridgeDeps, entry: Entry, key: string, reason: string) {
+	const token = registerPending(entry, deps.main.agent.id, "fragment");
+	deps.pi.sendMessage(payload(entry, INBOUND, token), { triggerTurn: true });
+	deps.pi.logger.info("onlyne.delivery.escalated", { entry: key, reason, attempts: deliveryAttempts.get(key) });
+	return { context: deps.main.agent.id, consumed: false, outcome: "delivered" as const };
+}
 
 function inboundKey(entry: Entry): string {
 	return `${entry.thread_ref.owner}/${entry.thread_ref.id}/${entry.seq}`;
@@ -95,6 +116,12 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 				});
 			}
 			if (attempt.failure !== undefined) {
+				// A lost binding cannot be re-decided into existence: past the budget the entry is
+				// delivered to the main session instead, so the judgement stops burning model calls
+				// and the message stops being invisible.
+				if (attempt.failure.error.code === "context_lost" && countedAttempt(key) > MAX_REDECISIONS) {
+					return escalate(deps, entry, key, "context-lost");
+				}
 				deps.pi.logger.debug("onlyne.delivery.held", { entry: key, reason: "judge-failed", error: attempt.failure.message });
 				throw attempt.failure;
 			}
@@ -109,6 +136,7 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 			// delivery. Mark the dead binding lost and let the next pass decide again.
 			const holder = (await deps.contexts.list()).find(record => record.agent_id === attempt.landed);
 			if (holder !== undefined && holder.state !== "idle" && holder.state !== "running") {
+				if (countedAttempt(key) > MAX_REDECISIONS) return escalate(deps, entry, key, "context-lost");
 				await deps.contexts.updateState(holder.alias, "lost").catch(() => undefined);
 				inboundAttempts.delete(key);
 				throw new OnlyneError("context_lost", t("contextLost", { alias: holder.alias }), { context: holder.alias });
@@ -187,6 +215,7 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 		},
 		todo: async (entry, context) => {
 			inboundAttempts.delete(inboundKey(entry));
+			deliveryAttempts.delete(inboundKey(entry));
 			// RFC 0018 §3: a handshake status update is delivered for the record, not as work.
 			// Only an entry that owes a decision takes the todo decision path.
 			if (handshakeFacts(entry.message.meta)?.pending === false) {
