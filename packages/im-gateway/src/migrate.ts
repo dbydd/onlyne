@@ -98,6 +98,8 @@ export interface MigrationReport {
   rendering_in_flight: number;
   /** Messages the old endpoint authored (split projections) re-attributed to the new identity. */
   reattributed_messages: number;
+  /** Grant notices set back to unacked so each member relearns the thread under the new owner. */
+  notices_reissued: number;
   keys_rewritten: number;
   values_rewritten: number;
   digests_recomputed: number;
@@ -122,6 +124,7 @@ interface Stats {
   pushes: number;
   rendering_in_flight: number;
   reattributed_messages: number;
+  notices_reissued: number;
   keys_rewritten: number;
   values_rewritten: number;
   digests_recomputed: number;
@@ -271,9 +274,12 @@ async function rewrite(store: Store, input: MigrationInput): Promise<{ store: St
   const mapId = (value: unknown): unknown => (value === from ? to : value);
   const stats: Stats = {
     resources: [], threads: 0, entries: 0, events: 0, operations: 0, pushes: 0,
-    rendering_in_flight: 0, reattributed_messages: 0, keys_rewritten: 0, values_rewritten: 0, digests_recomputed: 0,
+    rendering_in_flight: 0, reattributed_messages: 0, notices_reissued: 0,
+    keys_rewritten: 0, values_rewritten: 0, digests_recomputed: 0,
     fenced_idempotency: [], probes_archived: 0, trust_retained: [], warnings: [],
   };
+  /** Every member the new owner keeps: each one needs a notice that teaches it the new ref. */
+  const activeMembers: Array<{ peer: string; thread_ref: ThreadRef }> = [];
 
   // Refuse a store with work the rewrite cannot settle. The operator can let the maintenance
   // ring finish and rerun; rewriting an open handover would leave its probe bound to the old ref.
@@ -531,7 +537,12 @@ async function rewrite(store: Store, input: MigrationInput): Promise<{ store: St
       case 'member': {
         if (parts[1] !== from) break;
         remapOwnerAt(1);
-        put(encoded(), remapMember(value), key);
+        const member = remapMember(value);
+        const threadId = parts[2];
+        if (isRec(member) && member.state === 'active' && member.peer !== to && typeof threadId === 'string') {
+          activeMembers.push({ peer: String(member.peer), thread_ref: { owner: to, id: threadId } });
+        }
+        put(encoded(), member, key);
         continue;
       }
       case 'grant': {
@@ -677,7 +688,21 @@ async function rewrite(store: Store, input: MigrationInput): Promise<{ store: St
         continue;
       }
       case 'notice': {
-        put(key, isRec(value) ? { ...value, thread_ref: remapThread(value.thread_ref), recipient: mapId(value.recipient) } : value, key);
+        if (!isRec(value)) break;
+        const learned = isRec(value.thread_ref) ? value.thread_ref : undefined;
+        // The member's `known` row still names the old owner, and only an unacked notice is ever
+        // delivered. Remapping the row without this leaves the member no way to learn the new
+        // ref, so the notice is re-issued and names the ref the recipient learned before.
+        const stale = learned !== undefined && learned.owner === from && typeof learned.id === 'string'
+          ? { owner: from, id: learned.id }
+          : undefined;
+        put(key, {
+          ...value,
+          thread_ref: remapThread(value.thread_ref),
+          recipient: mapId(value.recipient),
+          ...(stale === undefined ? {} : { acked: false, previous_thread_ref: stale }),
+        }, key);
+        if (stale !== undefined) stats.notices_reissued += 1;
         continue;
       }
       case 'probe': {
@@ -763,7 +788,17 @@ async function rewrite(store: Store, input: MigrationInput): Promise<{ store: St
     if (!next.has(key)) next.set(key, value);
   }
 
-  stats.values_rewritten = [...next.entries()].filter(([key, value]) => store[key] !== value).length;
+  const rows = [...next];
+  stats.values_rewritten = rows.filter(([key, value]) => store[key] !== value).length;
+  for (const member of activeMembers) {
+    const notified = rows.some(([rowKey, row]) =>
+      rowKey.startsWith('notice/') && isRec(row)
+      && row.recipient === member.peer
+      && isRec(row.thread_ref) && row.thread_ref.owner === to && row.thread_ref.id === member.thread_ref.id);
+    if (!notified) {
+      stats.warnings.push(`The member ${member.peer} in ${to}/${member.thread_ref.id} has no notice to re-issue and learns the new owner only from a later one.`);
+    }
+  }
   for (const peer of stats.trust_retained) {
     stats.warnings.push(`The trust row for ${peer} was kept, but it was recorded under ${from}; pair ${to} explicitly before ${peer} accepts it.`);
   }

@@ -84,6 +84,8 @@ const TERMINAL: Record<string, true> = {
 const MAX_CURSOR_PAGES = 10_000;
 /** A binding check must not hold the maintenance pass behind an unreachable resource owner. */
 const RESOURCE_CHECK_MS = 5_000;
+/** One reconcile failure line per (owner, thread, code) per window; a dead owner stays observable. */
+const RECONCILE_FAILURE_WINDOW_MS = 300_000;
 
 /** Anything that is not a recorded refusal leaves the admission unknown, never "undelivered". */
 function admissionOf(failure: Failure): Outbound['state'] {
@@ -187,6 +189,8 @@ export class OnlyneClient {
   readonly #waiters = new Map<string, Waiter>();
   /** Replies already returned as tool results, per context, held until consumption confirms them. */
   readonly #held = new Map<string, Set<string>>();
+  /** Last `reconcile.failed` line per (owner, thread, code), and what the window suppressed. */
+  readonly #reconcileFailures = new Map<string, { at: number; suppressed: number }>();
 
   constructor(
     ctx: Context, transport: Transport, messages: MessageService, threads: ThreadService,
@@ -553,6 +557,8 @@ export class OnlyneClient {
    * `owner + thread_ref` pairs recorded when a grant notice was accepted, plus the
    * threads this node hosts, which need no grant. The owner's authenticated attention
    * list is the evidence; the ack goes out only after the entry is durable locally.
+   * An owner this node cannot reach is reported as a trace record, never thrown: one dead
+   * owner must not starve the rest, and a silent skip is the failure nobody can diagnose.
    */
   async reconcile(signal?: AbortSignal): Promise<Page<LocalAttention>> {
     for (const ref of await this.#knownRefs()) {
@@ -561,12 +567,33 @@ export class OnlyneClient {
         await this.#reconcileThread(ref, signal);
       } catch (error) {
         if (ref.owner === this.#ctx.options.node_id) throw error;
-        // One owner this node cannot reach or resolve must not starve the rest; the next
-        // reconciliation pass retries it, and the local inbox still reflects what landed.
+        this.#reportReconcileFailure(ref, error);
         continue;
       }
     }
     return this.#messages.inbox(this.#auth(), {});
+  }
+
+  /**
+   * Writes at most one `reconcile.failed` line per (owner, thread, code) per window. A failed
+   * pull drops nothing, so the next pass retries the same ref; deduplicating here keeps a
+   * permanently dead owner from writing the same line every pass while still accounting for
+   * every attempt it folded into the line it did write.
+   */
+  #reportReconcileFailure(ref: ThreadRef, error: unknown): void {
+    const failure = failureOf(error);
+    const slot = key(ref.owner, ref.id, failure.code);
+    const now = this.#ctx.now();
+    const held = this.#reconcileFailures.get(slot);
+    if (held !== undefined && now - held.at < RECONCILE_FAILURE_WINDOW_MS) {
+      held.suppressed += 1;
+      return;
+    }
+    this.#reconcileFailures.set(slot, { at: now, suppressed: 0 });
+    this.#trace({
+      event: 'reconcile.failed', owner: ref.owner, thread: ref.id,
+      code: failure.code, message: failure.message, attempts: (held?.suppressed ?? 0) + 1,
+    });
   }
 
   /**

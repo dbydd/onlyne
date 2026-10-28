@@ -108,6 +108,12 @@ export interface Attention {
 }
 export interface Grant {
   id: string; recipient: NodeId; thread_ref: ThreadRef; revision: string; acked: boolean;
+  /**
+   * Set on a re-issued notice: the ref the recipient learned under the previous owner. The
+   * recipient stores the new known row and drops the one this names, so a renamed owner does
+   * not leave a second row pointing at an endpoint that no longer exists.
+   */
+  previous_thread_ref?: ThreadRef;
 }
 export interface Event {
   id: string; type: 'message' | 'membership' | 'thread_closed' | 'resource_event' | 'operation';
@@ -224,7 +230,13 @@ export type TraceEvent =
   | { event: 'outbound.admitted'; sender: NodeId; message: string; target: string; state: string; guarantee?: string; code?: string }
   | { event: 'outbound.redriven'; sender: NodeId; message: string; target: string }
   | { event: 'outbound.expired'; sender: NodeId; message: string; code: string }
-  | { event: 'await.settled'; thread: ThreadRef; seq: string; waiters: number };
+  | { event: 'await.settled'; thread: ThreadRef; seq: string; waiters: number }
+  /**
+   * A known owner this node could not reconcile, written at most once per (owner, thread, code)
+   * per window. `attempts` is how many failed passes that one line accounts for, the suppressed
+   * duplicates included; the local rows a failed pull never reached are still owed, not dropped.
+   */
+  | { event: 'reconcile.failed'; owner: NodeId; thread: string; code: ErrorCode; message: string; attempts: number };
 /** What the host did with one inbound entry, reported back with the injection result. */
 export type InjectOutcome = 'delivered' | 'queued' | 'waiting' | 'skipped' | 'consumed';
 export interface Runtime {

@@ -327,6 +327,10 @@ export class ThreadService {
    * Recipient side of grant acceptance: an owner pushes us a notice we received during
    * a prior join. We store both the notice and the known-owner record keyed owner+threadid.
    * Caller is the owner the notice names, notice is addressed to our node, thread stays on owner.
+   *
+   * A notice that names `previous_thread_ref` is a re-issue after its owner changed identity:
+   * the ref it names is the one this node learned before, so that known row is dropped. Two
+   * rows for one thread would make every reconciliation pass pull the dead owner.
    */
   async acceptGrant(auth: Auth, grant: Grant): Promise<Grant> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
@@ -336,6 +340,8 @@ export class ThreadService {
     requireThreadRef(grant.thread_ref);
     if (grant.thread_ref.owner !== auth.actor) fail('forbidden', 'A grant notice must come from the thread owner it names.');
     if (grant.recipient !== this.#ctx.node) fail('forbidden', 'The grant notice is addressed to another node.');
+    const previous = grant.previous_thread_ref;
+    if (previous !== undefined) requireThreadRef(previous);
     const ref: ThreadRef = { owner: grant.thread_ref.owner, id: grant.thread_ref.id };
     return this.#ctx.storage.transaction(async tx => {
       const slot = key('grant', ref.owner, grant.id);
@@ -345,6 +351,9 @@ export class ThreadService {
       }
       const known: Known = { owner: ref.owner, thread_ref: ref, revision: grant.revision };
       await tx.put(key('known', ref.owner, ref.id), known);
+      if (previous !== undefined && (previous.owner !== ref.owner || previous.id !== ref.id)) {
+        await tx.delete(key('known', previous.owner, previous.id));
+      }
       if (stored !== undefined) return stored;
       const next: Grant = { id: grant.id, recipient: this.#ctx.node, thread_ref: ref, revision: grant.revision, acked: false };
       await tx.put(slot, next);

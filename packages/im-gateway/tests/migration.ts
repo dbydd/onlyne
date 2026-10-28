@@ -1,7 +1,10 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MemoryStorage, OnlyneError, OnlyneNode, type Transport } from '@onlyne/lib';
+import {
+  MemoryStorage, OnlyneError, OnlyneNode,
+  type Storage, type ThreadRef, type TraceEvent, type Transport,
+} from '@onlyne/lib';
 import type { Connector, ImEvent, SendOutcome, SendRequest } from '@onlyne/im-core';
 import { createImGateway, nodeClock, type GatewayConfig, type ImGateway } from '../src/index.js';
 import { applyMigration, inspectStore, planMigration, rollbackMigration } from '../src/migrate.js';
@@ -77,11 +80,11 @@ const agent = new OnlyneNode({
 });
 
 let reachable = true;
-const transportFor = (actor: string): Transport => ({
+const transportFor = (actor: string, node: OnlyneNode = agent): Transport => ({
   async request<T>(target: string, method: string, path: string, body?: unknown): Promise<T> {
     if (!reachable) throw new OnlyneError('unavailable', 'The test agent is offline.');
     if (target !== AGENT) throw new OnlyneError('unavailable', `The test routes no peer ${target}.`);
-    const response = await agent.fetch(new Request(`http://agent.test/onlyne/v3${path}`, {
+    const response = await node.fetch(new Request(`http://agent.test/onlyne/v3${path}`, {
       method,
       headers: { 'content-type': 'application/json', 'Onlyne-Actor': actor },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -285,6 +288,144 @@ try {
     .then(() => undefined, error => error);
   ok('an open handover refuses the migration', pendingError instanceof OnlyneError
     && String(pendingError.message).includes('handover'));
+
+  // ---- owner rename: the peer must learn the new ThreadRef and drop the dead one -----------
+  // The reporter's state. A grant was accepted and acked under the old owner, so the peer holds
+  // a `known` row naming the endpoint the migration kills, the member row keeps `#ensureMember`
+  // from issuing another grant, and the notice stays acked. Nothing in that state re-teaches the
+  // peer, so every attention the new owner produces afterwards waits forever.
+  const renameStore = join(dir, 'rename-store.json');
+  const RENAME_CONVERSATION = 'oc_ren';
+  const RENAME_RESOURCE = `lark-${RENAME_CONVERSATION}`;
+  const RENAME_THREAD = `im-${RENAME_RESOURCE}`;
+  const renamed = (source: string): ImEvent => ({ ...event(source), conversation: RENAME_CONVERSATION, text: `改名 ${source}` });
+  let peerNow = Date.now();
+  const peerStore = new MemoryStorage();
+  const peerTraces: TraceEvent[] = [];
+  /** The endpoints the peer can reach; the old owner's route disappears with the migration. */
+  const peerRoutes = new Map<string, ImGateway>();
+  const peerTransport: Transport = {
+    async request<T>(target: string, method: string, path: string, body?: unknown): Promise<T> {
+      const gateway = peerRoutes.get(target);
+      if (gateway === undefined) throw new OnlyneError('unavailable', `The peer has no route to ${target}.`);
+      const response = await gateway.node.fetch(new Request(`http://peer.test/onlyne/v3${path}`, {
+        method,
+        headers: { 'content-type': 'application/json', 'Onlyne-Actor': AGENT },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }));
+      const text = await response.text();
+      if (!response.ok) {
+        const failure = rec(text === '' ? {} : JSON.parse(text));
+        const error = rec(failure?.error);
+        throw new OnlyneError(
+          (typeof error?.code === 'string' ? error.code : 'unavailable') as 'unavailable',
+          typeof error?.message === 'string' ? error.message : 'The peer gateway refused.',
+        );
+      }
+      return (text === '' ? undefined : JSON.parse(text)) as T;
+    },
+  };
+  const peer = new OnlyneNode({
+    node_id: AGENT,
+    base_url: 'http://peer.test/onlyne/v3',
+    plugins: {
+      storage: peerStore,
+      authenticate: async request => {
+        const actor = request.headers.get('Onlyne-Actor');
+        return actor === null || actor.length === 0 ? null : { actor };
+      },
+      resolve: async () => { throw new OnlyneError('not_found', 'The test peer resolves nobody.'); },
+      decide: () => { throw new OnlyneError('decision_unavailable', 'The test peer decides nothing.'); },
+      transport: peerTransport,
+      maintenanceClock: nodeClock(),
+      runtime: {
+        notify: () => undefined,
+        supports: async () => false,
+        inject: async (_entry, context) => ({ context: context ?? 'peer', consumed: true, outcome: 'delivered' }),
+        trace: event => { peerTraces.push(event); },
+      },
+    },
+    now: () => peerNow,
+    id: () => crypto.randomUUID(),
+    // The dedup window is proved by moving this clock, so its own retry ceiling stays short
+    // enough that a mutation still lands inside the gateway's default 24-hour window.
+    retry_max_ms: 60_000,
+  });
+  const renameConnector = new ScriptedConnector();
+  const renameFactories = { lark: async () => renameConnector };
+  const oldRenameConfig: GatewayConfig = { ...oldConfig, storage_path: renameStore, server: { bind: '127.0.0.1', port: 4101 } };
+  const newRenameConfig: GatewayConfig = { ...newConfig, storage_path: renameStore, server: { bind: '127.0.0.1', port: 4102 } };
+  const rowsOf = async <T>(storage: Storage, prefix: string): Promise<T[]> =>
+    storage.transaction(async tx => (await tx.scan<T>(prefix)).map(row => row.value));
+  const isOldOwnerFailure = (event: TraceEvent): event is Extract<TraceEvent, { event: 'reconcile.failed' }> =>
+    event.event === 'reconcile.failed' && event.owner === OLD;
+
+  const renameOld = await createImGateway(oldRenameConfig, { storage: 'disk', factories: renameFactories, transport: transportFor(OLD, peer), log: () => undefined });
+  await settle();
+  peerRoutes.set(OLD, renameOld);
+  await renameOld.receive(renamed('r-1'));
+  await settle();
+  // The peer accepts the pushed notice and confirms it: the owner's notice is closed, and the
+  // peer keeps the only record that teaches it where the thread lives.
+  await peer.client.maintain();
+  const staleKnown = await rowsOf<{ thread_ref: ThreadRef }>(peerStore, 'known/');
+  ok('the peer learned the thread under the old owner', staleKnown.length === 1
+    && staleKnown[0]?.thread_ref.owner === OLD && staleKnown[0]?.thread_ref.id === RENAME_THREAD);
+  const ackedNotice = await rowsOf<Record<string, unknown>>(renameOld.storage, 'notice/');
+  ok('the old grant is acked before the migration', ackedNotice.length === 1 && ackedNotice[0]?.acked === true);
+  await renameOld.stop();
+
+  const renamePlan = await planMigration({
+    store_path: renameStore, from: OLD, to: NEW, platform: 'lark',
+    pairing: { node_id: NEW }, snapshot_path: join(dir, 'rename-snapshot.json'), now: () => Date.now(),
+  });
+  ok('the plan re-issues the notice the member already acked', renamePlan.report.notices_reissued === 1);
+  await applyMigration({
+    store_path: renameStore, from: OLD, to: NEW, platform: 'lark',
+    pairing: { node_id: NEW }, snapshot_path: join(dir, 'rename-snapshot.json'),
+  });
+  peerRoutes.delete(OLD);
+
+  // The dead owner is reported instead of skipped, once per window however many passes fail.
+  await peer.client.reconcile();
+  await peer.client.reconcile();
+  await peer.client.reconcile();
+  const firstFailures = peerTraces.filter(isOldOwnerFailure);
+  ok('a dead old owner reports one deduplicated reconcile failure',
+    firstFailures.length === 1 && firstFailures[0]?.code === 'unavailable'
+      && firstFailures[0]?.thread === RENAME_THREAD && firstFailures[0]?.attempts === 1);
+  // The window closes: the next line accounts for the passes the first one folded away.
+  peerNow += 6 * 60_000;
+  await peer.client.reconcile();
+  const windowedFailures = peerTraces.filter(isOldOwnerFailure);
+  ok('the closed window reports the attempts it suppressed', windowedFailures.length === 2
+    && windowedFailures[1]?.attempts === 3);
+
+  const renameNew = await createImGateway(newRenameConfig, { storage: 'disk', factories: renameFactories, transport: transportFor(NEW, peer), log: () => undefined });
+  await settle();
+  peerRoutes.set(NEW, renameNew);
+  // The new owner's maintenance pass carries the re-issued notice with no caller change.
+  await renameNew.node.client.maintain();
+  const replacedKnown = await rowsOf<{ thread_ref: ThreadRef }>(peerStore, 'known/');
+  ok('the peer holds the thread under the new owner only', replacedKnown.length === 1
+    && replacedKnown[0]?.thread_ref.owner === NEW && replacedKnown[0]?.thread_ref.id === RENAME_THREAD);
+  await peer.client.maintain();
+  const closedNotice = await rowsOf<Record<string, unknown>>(renameNew.storage, 'notice/');
+  ok('the re-issued notice is closed by the peer again', closedNotice.length === 1
+    && closedNotice[0]?.acked === true
+    && rec(closedNotice[0]?.thread_ref)?.owner === NEW
+    && rec(closedNotice[0]?.previous_thread_ref)?.owner === OLD);
+
+  // The next event's attention is what the peer could never reach before: it now pulls it.
+  await renameNew.receive(renamed('r-2'));
+  await settle();
+  const beforePull = await rowsOf<{ acked: boolean }>(renameNew.storage, 'attention/');
+  ok('the new owner queues attention for the peer', beforePull.some(row => row.acked === false));
+  await peer.client.maintain();
+  const afterPull = await rowsOf<{ acked: boolean }>(renameNew.storage, 'attention/');
+  ok('the peer pulls and acks the attention once it knows the new owner',
+    afterPull.length >= 2 && afterPull.every(row => row.acked === true));
+  await renameNew.stop();
 } finally {
   await rm(dir, { recursive: true, force: true });
 }

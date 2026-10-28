@@ -261,14 +261,18 @@ function sendRequest(request: Request, value: unknown, at: { owner: string; id: 
 }
 
 function grant(value: unknown): Grant {
-  const raw = shape(value, 'grant', ['id', 'recipient', 'thread_ref', 'revision', 'acked']);
+  const raw = shape(value, 'grant', ['id', 'recipient', 'thread_ref', 'revision', 'acked', 'previous_thread_ref']);
   if (typeof raw.acked !== 'boolean') fail('invalid_request', 'grant.acked must be a boolean.');
+  const previous = raw.previous_thread_ref === undefined
+    ? undefined
+    : threadRef(raw.previous_thread_ref, 'grant.previous_thread_ref');
   return {
     id: string(raw.id, 'grant.id'),
     recipient: string(raw.recipient, 'grant.recipient'),
     thread_ref: threadRef(raw.thread_ref, 'grant.thread_ref'),
     revision: string(raw.revision, 'grant.revision'),
     acked: raw.acked,
+    ...(previous === undefined ? {} : { previous_thread_ref: previous }),
   };
 }
 
