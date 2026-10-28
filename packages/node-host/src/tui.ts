@@ -1,6 +1,6 @@
 import { trustPhase, type KeyExchange, type OnlyneNode, type TrustPhase } from '@onlyne/lib';
-import type { LogRing } from './log.js';
-import { t, type TuiTextKey } from './tui-text.js';
+import type { LogRing } from './log.ts';
+import { t, type TuiTextKey } from './tui-text.ts';
 
 /** One peer as the terminal shows it: a discovery address plus whatever the trust table knows. */
 interface Row {

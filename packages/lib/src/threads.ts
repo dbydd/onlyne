@@ -1,6 +1,6 @@
-import { admissionView, fail, key, page, requireValue, utc } from './core.js';
-import type { Context } from './core.js';
-import type { Auth, Entry, Event, Grant, Json, Member, MessageRef, Mutation, Page, PageOptions, ReadScope, ReplyPermit, Thread, ThreadRef, Transaction } from './types.js';
+import { admissionView, fail, key, page, requireValue, utc } from './core.ts';
+import type { Context } from './core.ts';
+import type { Auth, Entry, Event, Grant, Json, Member, MessageRef, Mutation, Page, PageOptions, ReadScope, ReplyPermit, Thread, ThreadRef, Transaction } from './types.ts';
 
 /** One reserved default-thread id per owner: omitted targets land here, and the id is never reused. */
 export const DEFAULT_THREAD = 'thr-default';
@@ -113,18 +113,22 @@ interface Known {
 }
 
 export class ThreadService {
-  constructor(private readonly ctx: Context) {}
+  readonly #ctx: Context;
+
+  constructor(ctx: Context) {
+    this.#ctx = ctx;
+  }
 
   async create(auth: Auth, mutation: Mutation & { title: string; id?: string; default?: boolean }): Promise<Thread> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
     const owner = auth.actor;
-    this.ctx.owner(owner);
+    this.#ctx.owner(owner);
     if (typeof mutation.title !== 'string' || mutation.title.length === 0) fail('invalid_request', 'A thread needs a title.');
     if (mutation.id !== undefined && (typeof mutation.id !== 'string' || mutation.id.length === 0)) fail('invalid_request', 'Thread id must be a non-empty string.');
     const wantsDefault = mutation.default === true || mutation.id === DEFAULT_THREAD;
     const body = { title: mutation.title, id: mutation.id ?? null, default: wantsDefault };
-    return this.ctx.mutate(auth, 'thread.create', mutation, body, async tx => {
-      const at = new Date(this.ctx.now()).toISOString();
+    return this.#ctx.mutate(auth, 'thread.create', mutation, body, async tx => {
+      const at = new Date(this.#ctx.now()).toISOString();
       const existingDefault = await tx.get<Thread>(key('thread', owner, DEFAULT_THREAD));
       if (wantsDefault) {
         if (existingDefault) {
@@ -158,20 +162,20 @@ export class ThreadService {
   async close(auth: Auth, ref: ThreadRef, mutation: Mutation): Promise<Thread> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
     requireThreadRef(ref);
-    this.ctx.owner(ref.owner);
+    this.#ctx.owner(ref.owner);
     if (auth.actor !== ref.owner) fail('forbidden', 'Only the owner may close a thread.');
     const body = { ref };
-    return this.ctx.mutate(auth, `thread.close/${ref.owner}/${ref.id}`, mutation, body, async tx => {
-      const thread = await loadThread(tx, this.ctx, ref);
+    return this.#ctx.mutate(auth, `thread.close/${ref.owner}/${ref.id}`, mutation, body, async tx => {
+      const thread = await loadThread(tx, this.#ctx, ref);
       if (thread.state === 'closed') fail('thread_closed', 'The thread is already closed.');
-      return recordEvent(tx, { ...thread, state: 'closed', closed_at: new Date(this.ctx.now()).toISOString() }, 'thread_closed', {});
+      return recordEvent(tx, { ...thread, state: 'closed', closed_at: new Date(this.#ctx.now()).toISOString() }, 'thread_closed', {});
     });
   }
 
   async list(auth: Auth, options: PageOptions = {}): Promise<Page<Thread>> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
-    this.ctx.owner(auth.actor);
-    return this.ctx.storage.transaction(async tx => {
+    this.#ctx.owner(auth.actor);
+    return this.#ctx.storage.transaction(async tx => {
       const threads = sortedBy((await tx.scan<Thread>(key('thread', auth.actor) + '/')).map(row => row.value), thread => thread.thread_ref.id);
       return page(threads, options, { kind: 'threads', owner: auth.actor }, thread => thread.thread_ref.id);
     });
@@ -179,8 +183,8 @@ export class ThreadService {
 
   async describe(auth: Auth, ref: ThreadRef): Promise<{ thread: Thread; members: Member[] }> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
-    return this.ctx.storage.transaction(async tx => {
-      const thread = await loadThread(tx, this.ctx, ref);
+    return this.#ctx.storage.transaction(async tx => {
+      const thread = await loadThread(tx, this.#ctx, ref);
       if (!await canRead(tx, auth.actor, ref)) fail('forbidden', 'The caller does not hold read access to this thread.');
       const members = (await tx.scan<Member>(key('member', ref.owner, ref.id) + '/')).map(row => row.value);
       return { thread, members };
@@ -198,19 +202,19 @@ export class ThreadService {
       fail('forbidden', 'A peer may only join or withdraw itself.');
     }
     const body = { ref, peer, patch };
-    return this.ctx.mutate(auth, `thread.member/${ref.owner}/${ref.id}/${peer}`, mutation, body, async tx => {
-      const thread = await loadThread(tx, this.ctx, ref);
+    return this.#ctx.mutate(auth, `thread.member/${ref.owner}/${ref.id}/${peer}`, mutation, body, async tx => {
+      const thread = await loadThread(tx, this.#ctx, ref);
       const current = await tx.get<Member>(key('member', ref.owner, ref.id, peer));
       let next: Member;
       if (!isOwner) {
         if (current === undefined) {
           if (patch.state === 'revoked') fail('not_found', 'No membership record to withdraw.');
           if (thread.state === 'closed') fail('thread_closed', 'A closed thread does not accept joins.');
-          const admitted = (await this.ctx.options.plugins.mayAdmit?.(auth.actor, ref, admissionView(tx))) === true;
-          next = { peer, state: admitted ? 'active' : 'requested', access: [...DEFAULT_ACCESS], read_scope: {}, revision: this.ctx.id() };
+          const admitted = (await this.#ctx.options.plugins.mayAdmit?.(auth.actor, ref, admissionView(tx))) === true;
+          next = { peer, state: admitted ? 'active' : 'requested', access: [...DEFAULT_ACCESS], read_scope: {}, revision: this.#ctx.id() };
         } else if (patch.state === 'revoked') {
           if (current.state !== 'active' && current.state !== 'requested') fail('conflict', 'This membership is already stopped.');
-          next = { ...current, state: 'revoked', access: [], revision: this.ctx.id() };
+          next = { ...current, state: 'revoked', access: [], revision: this.#ctx.id() };
         } else {
           fail('conflict', 'This peer already holds a membership record; only the owner changes it.');
         }
@@ -219,7 +223,7 @@ export class ThreadService {
         if (state !== 'requested' && state !== 'active' && state !== 'revoked' && state !== 'denied') fail('invalid_request', 'Unknown member state.');
         const stopping = state === 'revoked' || state === 'denied';
         const access = stopping ? [] : patch.access === undefined ? (current?.state === 'active' ? current.access : [...DEFAULT_ACCESS]) : requireAccess(patch.access);
-        next = { peer, state, access: [...access], read_scope: patch.read_scope === undefined ? (current?.read_scope ?? {}) : requireScope(patch.read_scope), revision: this.ctx.id() };
+        next = { peer, state, access: [...access], read_scope: patch.read_scope === undefined ? (current?.read_scope ?? {}) : requireScope(patch.read_scope), revision: this.#ctx.id() };
       }
       await tx.put(key('member', ref.owner, ref.id, peer), next);
       if (next.state === 'active' && current?.state !== 'active' && peer !== ref.owner) await issueGrant(tx, ref, peer, next.revision);
@@ -230,8 +234,8 @@ export class ThreadService {
 
   async members(auth: Auth, ref: ThreadRef, options: PageOptions = {}): Promise<Page<Member>> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
-    return this.ctx.storage.transaction(async tx => {
-      await loadThread(tx, this.ctx, ref);
+    return this.#ctx.storage.transaction(async tx => {
+      await loadThread(tx, this.#ctx, ref);
       if (!await canRead(tx, auth.actor, ref)) fail('forbidden', 'The caller does not hold read access to this thread.');
       const members = sortedBy((await tx.scan<Member>(key('member', ref.owner, ref.id) + '/')).map(row => row.value), member => member.peer);
       return page(members, options, { kind: 'members', ref }, member => member.peer);
@@ -240,8 +244,8 @@ export class ThreadService {
 
   async defaultThread(auth: Auth): Promise<ThreadRef> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
-    this.ctx.owner(auth.actor);
-    return this.ctx.storage.transaction(async tx => requireValue(await tx.get<ThreadRef>(key('default', auth.actor))));
+    this.#ctx.owner(auth.actor);
+    return this.#ctx.storage.transaction(async tx => requireValue(await tx.get<ThreadRef>(key('default', auth.actor))));
   }
 
   /**
@@ -251,8 +255,8 @@ export class ThreadService {
    */
   async notices(auth: Auth, options: PageOptions = {}): Promise<Page<Grant>> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
-    this.ctx.owner(auth.actor);
-    return this.ctx.storage.transaction(async tx => {
+    this.#ctx.owner(auth.actor);
+    return this.#ctx.storage.transaction(async tx => {
       const held = sortedBy((await tx.scan<Grant>(key('notice') + '/')).map(row => row.value).filter(grant => !grant.acked), grant => grant.id);
       return page(held, options, { kind: 'notices', owner: auth.actor }, grant => grant.id);
     });
@@ -265,7 +269,7 @@ export class ThreadService {
    */
   async grants(auth: Auth, options: PageOptions = {}): Promise<Page<Grant>> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
-    return this.ctx.storage.transaction(async tx => {
+    return this.#ctx.storage.transaction(async tx => {
       const held = sortedBy((await tx.scan<Grant>(key('grant') + '/')).map(row => row.value).filter(grant => !grant.acked), grant => grant.id);
       return page(held, options, { kind: 'grants', recipient: auth.actor }, grant => grant.id);
     });
@@ -274,7 +278,7 @@ export class ThreadService {
   /** Recipient side: records that the owner confirmed this grant, so it is not confirmed twice. */
   async ackGrantLocally(auth: Auth, ref: ThreadRef, id: string): Promise<void> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
-    await this.ctx.storage.transaction(async tx => {
+    await this.#ctx.storage.transaction(async tx => {
       const slot = key('grant', ref.owner, id);
       const stored = await tx.get<Grant>(slot);
       if (stored !== undefined && !stored.acked) await tx.put(slot, { ...stored, acked: true });
@@ -293,18 +297,18 @@ export class ThreadService {
     }
     requireThreadRef(grant.thread_ref);
     if (grant.thread_ref.owner !== auth.actor) fail('forbidden', 'A grant notice must come from the thread owner it names.');
-    if (grant.recipient !== this.ctx.node) fail('forbidden', 'The grant notice is addressed to another node.');
+    if (grant.recipient !== this.#ctx.node) fail('forbidden', 'The grant notice is addressed to another node.');
     const ref: ThreadRef = { owner: grant.thread_ref.owner, id: grant.thread_ref.id };
-    return this.ctx.storage.transaction(async tx => {
+    return this.#ctx.storage.transaction(async tx => {
       const slot = key('grant', ref.owner, grant.id);
       const stored = await tx.get<Grant>(slot);
-      if (stored !== undefined && (stored.recipient !== this.ctx.node || stored.revision !== grant.revision || stored.thread_ref.id !== ref.id)) {
+      if (stored !== undefined && (stored.recipient !== this.#ctx.node || stored.revision !== grant.revision || stored.thread_ref.id !== ref.id)) {
         fail('id_conflict', 'The grant id is bound to another notice.');
       }
       const known: Known = { owner: ref.owner, thread_ref: ref, revision: grant.revision };
       await tx.put(key('known', ref.owner, ref.id), known);
       if (stored !== undefined) return stored;
-      const next: Grant = { id: grant.id, recipient: this.ctx.node, thread_ref: ref, revision: grant.revision, acked: false };
+      const next: Grant = { id: grant.id, recipient: this.#ctx.node, thread_ref: ref, revision: grant.revision, acked: false };
       await tx.put(slot, next);
       return next;
     });
@@ -318,7 +322,7 @@ export class ThreadService {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
     if (typeof id !== 'string' || id.length === 0) fail('invalid_request', 'A grant id is required.');
     const body = { id };
-    return this.ctx.mutate(auth, `thread.grant.ack/${id}`, mutation, body, async tx => {
+    return this.#ctx.mutate(auth, `thread.grant.ack/${id}`, mutation, body, async tx => {
       const grant = requireValue(await tx.get<Grant>(key('notice', id)));
       if (grant.recipient !== auth.actor) fail('forbidden', 'The grant notice is addressed to another recipient.');
       if (grant.acked) return grant;
@@ -335,12 +339,12 @@ export class ThreadService {
     if (original.sender !== auth.actor) fail('forbidden', 'Only the original message sender may issue a reply permit.');
     if (typeof permit.grantee !== 'string' || !permit.grantee || permit.grantee === auth.actor) fail('invalid_request', 'A permit names one grantee other than its issuer.');
     requireThreadRef(permit.landing);
-    this.ctx.owner(permit.landing.owner);
+    this.#ctx.owner(permit.landing.owner);
     if (!Number.isInteger(permit.remaining) || permit.remaining < 1) fail('invalid_request', 'A permit needs a bounded positive reply count.');
-    if (utc(permit.expires_at) <= this.ctx.now()) fail('invalid_request', 'A permit needs a future expiry.');
+    if (utc(permit.expires_at) <= this.#ctx.now()) fail('invalid_request', 'A permit needs a future expiry.');
     const body = { message_ref: { sender: original.sender, id: original.id }, grantee: permit.grantee, landing: permit.landing, expires_at: permit.expires_at, remaining: permit.remaining, followup: permit.followup === true };
-    return this.ctx.mutate(auth, `thread.permit/${original.sender}/${original.id}/${permit.grantee}`, mutation, body, async tx => {
-      const thread = await loadThread(tx, this.ctx, permit.landing);
+    return this.#ctx.mutate(auth, `thread.permit/${original.sender}/${original.id}/${permit.grantee}`, mutation, body, async tx => {
+      const thread = await loadThread(tx, this.#ctx, permit.landing);
       if (thread.state === 'closed') fail('thread_closed', 'A permit cannot land on a closed thread.');
       const stored: ReplyPermit = { ...body, revoked: permit.revoked === true };
       await tx.put(key('permit', original.sender, original.id, permit.grantee), stored);

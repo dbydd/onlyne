@@ -1,4 +1,4 @@
-import type { Storage, Transaction } from './types.js';
+import type { Storage, Transaction } from './types.ts';
 
 /** Process-local storage for embedded ephemeral nodes. It does not claim durability. */
 export class MemoryStorage implements Storage {

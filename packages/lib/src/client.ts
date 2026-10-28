@@ -1,16 +1,16 @@
-import type { Context } from './core.js';
-import { canonical, decimal, fail, key, requireValue, utc } from './core.js';
+import type { Context } from './core.ts';
+import { canonical, decimal, fail, key, requireValue, utc } from './core.ts';
 import type {
   Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Json, LocalAttention,
   InjectOutcome, Member, Message, MessageQuery, MessageRef, MsgInput, Mutation, Outbound, Page, PageOptions, SendRequest,
   TraceEvent, Thread, ThreadRef, Transaction, Transport, MaintenanceClock, PreparedSend,
   ResourceReadQuery, ResourceReadResult, ResourceInventory, Resource,
-} from './types.js';
-import type { MessageService } from './messages.js';
-import type { ResourceService } from './resources.js';
-import type { ThreadService } from './threads.js';
-import type { DomainService } from './domains.js';
-import type { TrustService } from './keys.js';
+} from './types.ts';
+import type { MessageService } from './messages.ts';
+import type { ResourceService } from './resources.ts';
+import type { ThreadService } from './threads.ts';
+import type { DomainService } from './domains.ts';
+import type { TrustService } from './keys.ts';
 
 /** Result of one delivery: `admission` is what the peer recorded, `wait` is what this caller observed. */
 export interface SendOutcome {

@@ -1,16 +1,16 @@
-import type { Auth, NodeOptions } from './types.js';
-import { createContext } from './core.js';
-import { ThreadService } from './threads.js';
-import { MessageService } from './messages.js';
-import { createResourceService } from './resources.js';
-import type { ResourceService } from './resources.js';
-import { DomainService } from './domains.js';
-import { DiscoveryService } from './discovery.js';
-import { OnlyneClient } from './client.js';
-import { KeyService, TrustService } from './keys.js';
-import { FetchTransport } from './transport.js';
-import { createHttpHandler } from './http.js';
-import { HistoryService } from './history.js';
+import type { Auth, NodeOptions } from './types.ts';
+import { createContext } from './core.ts';
+import { ThreadService } from './threads.ts';
+import { MessageService } from './messages.ts';
+import { createResourceService } from './resources.ts';
+import type { ResourceService } from './resources.ts';
+import { DomainService } from './domains.ts';
+import { DiscoveryService } from './discovery.ts';
+import { OnlyneClient } from './client.ts';
+import { KeyService, TrustService } from './keys.ts';
+import { FetchTransport } from './transport.ts';
+import { createHttpHandler } from './http.ts';
+import { HistoryService } from './history.ts';
 
 export class OnlyneNode {
   readonly threads: ThreadService;
@@ -23,7 +23,7 @@ export class OnlyneNode {
   readonly trust: TrustService;
   readonly client: OnlyneClient;
   /** The transport this node signs with; a host that talks to peers itself must reuse it. */
-  readonly transport: import('./types.js').Transport;
+  readonly transport: import('./types.ts').Transport;
   readonly fetch: (request: Request) => Promise<Response>;
   readonly auth: Auth;
 

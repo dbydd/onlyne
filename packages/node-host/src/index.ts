@@ -1,13 +1,13 @@
 import type { OnlyneNode, ServiceDescription } from '@onlyne/lib';
-import { NetworkDiscovery } from './network.js';
-import type { LogRing } from './log.js';
-import { GatewayTui } from './tui.js';
+import { NetworkDiscovery } from './network.ts';
+import type { LogRing } from './log.ts';
+import { GatewayTui } from './tui.ts';
 
-export { createNodeKey } from './keys.js';
-export { NetworkDiscovery } from './network.js';
-export { createLogger } from './log.js';
-export type { GatewayLogger, LogRing } from './log.js';
-export { GatewayTui } from './tui.js';
+export { createNodeKey } from './keys.ts';
+export { NetworkDiscovery } from './network.ts';
+export { createLogger } from './log.ts';
+export type { GatewayLogger, LogRing } from './log.ts';
+export { GatewayTui } from './tui.ts';
 
 export interface NodeHostOptions {
   node: OnlyneNode;

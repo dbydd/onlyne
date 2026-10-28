@@ -45,9 +45,21 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 		return { actor };
 	};
 	const resolve = async (id: string): Promise<Target> => {
-		const target = id === config.node.id
-			? { node_id: id, base_url: deps.endpoint }
-			: await node.discovery.resolve(id);
+		let target: Target;
+		if (id === config.node.id) {
+			target = { node_id: id, base_url: deps.endpoint };
+		} else {
+			try {
+				target = await node.discovery.resolve(id);
+			} catch (error) {
+				const trustEntry = await node.trust.entry(id).catch(() => undefined);
+				if (trustEntry?.base_url) {
+					target = { node_id: id, base_url: trustEntry.base_url };
+				} else {
+					throw error;
+				}
+			}
+		}
 		return { ...target, headers: { "Onlyne-Actor": config.node.id } };
 	};
 	/**

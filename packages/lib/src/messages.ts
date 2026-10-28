@@ -1,6 +1,6 @@
-import type { Attention, Auth, DeliveryPlan, Entry, Event, Failure, Grant, Json, LocalAttention, Member, MessageQuery, MessageRef, Mutation, Outbound, PageOptions, Receipt, ReplyPermit, SendRequest, Thread, ThreadRef, Transaction } from './types.js';
-import { admissionView, canonical, decimal, fail, fingerprint, key, OnlyneError, page, requireValue, same, type Context } from './core.js';
-import { canRead, getThread } from './threads.js';
+import type { Attention, Auth, DeliveryPlan, Entry, Event, Failure, Grant, Json, LocalAttention, Member, MessageQuery, MessageRef, Mutation, Outbound, PageOptions, Receipt, ReplyPermit, SendRequest, Thread, ThreadRef, Transaction } from './types.ts';
+import { admissionView, canonical, decimal, fail, fingerprint, key, OnlyneError, page, requireValue, same, type Context } from './core.ts';
+import { canRead, getThread } from './threads.ts';
 
 type Remembered = { digest: string; receipt?: Receipt; error?: Failure; retry_until: string };
 type Binding = { digest: string; identity: string };
@@ -18,14 +18,18 @@ const RECORDED_REFUSALS: Record<string, true> = {
 const compareOrdinal = (a: string, b: string): number => decimal(a) < decimal(b) ? -1 : decimal(a) > decimal(b) ? 1 : 0;
 
 export class MessageService {
-  constructor(private readonly ctx: Context) {}
+  readonly #ctx: Context;
+
+  constructor(ctx: Context) {
+    this.#ctx = ctx;
+  }
 
   async admit(auth: Auth, request: SendRequest): Promise<Receipt> {
     const { message } = request;
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
     if (typeof message?.id !== 'string' || !message.id || typeof message.sender !== 'string' || typeof message.msg !== 'string' || typeof message.delivery_kind !== 'string') fail('invalid_request', 'A message needs id, sender, delivery_kind and msg.');
     if (message.sender !== auth.actor && auth.sender !== message.sender) fail('forbidden', 'The caller cannot represent this author.');
-    if (request.target_endpoint !== this.ctx.node) fail('forbidden', 'The target endpoint is not served here.');
+    if (request.target_endpoint !== this.#ctx.node) fail('forbidden', 'The target endpoint is not served here.');
     if (!request.plan || !['none', 'async', 'await'].includes(request.plan.response) || !['existing', 'new'].includes(request.plan.execution)) fail('invalid_request', 'An executable delivery plan is required.');
     if (!request.idempotency_key) fail('invalid_request', 'An idempotency key is required.');
     if (message.meta?.relation && !message.meta.in_reply_to) fail('invalid_request', 'A relation requires an original message.');
@@ -37,14 +41,14 @@ export class MessageService {
     // Asked before the admission transaction opens: a host that answers from its own store
     // would otherwise wait on this transaction and deadlock it. The refusal it produces is
     // still recorded inside the transaction below.
-    const runtime = this.ctx.options.plugins.runtime;
+    const runtime = this.#ctx.options.plugins.runtime;
     const supported = runtime === undefined || await runtime.supports(request.plan, message);
-    const outcome = await this.ctx.storage.transaction(async (tx): Promise<Outcome> => {
+    const outcome = await this.#ctx.storage.transaction(async (tx): Promise<Outcome> => {
       const bound = await tx.get<Binding>(operationKey);
       if (bound && (bound.digest !== requestDigest || bound.identity !== identity)) fail('id_conflict', 'The idempotency key is bound to another request.');
       const old = await tx.get<Remembered>(identity);
       if (old) {
-        this.ctx.options.plugins.runtime?.trace?.({ event: 'inbound.duplicate', sender: message.sender, message: message.id });
+        this.#ctx.options.plugins.runtime?.trace?.({ event: 'inbound.duplicate', sender: message.sender, message: message.id });
         // A different body never replaces the identity already recorded, accepted or refused.
         if (old.digest !== digest) return { error: new OnlyneError('id_conflict', 'This message identity has different content.').error };
         if (old.error) return { error: old.error };
@@ -56,7 +60,7 @@ export class MessageService {
         if (!supported) {
           return await this.refuse(tx, identity, digest, request, new OnlyneError('unsupported_delivery', 'The runtime cannot fulfill this delivery plan.'));
         }
-        this.ctx.deadline(request.retry_until);
+        this.#ctx.deadline(request.retry_until);
         return await this.append(tx, auth, request, digest, requestDigest, identity, operationKey);
       } catch (error) {
         if (error instanceof OnlyneError && RECORDED_REFUSALS[error.error.code] === true) return this.refuse(tx, identity, digest, request, error);
@@ -64,8 +68,8 @@ export class MessageService {
       }
     });
     if ('error' in outcome) throw new OnlyneError(outcome.error.code, outcome.error.message, outcome.error.details);
-    this.ctx.options.plugins.runtime?.notify?.({ event: 'inbound', thread: outcome.receipt.thread_ref, seq: outcome.receipt.seq, sender: message.sender });
-    this.ctx.options.plugins.runtime?.notify?.({ event: 'work-pending', pending: true });
+    this.#ctx.options.plugins.runtime?.notify?.({ event: 'inbound', thread: outcome.receipt.thread_ref, seq: outcome.receipt.seq, sender: message.sender });
+    this.#ctx.options.plugins.runtime?.notify?.({ event: 'work-pending', pending: true });
     return requireValue(outcome.receipt);
   }
 
@@ -85,40 +89,40 @@ export class MessageService {
     let permit: ReplyPermit | undefined;
     if (original !== undefined) {
       permit = await tx.get<ReplyPermit>(key('permit', original.sender, original.id, message.sender));
-      if (threadRef === undefined && permit && !permit.revoked && permit.remaining > 0 && Date.parse(permit.expires_at) > this.ctx.now()
-        && (message.meta?.relation !== 'followup' || permit.followup) && this.ctx.node === permit.landing.owner) threadRef = permit.landing;
+      if (threadRef === undefined && permit && !permit.revoked && permit.remaining > 0 && Date.parse(permit.expires_at) > this.#ctx.now()
+        && (message.meta?.relation !== 'followup' || permit.followup) && this.#ctx.node === permit.landing.owner) threadRef = permit.landing;
       if (threadRef === undefined) threadRef = await this.chainLanding(tx, original, message.sender);
     }
     let firstContact = false;
     if (threadRef === undefined) {
       // The default landing is the owner's own slot, resolved once inside this transaction.
-      const landing = await tx.get<ThreadRef>(key('default', this.ctx.node));
-      if (landing === undefined || landing.owner !== this.ctx.node || typeof landing.id !== 'string' || landing.id.length === 0) {
+      const landing = await tx.get<ThreadRef>(key('default', this.#ctx.node));
+      if (landing === undefined || landing.owner !== this.#ctx.node || typeof landing.id !== 'string' || landing.id.length === 0) {
         // Finding a landing grants nothing (RFC 0002 §3): only the owner's inbound policy
         // may open a thread and admit this sender into it.
-        const policy = this.ctx.options.plugins.inboundThread;
+        const policy = this.#ctx.options.plugins.inboundThread;
         if (policy === undefined || !await policy(auth.actor, admissionView(tx))) {
           return this.refuse(tx, identity, digest, request, new OnlyneError('not_found', 'No default thread is configured.'));
         }
         firstContact = true;
         let id = crypto.randomUUID();
-        while (await tx.get<Thread>(key('thread', this.ctx.node, id))) id = crypto.randomUUID();
-        threadRef = { owner: this.ctx.node, id };
+        while (await tx.get<Thread>(key('thread', this.#ctx.node, id))) id = crypto.randomUUID();
+        threadRef = { owner: this.#ctx.node, id };
       } else {
         threadRef = { owner: landing.owner, id: landing.id };
       }
     }
-    this.ctx.owner(threadRef.owner);
+    this.#ctx.owner(threadRef.owner);
     const thread: Thread = firstContact
-      ? { thread_ref: threadRef, title: message.msg.replace(/\s+/g, ' ').trim().slice(0, 100) || message.delivery_kind, state: 'open', next_seq: '1', event_seq: '0', created_at: new Date(this.ctx.now()).toISOString(), closed_at: null }
-      : await getThread(tx, this.ctx, threadRef);
+      ? { thread_ref: threadRef, title: message.msg.replace(/\s+/g, ' ').trim().slice(0, 100) || message.delivery_kind, state: 'open', next_seq: '1', event_seq: '0', created_at: new Date(this.#ctx.now()).toISOString(), closed_at: null }
+      : await getThread(tx, this.#ctx, threadRef);
     const member = firstContact ? undefined : await tx.get<Member>(key('member', threadRef.owner, threadRef.id, message.sender));
     const ordinary = firstContact || message.sender === threadRef.owner || (member?.state === 'active' && member.access.includes('post'));
-    const allowedPermit = permit !== undefined && !permit.revoked && permit.remaining > 0 && Date.parse(permit.expires_at) > this.ctx.now()
+    const allowedPermit = permit !== undefined && !permit.revoked && permit.remaining > 0 && Date.parse(permit.expires_at) > this.#ctx.now()
       && same(permit.landing, threadRef) && (message.meta?.relation !== 'followup' || permit.followup);
     if (!ordinary && !allowedPermit) return this.refuse(tx, identity, digest, request, new OnlyneError('not_a_member', 'The sender is not an active post member.'));
     if (thread.state === 'closed') return this.refuse(tx, identity, digest, request, new OnlyneError('thread_closed', 'The thread is closed.'));
-    const admissionPolicy = this.ctx.options.plugins.mayAdmit;
+    const admissionPolicy = this.#ctx.options.plugins.mayAdmit;
     if (admissionPolicy && !await admissionPolicy(auth.actor, threadRef, admissionView(tx))) {
       return this.refuse(tx, identity, digest, request, new OnlyneError('forbidden', 'The admission policy refused the request.'));
     }
@@ -139,7 +143,7 @@ export class MessageService {
       if (alias === threadRef.owner) { recipients.add(threadRef.owner); continue; }
       if (members.some(m => m.peer === alias)) { recipients.add(alias); continue; }
       // A display alias is not a node id; the integration layer owns the mapping.
-      const resolved = await this.ctx.options.plugins.mention?.(alias, threadRef);
+      const resolved = await this.#ctx.options.plugins.mention?.(alias, threadRef);
       if (resolved === undefined || (resolved !== threadRef.owner && !members.some(m => m.peer === resolved))) {
         fail('invalid_request', 'A mention must resolve to an active member identity.');
       }
@@ -153,7 +157,7 @@ export class MessageService {
     if (firstContact) {
       // Written with the entry and the receipt in this one transaction: the thread, its
       // sender membership and the grant notice either all commit or none of them do.
-      const revision = this.ctx.id();
+      const revision = this.#ctx.id();
       const membership: Member = { peer: message.sender, state: 'active', access: ['post', 'read'], read_scope: {}, revision };
       const notice: Grant = { id: revision, recipient: message.sender, thread_ref: threadRef, revision, acked: false };
       const eventId = (decimal(thread.event_seq) + 1n).toString();
@@ -167,11 +171,11 @@ export class MessageService {
     thread.event_seq = (decimal(thread.event_seq) + 1n).toString();
     const entry: Entry = {
       thread_ref: threadRef, seq, message: structuredClone(message), authenticated_author: message.sender,
-      reply_authority: auth.reply_authority ?? auth.actor, at: new Date(this.ctx.now()).toISOString(),
+      reply_authority: auth.reply_authority ?? auth.actor, at: new Date(this.#ctx.now()).toISOString(),
     };
     const receipt: Receipt = {
-      message_ref: { sender: message.sender, id: message.id }, receipt_id: this.ctx.id(),
-      guarantee: this.ctx.storage.guarantee, thread_ref: threadRef, seq, plan: structuredClone(request.plan),
+      message_ref: { sender: message.sender, id: message.id }, receipt_id: this.#ctx.id(),
+      guarantee: this.#ctx.storage.guarantee, thread_ref: threadRef, seq, plan: structuredClone(request.plan),
       thread_created: firstContact, previous_seq: (decimal(seq) - 1n).toString(),
       // The answer a message gives is part of what the owner admitted: the sender can only
       // prove "I replied to that one" from the receipt, and the reference here is the pair
@@ -215,7 +219,7 @@ export class MessageService {
       const entry = await tx.get<Entry>(key('entry-ref', ref.sender, ref.id));
       if (entry !== undefined) {
         const landing = entry.thread_ref;
-        this.ctx.owner(landing.owner);
+        this.#ctx.owner(landing.owner);
         const thread = await tx.get<Thread>(key('thread', landing.owner, landing.id));
         if (thread === undefined) fail('not_found', 'The original reply landing is no longer available.');
         if (thread.state === 'closed') fail('thread_closed', 'The original reply landing is closed; an explicitly authorized alternative is required.');
@@ -223,7 +227,7 @@ export class MessageService {
       }
       const sent: Outbound | undefined = await tx.get<Outbound>(key('outbound', ref.sender, ref.id));
       if (sent === undefined) fail('not_found', 'The original message history is unavailable; no alternative reply landing was authorized.');
-      if (ref.sender !== this.ctx.node || sent.expected_author !== sender) fail('forbidden', 'This sender is not the expected reply author.');
+      if (ref.sender !== this.#ctx.node || sent.expected_author !== sender) fail('forbidden', 'This sender is not the expected reply author.');
       const parent: MessageRef | undefined = sent.request.message.meta?.in_reply_to;
       // The first reply to an outbound root has no local incoming thread yet.
       if (parent === undefined) return undefined;
@@ -242,7 +246,7 @@ export class MessageService {
   private async writeAttention(tx: Transaction, attention: Attention, plan: DeliveryPlan) {
     const attested: Attention = { ...attention, plan };
     await tx.put(key('attention', attested.thread_ref.owner, attested.thread_ref.id, attested.obligation_id), attested);
-    if (attested.recipient !== this.ctx.node) return;
+    if (attested.recipient !== this.#ctx.node) return;
     const slot = key('inbox', attested.obligation_id);
     if (await tx.get(slot) !== undefined) return;
     await tx.put<LocalAttention>(slot, {
@@ -250,7 +254,7 @@ export class MessageService {
       ...(plan.context === undefined ? {} : { context: plan.context }),
       injected: false,
     });
-    this.ctx.options.plugins.runtime?.trace?.({
+    this.#ctx.options.plugins.runtime?.trace?.({
       event: 'inbound.received', obligation: attested.obligation_id, thread: attested.thread_ref,
       seq: attested.seq, sender: attested.message_ref.sender, valid: true, injected: false,
       ...(plan.context === undefined ? {} : { context: plan.context }),
@@ -260,8 +264,8 @@ export class MessageService {
   }
 
   async list(auth: Auth, ref: ThreadRef, query: MessageQuery = {}) {
-    return this.ctx.storage.transaction(async tx => {
-      const thread = await getThread(tx, this.ctx, ref);
+    return this.#ctx.storage.transaction(async tx => {
+      const thread = await getThread(tx, this.#ctx, ref);
       if (!await canRead(tx, auth.actor, ref)) fail('forbidden', 'Read access is required.');
       const entries: Entry[] = [];
       for (const { value: entry } of await tx.scan<Entry>(key('entry', ref.owner, ref.id) + '/')) {
@@ -286,8 +290,8 @@ export class MessageService {
    * is stored back and before it is returned, so a revoked reader never sees content.
    */
   async attention(auth: Auth, ref: ThreadRef, options: PageOptions = {}) {
-    return this.ctx.storage.transaction(async tx => {
-      await getThread(tx, this.ctx, ref);
+    return this.#ctx.storage.transaction(async tx => {
+      await getThread(tx, this.#ctx, ref);
       const allowed = await canRead(tx, auth.actor, ref);
       const rows = (await tx.scan<Attention>(key('attention', ref.owner, ref.id) + '/')).map(r => r.value).filter(a => a.recipient === auth.actor && !a.acked);
       const visible: Attention[] = [];
@@ -307,8 +311,8 @@ export class MessageService {
   }
 
   async ack(auth: Auth, ref: ThreadRef, id: string, mutation: Mutation) {
-    return this.ctx.mutate(auth, `attention-ack/${canonical(ref)}/${id}`, mutation, {}, async tx => {
-      await getThread(tx, this.ctx, ref);
+    return this.#ctx.mutate(auth, `attention-ack/${canonical(ref)}/${id}`, mutation, {}, async tx => {
+      await getThread(tx, this.#ctx, ref);
       const slot = key('attention', ref.owner, ref.id, id);
       const attention = requireValue(await tx.get<Attention>(slot));
       if (attention.recipient !== auth.actor) fail('not_found', 'This attention obligation is not addressed to the caller.');
@@ -321,8 +325,8 @@ export class MessageService {
   }
 
   async inbox(auth: Auth, options: PageOptions = {}) {
-    if (auth.actor !== this.ctx.node) fail('forbidden', 'The local inbox belongs to this node.');
-    return this.ctx.storage.transaction(async tx => {
+    if (auth.actor !== this.#ctx.node) fail('forbidden', 'The local inbox belongs to this node.');
+    return this.#ctx.storage.transaction(async tx => {
       const rows = (await tx.scan<LocalAttention>('inbox/')).map(r => r.value);
       rows.sort((a, b) => a.attention.obligation_id.localeCompare(b.attention.obligation_id));
       const indexed = rows.map((value, index) => ({ value, position: String(index + 1) }));
@@ -332,7 +336,7 @@ export class MessageService {
   }
 
   async getByRef(auth: Auth, ref: MessageRef) {
-    return this.ctx.storage.transaction(async tx => {
+    return this.#ctx.storage.transaction(async tx => {
       const entry = requireValue(await tx.get<Entry>(key('entry-ref', ref.sender, ref.id)));
       if (!await canRead(tx, auth.actor, entry.thread_ref, entry)) fail('not_found', 'This message is not readable.');
       return entry;
@@ -340,15 +344,15 @@ export class MessageService {
   }
 
   async events(auth: Auth, ref: ThreadRef, options: PageOptions = {}) {
-    return this.ctx.storage.transaction(async tx => {
-      await getThread(tx, this.ctx, ref);
+    return this.#ctx.storage.transaction(async tx => {
+      await getThread(tx, this.#ctx, ref);
       if (!await canRead(tx, auth.actor, ref)) fail('forbidden', 'Read access is required.');
       const rows: Event[] = [];
       for (const { value: event } of await tx.scan<Event>(key('event', ref.owner, ref.id) + '/')) {
         if (event.message_ref) {
           const entry = await tx.get<Entry>(key('entry-ref', event.message_ref.sender, event.message_ref.id));
           if (!entry || !await canRead(tx, auth.actor, ref, entry)) continue;
-        } else if (event.type === 'membership' && auth.actor !== this.ctx.node) continue;
+        } else if (event.type === 'membership' && auth.actor !== this.#ctx.node) continue;
         rows.push(event);
       }
       rows.sort((a, b) => compareOrdinal(a.id, b.id));
@@ -357,8 +361,8 @@ export class MessageService {
   }
 
   async snapshot(auth: Auth, ref: ThreadRef) {
-    return this.ctx.storage.transaction(async tx => {
-      const thread = await getThread(tx, this.ctx, ref);
+    return this.#ctx.storage.transaction(async tx => {
+      const thread = await getThread(tx, this.#ctx, ref);
       if (!await canRead(tx, auth.actor, ref)) fail('forbidden', 'Read access is required.');
       const entries: Entry[] = [];
       for (const row of await tx.scan<Entry>(key('entry', ref.owner, ref.id) + '/')) if (await canRead(tx, auth.actor, ref, row.value)) entries.push(row.value);
@@ -368,15 +372,15 @@ export class MessageService {
   }
 
   async expire(auth: Auth, ref: ThreadRef, beforeSeq: string) {
-    this.ctx.owner(ref.owner);
-    if (auth.actor !== this.ctx.node) fail('forbidden', 'Only the owner may expire history.');
-    return this.ctx.storage.transaction(async tx => {
-      await getThread(tx, this.ctx, ref);
+    this.#ctx.owner(ref.owner);
+    if (auth.actor !== this.#ctx.node) fail('forbidden', 'Only the owner may expire history.');
+    return this.#ctx.storage.transaction(async tx => {
+      await getThread(tx, this.#ctx, ref);
       for (const row of await tx.scan<Entry>(key('entry', ref.owner, ref.id) + '/')) {
         if (decimal(row.value.seq) >= decimal(beforeSeq)) continue;
         const recordKey = key('message', row.value.message.sender, row.value.message.id);
         const record = requireValue(await tx.get<Remembered>(recordKey));
-        if (Date.parse(record.retry_until) > this.ctx.now()) fail('conflict', 'The replay window is still open.');
+        if (Date.parse(record.retry_until) > this.#ctx.now()) fail('conflict', 'The replay window is still open.');
         // The tombstone keeps the digest and the window, never the body.
         await tx.put(recordKey, { digest: record.digest, retry_until: record.retry_until });
         await tx.delete(row.key);

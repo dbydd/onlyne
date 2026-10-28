@@ -1,5 +1,5 @@
-import type { AdmissionContext, Auth, ErrorCode, Failure, Mutation, NodeId, NodeOptions, Page, PageOptions, Storage, Transaction, TrustEntry } from './types.js';
-import { trustPhase } from './types.js';
+import type { AdmissionContext, Auth, ErrorCode, Failure, Mutation, NodeId, NodeOptions, Page, PageOptions, Storage, Transaction, TrustEntry } from './types.ts';
+import { trustPhase } from './types.ts';
 
 const statuses: Record<ErrorCode, number> = {
   invalid_request: 400, unauthenticated: 401, forbidden: 403, not_a_member: 403,

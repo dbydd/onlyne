@@ -1,19 +1,19 @@
-import { OnlyneError, canonical, fail, same } from './core.js';
+import { OnlyneError, canonical, fail, same } from './core.ts';
 import { createHash } from 'node:crypto';
-import type { Context } from './core.js';
+import type { Context } from './core.ts';
 import type {
   Auth, DeliveryPlan, DomainMutation, Event, Grant, HandoverProbe, Json, LogQuery, Member, Message, MessageQuery,
   Mutation, PageOptions, OperationRequest, ReadScope, Resource, ResourceEvent, SendRequest,
-} from './types.js';
-import type { ThreadService } from './threads.js';
-import type { MessageService } from './messages.js';
-import type { ResourceService } from './resources.js';
-import type { DomainService } from './domains.js';
-import type { DiscoveryService } from './discovery.js';
-import type { KeyService, TrustService } from './keys.js';
-import { SIGNATURE_HEADER, bodyDigest } from './keys.js';
-import type { TrustStatement } from './types.js';
-import { validateDomainId } from './domains.js';
+} from './types.ts';
+import type { ThreadService } from './threads.ts';
+import type { MessageService } from './messages.ts';
+import type { ResourceService } from './resources.ts';
+import type { DomainService } from './domains.ts';
+import type { DiscoveryService } from './discovery.ts';
+import type { KeyService, TrustService } from './keys.ts';
+import { SIGNATURE_HEADER, bodyDigest } from './keys.ts';
+import type { TrustStatement } from './types.ts';
+import { validateDomainId } from './domains.ts';
 
 const PREFIX = '/onlyne/v3';
 const DEFAULT_BYTES = 1_048_576;

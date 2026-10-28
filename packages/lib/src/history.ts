@@ -1,16 +1,20 @@
-import type { Auth, Conversation, Entry, HistoryMessage, HistoryQuery, LocalAttention, MessageRef, Outbound, Page, ThreadRef, Transaction } from './types.js';
-import { fail, key, page, same, type Context } from './core.js';
+import type { Auth, Conversation, Entry, HistoryMessage, HistoryQuery, LocalAttention, MessageRef, Outbound, Page, ThreadRef, Transaction } from './types.ts';
+import { fail, key, page, same, type Context } from './core.ts';
 
 const identity = (ref: MessageRef): string => key(ref.sender, ref.id);
 const threadIdentity = (ref: ThreadRef): string => key(ref.owner, ref.id);
 
 /** A read-only projection of the records this node already holds. It performs no remote reads. */
 export class HistoryService {
-  constructor(private readonly ctx: Context) {}
+  readonly #ctx: Context;
+
+  constructor(ctx: Context) {
+    this.#ctx = ctx;
+  }
 
   async list(auth: Auth, query: HistoryQuery = {}): Promise<Page<Conversation>> {
     this.authorize(auth);
-    return this.ctx.storage.transaction(async tx => {
+    return this.#ctx.storage.transaction(async tx => {
       const conversations = await this.collect(tx);
       const selected = conversations.filter(conversation =>
         (query.thread === undefined || conversation.thread_refs.some(ref => same(ref, query.thread)))
@@ -22,7 +26,7 @@ export class HistoryService {
 
   async conversation(auth: Auth, message: MessageRef): Promise<Conversation> {
     this.authorize(auth);
-    return this.ctx.storage.transaction(async tx => {
+    return this.#ctx.storage.transaction(async tx => {
       const found = (await this.collect(tx)).find(row => same(row.id, message) || row.messages.some(item => same(item.message_ref, message)));
       if (found === undefined) fail('not_found', 'This node holds no conversation for that message.');
       return found;
@@ -37,7 +41,7 @@ export class HistoryService {
   }
 
   private authorize(auth: Auth): void {
-    if (auth.actor !== this.ctx.node) fail('forbidden', 'Conversation history belongs to this node.');
+    if (auth.actor !== this.#ctx.node) fail('forbidden', 'Conversation history belongs to this node.');
   }
 
   private async collect(tx: Transaction): Promise<Conversation[]> {
@@ -47,7 +51,7 @@ export class HistoryService {
       const id = identity(message_ref);
       const previous = messages.get(id);
       messages.set(id, {
-        message_ref, message: entry.message, direction: entry.message.sender === this.ctx.node ? 'out' : 'in',
+        message_ref, message: entry.message, direction: entry.message.sender === this.#ctx.node ? 'out' : 'in',
         thread_ref: entry.thread_ref, seq: entry.seq, at: entry.at, delivery: previous?.delivery ?? 'received',
         ...(previous?.guarantee === undefined ? {} : { guarantee: previous.guarantee }),
         ...(consumed === undefined ? previous?.consumption === undefined ? {} : { consumption: previous.consumption }

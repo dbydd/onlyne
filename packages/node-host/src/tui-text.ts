@@ -1,4 +1,4 @@
-import { createTranslator } from './i18n.js';
+import { createTranslator } from './i18n.ts';
 
 const en = {
   'title': 'Onlyne gateway · {actor} · {endpoint}',

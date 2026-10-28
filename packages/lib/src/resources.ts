@@ -1,9 +1,9 @@
 import type {
   AckReceipt, Auth, Failure, HandoverProbe, Json, LogQuery, Mutation, OperationRecord, OperationRequest,
   OperationResult, Page, PageOptions, ProbeAnswer, Resource, ResourceEvent, ResourceRef, Transaction, Transport,
-} from './types.js';
-import type { Context } from './core.js';
-import { OnlyneError, decimal, fail, key, page, requireValue, same, utc } from './core.js';
+} from './types.ts';
+import type { Context } from './core.ts';
+import { OnlyneError, decimal, fail, key, page, requireValue, same, utc } from './core.ts';
 
 export interface ResourceService {
   register(auth: Auth, resource: Resource): Promise<Resource>;

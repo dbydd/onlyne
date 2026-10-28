@@ -1,8 +1,8 @@
-import { OnlyneError, fail, key, page, type Context } from './core.js';
-import { membershipRecord, validateDomainId } from './domains.js';
+import { OnlyneError, fail, key, page, type Context } from './core.ts';
+import { membershipRecord, validateDomainId } from './domains.ts';
 import type {
   DiscoveryCandidate, DiscoveryRecord, DomainId, Failure, NodeId, Page, PageOptions, ServiceDescription, Target,
-} from './types.js';
+} from './types.ts';
 
 /** How long candidate evidence stays current. An expired record is history, not a live address. */
 const FRESH_MS = 120_000;
@@ -25,12 +25,12 @@ function loopback(url: URL): boolean {
 }
 
 /** True for an address another host could use. Loopback, wildcard and unscoped link-local stay home. */
-function exchangeable(value: string): boolean {
+function exchangeable(value: string, allowLoopback = false): boolean {
   let url: URL;
   try { url = new URL(value); } catch { return false; }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
   const host = hostOf(url);
-  if (loopback(url) || host === '0.0.0.0' || host === '::') return false;
+  if ((!allowLoopback && loopback(url)) || host === '0.0.0.0' || host === '::') return false;
   if (/^169\.254\./.test(host)) return false;
   return !(/^fe80:/.test(host) && !host.includes('%'));
 }
@@ -101,10 +101,18 @@ function published(value: unknown): ServiceDescription {
 export class DiscoveryService {
   /** Directly verified identities in this process; lets admission policies answer without nested storage work. */
   readonly #known = new Set<NodeId>();
-  constructor(private readonly ctx: Context, private readonly fetcher: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = fetch) {}
+  readonly #ctx: Context;
+  readonly #fetcher: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+  constructor(ctx: Context, fetcher: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = fetch) {
+    this.#ctx = ctx;
+    this.#fetcher = fetcher;
+  }
 
   /** Whether this process has directly verified this identity at least once. */
   known(node_id: NodeId): boolean { return this.#known.has(node_id); }
+
+  get #allowLoopback(): boolean { return Boolean(this.#ctx.options.plugins.allow_loopback); }
 
   /**
    * Reads `base_url`'s service description and records what it declares. A failed observation
@@ -114,7 +122,7 @@ export class DiscoveryService {
     if (source.length === 0) fail('invalid_request', 'A discovery record needs a source.');
     const url = address(base_url);
     if (url.protocol === 'http:' && !loopback(url)) fail('unavailable', 'Plain HTTP is limited to loopback; cross-host candidates must use HTTPS.');
-    const at = this.ctx.now();
+    const at = this.#ctx.now();
     let description: ServiceDescription;
     try {
       description = published(await this.#read(url, signal));
@@ -138,25 +146,25 @@ export class DiscoveryService {
       verified_at: iso(at),
       membership: description.membership,
     };
-    await this.ctx.storage.transaction(async tx => { await tx.put(key(PREFIX, record.node_id, base_url), record); });
+    await this.#ctx.storage.transaction(async tx => { await tx.put(key(PREFIX, record.node_id, base_url), record); });
     this.#known.add(record.node_id);
     return record;
   }
 
   /** The public candidate exchange: verified, fresh and reachable from somewhere other than this host. */
   async list(options: PageOptions = {}): Promise<Page<DiscoveryCandidate>> {
-    const at = this.ctx.now();
+    const at = this.#ctx.now();
     const candidates = (await this.listRecords())
       .filter(record => record.verified_at !== undefined && record.instance_id !== ''
-        && exchangeable(record.base_url) && Date.parse(record.expires_at) > at)
+        && exchangeable(record.base_url, this.#allowLoopback) && Date.parse(record.expires_at) > at)
       .map(record => ({ node_id: record.node_id, instance_id: record.instance_id, base_url: record.base_url, last_seen: record.last_seen }))
       .sort((a, b) => order(position(a), position(b)));
-    return page(candidates, options, { kind: 'discovery', node: this.ctx.node }, position);
+    return page(candidates, options, { kind: 'discovery', node: this.#ctx.node }, position);
   }
 
   /** Every observation this node holds, expired and failed ones included. */
   async listRecords(): Promise<DiscoveryRecord[]> {
-    const rows = await this.ctx.storage.transaction(tx => tx.scan<DiscoveryRecord>(`${PREFIX}/`));
+    const rows = await this.#ctx.storage.transaction(tx => tx.scan<DiscoveryRecord>(`${PREFIX}/`));
     return rows.map(row => row.value).sort((a, b) => order(position(a), position(b)));
   }
 
@@ -188,11 +196,11 @@ export class DiscoveryService {
   /** Verified, fresh candidates that declare exactly this region. */
   async candidates(domain_id: DomainId): Promise<NodeId[]> {
     validateDomainId(domain_id);
-    const at = this.ctx.now();
+    const at = this.#ctx.now();
     const nodes = new Set<NodeId>();
     for (const record of await this.listRecords()) {
       if (record.verified_at === undefined || record.instance_id === '') continue;
-      if (Date.parse(record.expires_at) <= at || !exchangeable(record.base_url)) continue;
+      if (Date.parse(record.expires_at) <= at || !exchangeable(record.base_url, this.#allowLoopback)) continue;
       const membership = record.membership;
       if (membership === null || membership === undefined || membership.state !== 'active' || membership.domain_id !== domain_id) continue;
       nodes.add(record.node_id);
@@ -217,12 +225,12 @@ export class DiscoveryService {
     controller.signal.addEventListener('abort', () => gate.reject(controller.signal.reason), { once: true });
     const timeout = setTimeout(
       () => controller.abort(new OnlyneError('unavailable', 'The candidate description lookup timed out.')),
-      this.ctx.options.wait_ms ?? 30_000,
+      this.#ctx.options.wait_ms ?? 30_000,
     );
     let response: Response;
     try {
       response = await Promise.race([
-        this.fetcher(target, { method: 'GET', headers: { accept: 'application/json' }, signal: controller.signal }),
+        this.#fetcher(target, { method: 'GET', headers: { accept: 'application/json' }, signal: controller.signal }),
         gate.promise,
       ]);
     } catch (error) {
@@ -253,10 +261,10 @@ export class DiscoveryService {
    * candidate that has to be rediscovered, not a permanent entry.
    */
   async #failed(base_url: string, source: string, at: number, error: Failure): Promise<void> {
-    await this.ctx.storage.transaction(async tx => {
+    await this.#ctx.storage.transaction(async tx => {
       const rows = (await tx.scan<DiscoveryRecord>(`${PREFIX}/`)).filter(row => row.value.base_url === base_url);
       for (const row of rows) {
-        if (row.value.verified_at !== undefined && Date.parse(row.value.expires_at) > at) {
+        if (row.value.verified_at !== undefined) {
           await tx.put(row.key, { ...row.value, source, received_at: iso(at), error });
           continue;
         }

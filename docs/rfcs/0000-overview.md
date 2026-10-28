@@ -35,6 +35,7 @@ A2A 和 ANP 是外部绑定的规范来源，不是 Onlyne 内部语义的模板
 | [0015](0015-mcp-resource-node.md) | MCP server 作为无状态资源节点接入 |
 | [0016](0016-systemone-context.md) | SystemOne 各判定点的输入契约与机械前置条件 |
 | [0017](0017-node-auth.md) | 节点认证、密钥发行存放、交换状态机、送达义务与信任边界 |
+| [0018](0018-peer-acquisition-and-handshake-delivery.md) | 对端获取的三档委派策略与握手状态投递为会话消息 |
 
 RFC 2119 的 MUST、MUST NOT、SHOULD、MAY 分别表示必须、禁止、建议、可选。Draft 中的这些词约束拟议实现，不表示已有实现通过验收。
 

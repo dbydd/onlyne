@@ -1,6 +1,6 @@
-import { OnlyneError } from './core.js';
-import type { ErrorCode, Failure, NodeId, Target, Transport, TrustEntry } from './types.js';
-import type { TrustService } from './keys.js';
+import { OnlyneError } from './core.ts';
+import type { ErrorCode, Failure, NodeId, Target, Transport, TrustEntry } from './types.ts';
+import type { TrustService } from './keys.ts';
 
 /** The trust reads and signing steps a transport performs; a host that builds its own node wraps the real service. */
 export type SigningTrust = Pick<TrustService, 'entry' | 'signRequest' | 'verifyResponse'>;

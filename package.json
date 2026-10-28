@@ -8,10 +8,10 @@
     "packages/*"
   ],
   "scripts": {
-    "check": "bun run --filter '@onlyne/lib' check && bun run --filter '@onlyne/node-host' check && bun run --filter omp-onlyne check && bun run --filter '@onlyne/im-core' check && bun run --filter '@onlyne/im-fake' check && bun run --filter '@onlyne/im-lark' check && bun run --filter '@onlyne/im-gateway' check && bun run --filter '@onlyne/mcp-core' check && bun run --filter '@onlyne/mcp-gateway' check",
-    "test": "bun run --filter '@onlyne/lib' test && bun run --filter omp-onlyne test && bun run --filter '@onlyne/im-core' test && bun run --filter '@onlyne/im-fake' test && bun run --filter '@onlyne/im-lark' test && bun run --filter '@onlyne/im-gateway' test && bun run --filter '@onlyne/mcp-core' test && bun run --filter '@onlyne/mcp-gateway' test",
-    "publish:packages": "for p in lib node-host im-core im-fake im-lark im-gateway mcp-core mcp-gateway omp-onlyne; do echo \"== packages/$p\"; npm publish \"./packages/$p\" || exit 1; done",
-    "publish:dry": "for p in lib node-host im-core im-fake im-lark im-gateway mcp-core mcp-gateway omp-onlyne; do echo \"== packages/$p\"; npm publish \"./packages/$p\" --dry-run || exit 1; done",
+    "check": "bun run --filter '@onlyne/lib' check && bun run --filter '@onlyne/node-host' check && bun run --filter omp-onlyne check && bun run --filter dsh-onlyne check && bun run --filter '@onlyne/im-core' check && bun run --filter '@onlyne/im-fake' check && bun run --filter '@onlyne/im-lark' check && bun run --filter '@onlyne/im-gateway' check && bun run --filter '@onlyne/mcp-core' check && bun run --filter '@onlyne/mcp-gateway' check",
+    "test": "bun run --filter '@onlyne/lib' test && bun run --filter omp-onlyne test && bun run --filter dsh-onlyne test && bun run --filter '@onlyne/im-core' test && bun run --filter '@onlyne/im-fake' test && bun run --filter '@onlyne/im-lark' test && bun run --filter '@onlyne/im-gateway' test && bun run --filter '@onlyne/mcp-core' test && bun run --filter '@onlyne/mcp-gateway' test",
+    "publish:packages": "for p in lib node-host im-core im-fake im-lark im-gateway mcp-core mcp-gateway omp-onlyne dsh-onlyne; do echo \"== packages/$p\"; npm publish \"./packages/$p\" || exit 1; done",
+    "publish:dry": "for p in lib node-host im-core im-fake im-lark im-gateway mcp-core mcp-gateway omp-onlyne dsh-onlyne; do echo \"== packages/$p\"; npm publish \"./packages/$p\" --dry-run || exit 1; done",
     "version:list": "bun scripts/version.ts list",
     "version:set": "bun scripts/version.ts",
     "devinstall": "bun scripts/devinstall.ts"

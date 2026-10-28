@@ -1,6 +1,6 @@
-import { fail, key, OnlyneError, page, requireValue, type Context } from './core.js';
-import { serviceBase } from './transport.js';
-import type { Auth, DomainDiscovery, DomainMembership, DomainMutation, Mutation, PageOptions, Transaction } from './types.js';
+import { fail, key, OnlyneError, page, requireValue, type Context } from './core.ts';
+import { serviceBase } from './transport.ts';
+import type { Auth, DomainDiscovery, DomainMembership, DomainMutation, Mutation, PageOptions, Transaction } from './types.ts';
 
 export function validateDomainId(value: unknown): string {
   if (typeof value !== 'string' || !/^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$/.test(value)) {
@@ -56,10 +56,13 @@ async function activeMembership(tx: Transaction, node: string): Promise<DomainMe
 }
 
 export class DomainService {
-  constructor(
-    private readonly ctx: Context,
-    private readonly fetcher: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = fetch,
-  ) {}
+  readonly #ctx: Context;
+  readonly #fetcher: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+  constructor(ctx: Context, fetcher: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = fetch) {
+    this.#ctx = ctx;
+    this.#fetcher = fetcher;
+  }
 
   private authenticate(auth: Auth): void {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
@@ -67,19 +70,19 @@ export class DomainService {
 
   private self(auth: Auth): void {
     this.authenticate(auth);
-    if (auth.actor !== this.ctx.node) fail('forbidden', 'A node may only change its own domain membership.');
+    if (auth.actor !== this.#ctx.node) fail('forbidden', 'A node may only change its own domain membership.');
   }
 
   async create(auth: Auth, mutation: Mutation): Promise<DomainMembership> {
     this.self(auth);
-    return this.ctx.mutate(auth, 'domain.create', mutation, {}, async tx => {
-      if (await activeMembership(tx, this.ctx.node)) {
+    return this.#ctx.mutate(auth, 'domain.create', mutation, {}, async tx => {
+      if (await activeMembership(tx, this.#ctx.node)) {
         fail('conflict', 'This node already belongs to a domain; leave it before creating another.');
       }
-      const domain_id = validateDomainId(`urn:onlyne:region:${this.ctx.id()}`);
+      const domain_id = validateDomainId(`urn:onlyne:region:${this.#ctx.id()}`);
       const slot = key('domain', domain_id);
       if (await tx.get(slot)) fail('id_conflict', 'The domain identifier is already recorded here.');
-      const record: DomainMembership = { domain_id, node_id: this.ctx.node, state: 'active', revision: this.ctx.id() };
+      const record: DomainMembership = { domain_id, node_id: this.#ctx.node, state: 'active', revision: this.#ctx.id() };
       await tx.put(slot, record);
       return record;
     });
@@ -96,12 +99,12 @@ export class DomainService {
   private async change(auth: Auth, id: string, state: DomainMembership['state'], mutation: DomainMutation): Promise<DomainMembership> {
     this.self(auth);
     validateDomainId(id);
-    return this.ctx.mutate(auth, `domain.${state}/${id}`, mutation, { expected_revision: mutation.expected_revision ?? null }, async tx => {
+    return this.#ctx.mutate(auth, `domain.${state}/${id}`, mutation, { expected_revision: mutation.expected_revision ?? null }, async tx => {
       const slot = key('domain', id);
       const current = await tx.get<DomainMembership>(slot);
       if (!current && state === 'left') fail('not_found', 'No membership is recorded for this domain.');
       // A node belongs to one domain. Cross-domain reach is a property of threads and ingress, not of membership.
-      const active = await activeMembership(tx, this.ctx.node);
+      const active = await activeMembership(tx, this.#ctx.node);
       if (state === 'active' && active !== undefined && active.domain_id !== id) {
         fail('conflict', 'This node already belongs to another domain; leave it first.');
       }
@@ -109,9 +112,9 @@ export class DomainService {
         fail('revision_conflict', 'The local domain membership changed.', current ? { current_revision: current.revision } : undefined);
       }
       if (current?.state === state) return current;
-      const revision = this.ctx.id();
+      const revision = this.#ctx.id();
       if (revision === current?.revision) fail('internal', 'The revision source reused the current membership revision.');
-      const record: DomainMembership = { domain_id: id, node_id: this.ctx.node, state, revision };
+      const record: DomainMembership = { domain_id: id, node_id: this.#ctx.node, state, revision };
       await tx.put(slot, record);
       return record;
     });
@@ -119,34 +122,34 @@ export class DomainService {
 
   async list(auth: Auth, options: PageOptions = {}) {
     this.authenticate(auth);
-    return this.ctx.storage.transaction(async tx => {
-      const current = await activeMembership(tx, this.ctx.node);
+    return this.#ctx.storage.transaction(async tx => {
+      const current = await activeMembership(tx, this.#ctx.node);
       const records = current === undefined ? [] : [current];
       records.sort((a, b) => a.domain_id < b.domain_id ? -1 : a.domain_id > b.domain_id ? 1 : 0);
-      return page(records, options, { kind: 'domains', node: this.ctx.node, actor: auth.actor }, row => row.domain_id);
+      return page(records, options, { kind: 'domains', node: this.#ctx.node, actor: auth.actor }, row => row.domain_id);
     });
   }
 
   async describe(auth: Auth, id: string): Promise<DomainMembership> {
     this.authenticate(auth);
     validateDomainId(id);
-    return this.ctx.storage.transaction(async tx => requireValue(await tx.get<DomainMembership>(key('domain', id))));
+    return this.#ctx.storage.transaction(async tx => requireValue(await tx.get<DomainMembership>(key('domain', id))));
   }
 
   async discover(auth: Auth, id: string, signal?: AbortSignal): Promise<DomainDiscovery> {
     this.authenticate(auth);
     validateDomainId(id);
     if ((await this.describe(auth, id)).state !== 'active') fail('not_a_member', 'This node has left the domain.');
-    const candidates = this.ctx.options.plugins.domainCandidates;
+    const candidates = this.#ctx.options.plugins.domainCandidates;
     if (!candidates) fail('unsupported_delivery', 'The host provides no domain discovery source.');
     signal?.throwIfAborted();
-    const nodes = [...new Set([this.ctx.node, ...await candidates(id)])].sort();
+    const nodes = [...new Set([this.#ctx.node, ...await candidates(id)])].sort();
     const members: DomainMembership[] = [];
     const unavailable: string[] = [];
     for (const node of nodes) {
       signal?.throwIfAborted();
       if (typeof node !== 'string' || node.length === 0) fail('invalid_request', 'Domain candidates must be node identities.');
-      if (node === this.ctx.node) {
+      if (node === this.#ctx.node) {
         const current = await this.describe(auth, id);
         if (current.state === 'active') members.push(current);
         continue;
@@ -168,7 +171,7 @@ export class DomainService {
   private async query(node: string, signal?: AbortSignal): Promise<unknown> {
     // A candidate's service description is public: it is read before any key exchange, so
     // it never goes through the signing transport (RFC 0011 §5, RFC 0017 §4).
-    const target = await this.ctx.options.plugins.resolve(node);
+    const target = await this.#ctx.options.plugins.resolve(node);
     if (target.node_id !== node) fail('unavailable', 'The resolver returned a target for another identity.');
     const base = serviceBase(target.base_url);
     const url = new URL('./description', base.href.endsWith('/') ? base.href : `${base.href}/`);
@@ -181,10 +184,10 @@ export class DomainService {
       controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
       if (controller.signal.aborted) reject(controller.signal.reason);
     });
-    timer = setTimeout(() => controller.abort(new OnlyneError('unavailable', 'Service description lookup timed out.')), this.ctx.options.wait_ms ?? 30_000);
+    timer = setTimeout(() => controller.abort(new OnlyneError('unavailable', 'Service description lookup timed out.')), this.#ctx.options.wait_ms ?? 30_000);
     try {
       const response = await Promise.race([
-        this.fetcher(url, { method: 'GET', headers: { accept: 'application/json' }, signal: controller.signal }),
+        this.#fetcher(url, { method: 'GET', headers: { accept: 'application/json' }, signal: controller.signal }),
         aborted,
       ]);
       const text = await response.text().catch(() => '');

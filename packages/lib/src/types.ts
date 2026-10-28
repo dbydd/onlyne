@@ -331,6 +331,8 @@ export interface Plugins {
   resolve(node: NodeId): Promise<Target>;
   decide(input: MsgInput): Promise<Action>;
   runtime?: Runtime;
+  /** When true, candidate exchange allows loopback addresses (useful in local dev & testing). */
+  allow_loopback?: boolean;
   /** Supplied when the host wants the library to own the maintenance loop (RFC 0017 §6). */
   maintenanceClock?: MaintenanceClock;
   resources?: ResourceDriver;
