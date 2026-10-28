@@ -161,7 +161,9 @@ export function summary(result: unknown, addressed?: string): string {
 		owner: receipt.thread_ref.owner, thread: receipt.thread_ref.id, seq: receipt.seq, answering,
 	});
 	const facts = [
-		to === undefined ? "" : toolText("summary.addressee", { to }),
+		// The self case is the one the reader has to be told about: this node's own id reads as a
+		// peer name, and the thread is hosted here either way.
+		to === undefined ? "" : toolText(to === self ? "summary.addressee_self" : "summary.addressee", { to }),
 		storage,
 		// The resolved addressee is what keeps an alias send from reading as a self-send.
 		outcome.resolved === undefined || outcome.resolved === outcome.requested ? "" : toolText("summary.resolved", { node: outcome.resolved }),
@@ -169,10 +171,11 @@ export function summary(result: unknown, addressed?: string): string {
 		// record is. Point the reader at the handle that opens (dpdp report, problem 1).
 		receipt === undefined ? "" : toolText("summary.outbound", { id: receipt.message_ref.id }),
 	].filter(part => part.length > 0).join(toolText("summary.sep"));
-	// A thread this node holds and a peer it addressed: the entry is here, and the peer reaches
-	// it through the grant notice rather than a copy of the body.
+	// A thread this node hosts and a peer it addressed: the entry sits here because this node
+	// hosts the thread, so the sentence names the addressee that reads it. Without that, "hosted
+	// on your node" beside "Sent to <peer>" reads as a message this node wrote to itself.
 	const mechanism = storedHere && to !== undefined && to !== self
-		? toolText("summary.grant_notice")
+		? toolText("summary.grant_notice", { to })
 		: "";
 	// With no addressee the sentence opens on the storage fact, so it is capitalized like a lead.
 	const body = to === undefined && facts.length > 0 ? facts.charAt(0).toUpperCase() + facts.slice(1) : facts;

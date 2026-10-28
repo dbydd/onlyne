@@ -41,25 +41,27 @@ describe("msg summary", () => {
 		const text = summary(delivered, PEER);
 		expect(text.startsWith("Delivered")).toBe(false);
 		expect(text.startsWith(`Sent to ${PEER}`)).toBe(true);
-		expect(text).toContain("stored in your thread t-1 seq 1");
-		expect(text).toContain("grant notice");
+		expect(text).toContain("thread t-1 is hosted on your node, seq 1");
+		// The host fact alone would read as a message to itself; the sentence names the peer that reads it.
+		expect(text).toContain(`${PEER} reads it as a member`);
+		expect(text).not.toEqual(summary(delivered, SELF));
 		expect(text).toContain("read back: onlyne://outbound/m-1 and recorded durably");
 	});
 
-	test("a send into the peer's thread says where it is stored and claims no notice", () => {
+	test("a send into the peer's thread names that host and claims no notice", () => {
 		setLocale("en");
 		const text = summary(intoPeerThread, PEER);
 		expect(text.startsWith(`Sent to ${PEER}`)).toBe(true);
-		expect(text).toContain(`stored at ${PEER} (thread t-2 seq 4)`);
-		expect(text).not.toContain("stored in your thread");
+		expect(text).toContain(`thread t-2 is hosted on ${PEER}, seq 4`);
+		expect(text).not.toContain("hosted on your node");
 		expect(text).not.toContain("grant notice");
 	});
 
-	test("a self-addressed send names itself and claims no notice", () => {
+	test("a self-addressed send says so and claims no notice", () => {
 		setLocale("en");
 		const text = summary(delivered, SELF);
-		expect(text.startsWith(`Sent to ${SELF}`)).toBe(true);
-		expect(text).toContain("stored in your thread t-1 seq 1");
+		expect(text.startsWith("Sent to yourself")).toBe(true);
+		expect(text).toContain("thread t-1 is hosted on your node, seq 1");
 		expect(text).not.toContain("grant notice");
 	});
 
@@ -68,7 +70,7 @@ describe("msg summary", () => {
 		const text = summary({ ...delivered, requested: "dpdp", resolved: PEER });
 		expect(text).toContain(`Sent to ${PEER}`);
 		expect(text).toContain(`resolved: ${PEER}`);
-		expect(text).toContain(`thread t-1 seq 1`);
+		expect(text).toContain("thread t-1 is hosted on your node, seq 1");
 	});
 
 	test("a spelling that already names the node adds nothing", () => {
@@ -81,7 +83,7 @@ describe("msg summary", () => {
 		setLocale("zh-CN");
 		const text = summary(delivered, PEER);
 		const addressee = text.indexOf(`已发给 ${PEER}`);
-		const storage = text.indexOf("存入你的 thread t-1 seq 1");
+		const storage = text.indexOf("thread t-1 建在你这侧");
 		const trail = text.indexOf("读回: onlyne://outbound/m-1");
 		const notice = text.indexOf("grant 通知");
 		expect(addressee).toBe(0);
@@ -95,7 +97,7 @@ describe("msg summary", () => {
 		setLocale("zh-CN");
 		const text = summary(intoPeerThread, PEER);
 		expect(text.startsWith(`已发给 ${PEER}`)).toBe(true);
-		expect(text).toContain(`存在 ${PEER} 那里`);
+		expect(text).toContain(`thread t-2 建在 ${PEER} 那侧`);
 		expect(text).not.toContain("grant 通知");
 		setLocale("en");
 	});
