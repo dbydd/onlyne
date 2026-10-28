@@ -114,7 +114,7 @@
 | `resource` | 当前可访问的资源别名 | ResourceRef |
 | `mentions` | `["@all"]` 或 `["@reviewer"]` | 这条消息希望谁主动关注 |
 | `attention` | `inbox` 或 `thread` | 读取模式，默认 `inbox` |
-| `op` | `create`、`close`、`list`、`describe`、`member_add`、`member_remove` | 对本地 thread 的管理动作 |
+| `op` | `create`、`close`、`list`、`describe`、`member_add`、`member_remove`、`trust_accept`、`trust_revoke`、`trust_begin` | 对本地 thread 的管理动作，以及三个信任动作（RFC 0018 §3.1） |
 | `relation` | `reply` 或 `followup` | 消息关系 |
 | `title` | 新 thread 的标题 | 本地 thread 标题 |
 | `data` | 操作要求的结构化参数 | 资源声明的参数 schema |
@@ -149,7 +149,7 @@
 - OMP-5.13 交接结果为 `pending` 时 MUST 显示“交接待决”；只有资源 owner 返回 `committed` 和新绑定，工具才显示“交接已生效”。平台凭据 MUST 留在资源 endpoint。
 - OMP-5.14 投递时命名的 thread MUST 解析为目标节点拥有的 ThreadRef。模型命名本节点拥有的线程时，接入 MUST 返回 `invalid_request` 并说明落点由接收方按原消息所在线程决定，MUST NOT 静默改投默认位置或首触线程。回复省略 `thread` 时，落点 MUST 是保存原消息的线程。
 - OMP-5.15 发送回执给出的读回地址 MUST 在当前节点可读，并显示落点、投递状态与关联引用。落点线程属于对端时，读取 MUST 报出该 owner 与可执行的读路径，MUST NOT 把本地 owner 守卫的拒绝原样交给读者。
-- OMP-5.16 多个收件人 MUST 表达为 `meta.to` 的数组。接入 MUST 逐个目标各发一次，MUST 为每个目标返回独立的接纳结果，MUST NOT 让一个目标的失败掩盖其他目标；集合意图 MUST NOT 合并成一条消息或一个回执。`meta.to` 为单值时行为不变。
+- OMP-5.16 多个收件人 MUST 表达为 `meta.to` 的数组。接入 MUST 逐个目标各发一次，MUST 为每个目标返回独立的接纳结果，MUST NOT 让一个目标的失败掩盖其他目标；集合意图 MUST NOT 合并成一条消息或一个回执。`meta.to` 为单值时行为不变。数组同时带 `meta.thread` 时，每个目标都写进该 thread（用于群聊）；不带 `meta.thread` 时每个目标各得一个 thread。这两种结果 MUST 在工具结果里说清，不能靠调用方事后比对线程 id。
 - OMP-5.17 只读子会话的回复交回 MUST 有结构化形状：`meta.op: "draft"` 携带 `to`、`relation`、`in_reply_to` 与正文，返回 `draft_id`；主会话用 `meta.draft_id` 发送同一条已准备的消息。草稿 MUST 绑定创建它的上下文与它被授权的原消息；子会话 MUST NOT 直接发送，MUST NOT 为不属于自己切片的消息建草稿。
 - OMP-5.18 `meta.context` 与回执中的 `plan.context` 指接收方的一个执行上下文；它决定这次投递由哪个上下文消费，MUST NOT 被解释为消息落点的 thread。执行上下文丢失或不再绑定时，接入 MUST 返回 `context_lost`，MUST NOT 静默改投其他上下文。
 

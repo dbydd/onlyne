@@ -66,6 +66,10 @@ separate security proposal; leave both at their defaults for the first E2E.
   `onlyne://outbound`, `onlyne://neighbors` — read-only views. List views accept
   `page_size` (or `limit`) and `cursor`; a conversation holds both directions of one
   exchange.
+- `onlyne://threads` also lists the threads this node was invited into and does not own.
+  Those rows carry the owner, the last sequence the local records know, and the member
+  list when the owner answers; they are read-only, so the composer refuses them and
+  entries are read from the owner.
 - `onlyne://resources` reads the local node and peers whose key exchange is complete.
   Each owner returns its authorized resources or an explicit failure. Select
   `onlyne://resources/<encoded-owner>` for one owner's inventory and pagination.
