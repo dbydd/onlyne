@@ -23,9 +23,8 @@ export function conversationTarget(conversation: string): { scheme: 'user' | 'gr
 
 /**
  * One text send. `reply_to` starting with `ctx:` is the inbound event's transport context, used
- * as `context_token`; any other non-empty `reply_to` asks for a quote, which the iLink Bot API has
- * no field for, so it is refused here instead of being sent as an ordinary message that would
- * silently lose the reference.
+ * as `context_token`. iLink exposes no message-quoting field, so any other handle is not echoed;
+ * the text still goes out and the platform decides.
  */
 export async function sendMessage(port: SendPort, request: SendRequest): Promise<SendOutcome> {
   if (request.attachments.length > 0 || request.card !== undefined) {
@@ -39,12 +38,9 @@ export async function sendMessage(port: SendPort, request: SendRequest): Promise
     return { state: 'committed', error: `${UNSUPPORTED}: conversation ${request.conversation} is not user:<id> or group:<id>.` };
   }
   const replyTo = request.reply_to;
-  if (replyTo !== undefined && replyTo.length > 0 && !replyTo.startsWith('ctx:')) {
-    return {
-      state: 'committed',
-      error: `${UNSUPPORTED}: the iLink Bot API has no message-quoting field, so reply_to ${replyTo} cannot be honored.`,
-    };
-  }
+  // `ctx:` is the inbound event's transport context. Any other handle is the event's message id,
+  // which the iLink Bot API has no field to quote; the text is still sent and the platform's own
+  // answer decides, instead of this connector refusing a reply the bridge legitimately addressed.
   const contextToken = replyTo !== undefined && replyTo.startsWith('ctx:') ? replyTo.slice('ctx:'.length) : undefined;
   const clientId = request.request_id ?? crypto.randomUUID();
 

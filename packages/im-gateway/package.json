@@ -18,13 +18,17 @@
   "engines": { "bun": ">=1.4.3" },
   "exports": {
     ".": "./src/index.ts",
-    "./storage": "./src/storage.ts"
+    "./storage": "./src/storage.ts",
+    "./migrate": "./src/migrate.ts"
   },
-  "bin": { "onlyne-im-gateway": "src/main.ts" },
+  "bin": {
+    "onlyne-im-gateway": "src/main.ts",
+    "onlyne-im-migrate": "src/migrate-main.ts"
+  },
   "files": ["src", "README.md", "LICENSE"],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "bun tests/verify.ts"
+    "test": "bun tests/verify.ts && bun tests/channels.ts && bun tests/migration.ts"
   },
   "dependencies": {
     "@onlyne/im-core": "^3.0.0",
@@ -33,13 +37,19 @@
     "@onlyne/node-host": "^3.0.0"
   },
   "peerDependencies": {
-    "@onlyne/im-lark": "^3.0.0"
+    "@onlyne/im-lark": "^3.0.0",
+    "@onlyne/im-qq": "^3.0.0",
+    "@onlyne/im-wechat": "^3.0.0"
   },
   "peerDependenciesMeta": {
-    "@onlyne/im-lark": { "optional": true }
+    "@onlyne/im-lark": { "optional": true },
+    "@onlyne/im-qq": { "optional": true },
+    "@onlyne/im-wechat": { "optional": true }
   },
   "devDependencies": {
     "@onlyne/im-lark": "^3.0.0",
+    "@onlyne/im-qq": "^3.0.0",
+    "@onlyne/im-wechat": "^3.0.0",
     "@types/bun": "^1.3.0",
     "typescript": "^5.9.0"
   }

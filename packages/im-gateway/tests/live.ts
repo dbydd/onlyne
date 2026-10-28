@@ -13,7 +13,7 @@ import { createImGateway, nodeClock, type GatewayConfig, type ImGateway } from '
  * The script is skipped without a credential. It prints one JSON line per step; send the bot a
  * message from Feishu when it says it is waiting.
  */
-const NODE = 'urn:onlyne:gateway:live';
+const NODE = 'urn:onlyne:gateway:im-lark-live';
 const AGENT_A = 'urn:onlyne:agent:a';
 const AGENT_B = 'urn:onlyne:agent:b';
 const RESOURCE = 'chat-live';
@@ -100,10 +100,10 @@ const config: GatewayConfig = {
   node: { id: NODE },
   server: { bind: '127.0.0.1', port: 39872 },
   storage_path: join(dir, 'store.json'),
-  connectors: [{
+  channel: {
     platform: 'lark', conversation: chat, assignee: AGENT_A,
     credential: secret,
-  }],
+  },
 };
 const gateway: ImGateway = await createImGateway(config, { transport, log: (message, fields) => say(`gateway.${message}`, fields ?? {}) });
 const endpoint = 'http://127.0.0.1:39872/onlyne/v3';

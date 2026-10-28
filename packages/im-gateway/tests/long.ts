@@ -18,7 +18,7 @@ import type { ImEvent } from '@onlyne/im-core';
  * Send the first real Feishu message when the script says it is waiting, and the final one
  * after the restart step.
  */
-const NODE = 'urn:onlyne:gateway:live';
+const NODE = 'urn:onlyne:gateway:im-lark-live';
 const AGENT_A = 'urn:onlyne:agent:a';
 const AGENT_B = 'urn:onlyne:agent:b';
 const RESOURCE = 'chat-long';
@@ -102,10 +102,10 @@ const config: GatewayConfig = {
   node: { id: NODE },
   server: { bind: '127.0.0.1', port: 39873 },
   storage_path: join(dir, 'store.json'),
-  connectors: [{
+  channel: {
     platform: 'lark', conversation: chat, assignee: AGENT_A,
     credential: secret,
-  }],
+  },
 };
 const build = async (): Promise<ImGateway> =>
   createImGateway(config, { transport, log: (message, fields) => say(`gateway.${message}`, fields ?? {}) });

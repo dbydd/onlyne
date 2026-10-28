@@ -4,6 +4,17 @@ import type { Json, NodeId, OnlyneClient, ResourceEvent, ResourceRef, Storage, T
 interface OwedPush {
   ref: ResourceRef;
   event: ResourceEvent;
+  /**
+   * The projection message id, fixed when the row was written. The id embeds the endpoint's
+   * identity, so a retry after an owner migration must reuse it instead of minting a second
+   * identity for a push some peer may already have accepted (offline migration, migrate.ts).
+   */
+  message_id?: string;
+}
+
+/** The deterministic projection identity for one received event. */
+export function notifyMessageId(ref: ResourceRef, eventId: string): string {
+  return `im-notify-${ref.owner}-${ref.id}-${eventId}`;
 }
 
 const owedKey = (ref: ResourceRef, eventId: string) =>
@@ -60,7 +71,10 @@ export class EventPusher {
 
   /** Records the owed push before sending, then attempts it. A failure stays owed for the ring. */
   async afterReceive(ref: ResourceRef, event: ResourceEvent): Promise<void> {
-    await this.#storage.transaction(async tx => { await tx.put(owedKey(ref, event.event_id), { ref, event }); });
+    const message_id = notifyMessageId(ref, event.event_id);
+    await this.#storage.transaction(async tx => {
+      await tx.put(owedKey(ref, event.event_id), { ref, event, message_id } satisfies OwedPush);
+    });
     await this.deliverOne(ref, event.event_id);
   }
 
@@ -83,7 +97,7 @@ export class EventPusher {
         return;
       }
       const data = (stored?.event.data ?? {}) as Record<string, Json>;
-      const messageId = `im-notify-${ref.owner}-${ref.id}-${eventId}`;
+      const messageId = stored?.message_id ?? notifyMessageId(ref, eventId);
       const outcome = await client.send(
         recipient,
         {

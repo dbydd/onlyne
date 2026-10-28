@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
-import { createLogger, createNodeKey, startNodeHost } from '@onlyne/node-host';
+import { createLogger, createNodeKey, startNodeHost, type NodeHostOptions } from '@onlyne/node-host';
 import { resolveLocale, setLocale } from '@onlyne/node-host/i18n';
 import { dirname, join } from 'node:path';
-import { loadConfig } from './config.js';
+import { DEFAULT_WEBHOOK_PATH, loadConfig } from './config.js';
 import { createImGateway, nodeClock, type ImGateway } from './index.js';
 import { t } from './gateway-text.js';
 
@@ -18,6 +18,11 @@ const config = await loadConfig(path, process.env);
 // The configured language wins over the environment for everything this process prints; the
 // logger and the node host below are built after this point so their text follows it too.
 setLocale(resolveLocale(config.language));
+// On a terminal the TUI owns the screen, so log lines go to the ring it renders and to a file
+// beside the store; the ring alone would vanish with the process. ONLYNE_NO_TUI=1 means the
+// operator asked for the JSON stream on a real terminal, so stdout stays the log target.
+const toStdout = process.env.ONLYNE_NO_TUI === '1' || !(process.stdin.isTTY && process.stdout.isTTY);
+const { log, ring } = createLogger(toStdout, 200, join(dirname(config.storage_path), 'gateway.log'));
 // The advertised endpoint must carry the port the process actually bound, which is only
 // known after `Bun.serve` when the configuration asks for port 0.
 let handler: (request: Request) => Promise<Response> = async () =>
@@ -25,19 +30,30 @@ let handler: (request: Request) => Promise<Response> = async () =>
 const server = Bun.serve({ hostname: config.server.bind, port: config.server.port, fetch: request => handler(request) });
 config.server.port = server.port ?? config.server.port;
 
-// On a terminal the TUI owns the screen, so log lines go to the ring it renders and to a file
-// beside the store; the ring alone would vanish with the process.
-const { log, ring } = createLogger(
-  !(process.stdin.isTTY && process.stdout.isTTY), 200, join(dirname(config.storage_path), 'gateway.log'),
-);
 // RFC 0017 §2: the identity key is load-or-create, so a restart keeps the fingerprint peers
 // already confirmed. A gateway that cannot hold a key does not run.
 const keys = await createNodeKey(config.node.id);
 const gateway: ImGateway = await createImGateway(config, { keys, log });
-handler = request => gateway.fetch(request);
+// One channel, one callback path, one port: the platform webhook and the protocol endpoint
+// share the bound server, and every other path stays the library's.
+const webhookPath = config.channel.webhook_path ?? DEFAULT_WEBHOOK_PATH;
+handler = request => {
+  const pathname = new URL(request.url).pathname;
+  return pathname === webhookPath ? gateway.webhook(request) : gateway.fetch(request);
+};
 gateway.node.client.runMaintenance();
 const endpoint = `http://${config.server.bind}:${config.server.port}/onlyne/v3`;
-const host = await startNodeHost({ node: gateway.node, endpoint, bind: config.server.bind, seeds: config.peers, ring, log });
+// The host's status panel reads the channel's own view; the callback is display text only.
+const hostOptions: NodeHostOptions & { status?: () => Promise<string[]> } = {
+  node: gateway.node,
+  endpoint,
+  bind: config.server.bind,
+  ...(config.peers === undefined ? {} : { seeds: config.peers }),
+  ring,
+  log,
+  status: () => gateway.statusLines(),
+};
+const host = await startNodeHost(hostOptions);
 
 const clock = nodeClock();
 let timer: unknown;
@@ -63,4 +79,10 @@ const shutdown = async (): Promise<void> => {
 process.on('SIGINT', () => { void shutdown(); });
 process.on('SIGTERM', () => { void shutdown(); });
 
-log('im.gateway.listening', { node: config.node.id, endpoint, connectors: config.connectors.map(entry => entry.platform) });
+log('im.gateway.listening', {
+  node: config.node.id,
+  endpoint,
+  platform: config.channel.platform,
+  webhook: webhookPath,
+  status: await gateway.statusLines(),
+});

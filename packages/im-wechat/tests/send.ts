@@ -67,15 +67,16 @@ ok('a group send uses the group id as to_user_id', groupMessage.to_user_id === '
 ok('a send without reply_to omits context_token', !('context_token' in groupMessage));
 ok('a send without request_id invents a client id', /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(groupMessage.client_id));
 
-// --- refusals that never reach the platform ---
-const before = requests.length;
-const quoted = await sendMessage(port, {
+// --- a reply handle the platform cannot quote still sends the text ---
+const unquoted = await sendMessage(port, {
   conversation: 'user:wxid_alice', text: 'x', format: 'plain', attachments: [], reply_to: 'm-1',
 });
-ok('a quote request is refused', quoted.state === 'committed' && quoted.error?.startsWith('unsupported by @onlyne/im-wechat:') === true);
-ok('a refused quote names the missing field', quoted.error?.includes('no message-quoting field') === true);
-ok('a refused quote makes no platform call', requests.length === before);
-ok('a refusal does not claim a platform reason', quoted.error?.includes('platform rejected') !== true && quoted.error?.includes('platform call failed') !== true);
+const unquotedMessage = requests.at(-1)?.body.msg as WechatOutboundMessage;
+ok('a non-context reply handle sends text instead of a fake quote', unquoted.state === 'committed' && unquoted.error === undefined);
+ok('an unquotable handle is not echoed as a context token', !('context_token' in unquotedMessage));
+
+// --- refusals that never reach the platform ---
+const before = requests.length;
 
 const withAttachment = await sendMessage(port, {
   conversation: 'user:wxid_alice', text: '', format: 'plain', attachments: [{ kind: 'image', path: '/tmp/x.png' }],

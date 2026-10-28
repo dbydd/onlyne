@@ -52,7 +52,7 @@ const groupText = normalizeMessage({
 ok('a group message is addressed as group:<id>', groupText?.conversation === 'group:group-1');
 ok('a message without create_time_ms uses the injected clock', groupText?.at === new Date(clock()).toISOString());
 ok('a message without message_id falls back to seq', groupText?.source_id === '8');
-ok('a message without message_id carries no message handle', groupText?.message_handle === undefined);
+ok('a seq-only message uses the seq as its handle', groupText?.message_handle === '8');
 ok('a message without a context token carries no ref_handle', groupText?.ref_handle === undefined);
 
 const voice = normalizeMessage({

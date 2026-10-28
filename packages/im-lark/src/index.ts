@@ -40,10 +40,22 @@ export interface LarkConnectorOptions {
   onError?: (error: unknown) => void;
 }
 
+/** The channel status the gateway's host-side view reads; the SDK is the only source of state. */
+export interface LarkStatus {
+  state: string;
+  connected: boolean;
+  reconnects: number;
+  rate_limits: number;
+  last_event_at?: string;
+  onboarding?: string[];
+  error?: string;
+}
+
 export interface LarkConnector extends Connector {
   readonly operations: readonly string[];
   validate(operation: string, data: Json): void;
   operate(operation: string, data: Json): Promise<SendOutcome>;
+  status(): LarkStatus;
 }
 
 export function createLarkConnector(options: LarkConnectorOptions = {}): LarkConnector {
@@ -51,11 +63,16 @@ export function createLarkConnector(options: LarkConnectorOptions = {}): LarkCon
   const listeners: Array<(event: ImEvent) => void | Promise<void>> = [];
   /** One chain per conversation: the endpoint's `receive` calls land in arrival order. */
   const queues = new Map<string, Promise<void>>();
+  // Observations only: SDK lifecycle events, platform rejections and the last accepted event.
+  const observed = { reconnects: 0, rate_limits: 0, last_event_at: undefined as string | undefined };
+  let onboarding: string[] | undefined;
+  let startError: string | undefined;
 
   const report = (error: unknown): void => { options.onError?.(error); };
   const background = (work: () => Promise<void>): void => { void work().catch(report); };
 
   function emit(event: ImEvent): Promise<void> {
+    observed.last_event_at = event.at;
     const previous = queues.get(event.conversation) ?? Promise.resolve();
     const next = previous
       .then(async () => { for (const listener of listeners) await listener(event); })
@@ -127,6 +144,7 @@ export function createLarkConnector(options: LarkConnectorOptions = {}): LarkCon
 
   function outcomeOf(error: unknown): SendOutcome {
     const code = (error as { code?: string } | undefined)?.code;
+    if (code === 'rate_limited') observed.rate_limits += 1;
     const message = error instanceof Error ? error.message : String(error);
     return REJECTIONS.has(code ?? '') ? { state: 'committed', error: message } : { state: 'unknown', error: message };
   }
@@ -147,17 +165,29 @@ export function createLarkConnector(options: LarkConnectorOptions = {}): LarkCon
           options.env ?? process.env,
         );
         if (credential.value === undefined) {
+          onboarding = [credential.problem ?? 'FEISHU_APP_ID + FEISHU_APP_SECRET'];
           throw new Error(`Lark credential unavailable: ${credential.problem ?? 'not provided'}`);
         }
         const separator = credential.value.indexOf(':');
-        if (separator <= 0) throw new Error('The Lark credential is app_id:app_secret.');
+        if (separator <= 0) {
+          onboarding = ['FEISHU_APP_ID:FEISHU_APP_SECRET (app_id:app_secret)'];
+          throw new Error('The Lark credential is app_id:app_secret.');
+        }
         port = createLarkPort({
           appId: credential.value.slice(0, separator),
           appSecret: credential.value.slice(separator + 1),
-          ...(options.onState === undefined ? {} : { onState: options.onState }),
+          onState: (state, error) => {
+            if (state === 'reconnecting') observed.reconnects += 1;
+            options.onState?.(state, error);
+          },
         });
       }
-      await port.start(handlers());
+      try {
+        await port.start(handlers());
+      } catch (error) {
+        startError = error instanceof Error ? error.message : String(error);
+        throw error;
+      }
     },
 
     onEvent(listener: (event: ImEvent) => void | Promise<void>): void {
@@ -211,6 +241,20 @@ export function createLarkConnector(options: LarkConnectorOptions = {}): LarkCon
 
     async stop(): Promise<void> {
       await port?.stop();
+    },
+
+    status(): LarkStatus {
+      const current = port?.status();
+      const state = current?.state ?? (onboarding === undefined ? 'stopped' : 'onboarding');
+      return {
+        state,
+        connected: current?.state === 'connected',
+        reconnects: observed.reconnects,
+        rate_limits: observed.rate_limits,
+        ...(observed.last_event_at === undefined ? {} : { last_event_at: observed.last_event_at }),
+        ...(onboarding === undefined ? {} : { onboarding }),
+        ...(startError === undefined ? {} : { error: startError }),
+      };
     },
   };
 }

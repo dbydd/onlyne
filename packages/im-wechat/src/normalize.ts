@@ -64,7 +64,7 @@ export function normalizeMessage(message: WechatMessage, now: () => number): ImE
     text,
     attachments,
     ...(reply === undefined ? {} : { reply }),
-    ...(message.message_id === undefined ? {} : { message_handle: String(message.message_id) }),
+    message_handle: String(id),
     ...(typeof contextToken === 'string' && contextToken.length > 0 ? { ref_handle: `ctx:${contextToken}` } : {}),
     at: typeof createdAt === 'number' && Number.isFinite(createdAt) ? new Date(createdAt).toISOString() : new Date(now()).toISOString(),
     raw: message as unknown as Json,

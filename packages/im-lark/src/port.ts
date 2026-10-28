@@ -28,7 +28,8 @@ export interface LarkBotIdentity {
 export interface LarkPort {
   start(handlers: LarkHandlers): Promise<void>;
   stop(): Promise<void>;
-  status(): { state: string };
+  /** The SDK's own WebSocket lifecycle status, verbatim; `reconnectAttempts` resets on success. */
+  status(): { state: string; reconnectAttempts?: number; lastConnectTime?: number; nextConnectTime?: number };
   botIdentity(): LarkBotIdentity;
   /** `im.v1.message.get` items: the merge-forward descendants, and the parent itself. */
   fetchSubMessages(messageId: string): Promise<unknown[]>;
@@ -106,8 +107,15 @@ export function createLarkPort(options: LarkPortOptions): LarkPort {
       socket = undefined;
     },
 
-    status(): { state: string } {
-      return { state: socket?.getConnectionStatus().state ?? 'idle' };
+    status(): { state: string; reconnectAttempts?: number; lastConnectTime?: number; nextConnectTime?: number } {
+      const observed = socket?.getConnectionStatus();
+      if (observed === undefined) return { state: 'idle' };
+      return {
+        state: observed.state,
+        reconnectAttempts: observed.reconnectAttempts,
+        ...(observed.lastConnectTime === undefined ? {} : { lastConnectTime: observed.lastConnectTime }),
+        ...(observed.nextConnectTime === undefined ? {} : { nextConnectTime: observed.nextConnectTime }),
+      };
     },
 
     botIdentity(): LarkBotIdentity {

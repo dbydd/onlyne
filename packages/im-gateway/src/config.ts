@@ -3,11 +3,11 @@ import type { Locale } from '@onlyne/node-host/i18n';
 import { t } from './gateway-text.js';
 
 /**
- * One configured connector: one platform connection and one credential (RFC 0012 §2). It backs no
- * single resource — every platform conversation it serves becomes a resource of its own, and
- * `conversation` is only the pre-binding for the one that exists from startup.
+ * One channel: this process serves exactly one platform, on one port, over one store and one
+ * node identity (RFC 0012 §2). Every platform conversation it serves becomes a resource of its
+ * own, and `conversation` is only the pre-binding for the one that exists from startup.
  */
-export interface ConnectorConfig {
+export interface ChannelConfig {
   platform: string;
   /**
    * Pre-binding, optional (RFC 0012 §2): this conversation is adopted at startup, with the same
@@ -18,10 +18,12 @@ export interface ConnectorConfig {
   assignee?: NodeId;
   /** im-fake only: the scripted inbound events and send answers, passed through untyped. */
   script?: unknown;
-  /** An explicit platform credential (`app_id:app_secret`). */
+  /** An explicit platform credential (lark `app_id:app_secret`, qq `appid:secret`, wechat bot token). */
   credential?: string;
   /** A credential file path, resolved under `credentials_dir` when relative. */
   credential_file?: string;
+  /** The HTTP path this channel's inbound webhook answers on. Default `/im/webhook`. */
+  webhook_path?: string;
 }
 
 export interface GatewayConfig {
@@ -33,14 +35,40 @@ export interface GatewayConfig {
   credentials_dir?: string;
   /** Directory inbound attachments are materialized under (RFC 0012 §9); unset keeps handles only. */
   media_dir?: string;
-  connectors: ConnectorConfig[];
+  channel: ChannelConfig;
   /** Seed endpoints to observe at startup; discovery itself stays in lib. */
   peers?: string[];
   /** The language of the gateway's own console text; unset follows `ONLYNE_LANG`. */
   language?: Locale;
 }
 
+export const DEFAULT_WEBHOOK_PATH = '/im/webhook';
+/** A platform name prefixes every resource id (RFC 0012 §2), so it cannot carry a separator. */
+const PLATFORM_NAME = /^[a-z0-9]+$/;
 const ENV_PREFIX = 'ONLYNE_';
+
+/**
+ * RFC 0012 §1: one platform per node. The identity is derived from the channel, so an operator
+ * cannot point a lark gateway at a node identity that says qq and inherit another channel's trust.
+ * A suffixed identity (`urn:onlyne:gateway:im-fake-a`) is the one deviation: it lets a fixture or
+ * a test run several instances of the same platform with distinct identities.
+ */
+export function gatewayNodeId(platform: string): NodeId {
+  return `urn:onlyne:gateway:im-${platform}`;
+}
+
+function parseNodeId(value: Json | undefined, platform: string): NodeId {
+  const conventional = gatewayNodeId(platform);
+  if (value === undefined) return conventional;
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new OnlyneError('invalid_request', t('config.string', { field: 'node.id' }));
+  }
+  if (value !== conventional && !value.startsWith(`${conventional}-`)) {
+    throw new OnlyneError('invalid_request', t('config.nodeIdentity', { node: value, platform, expected: conventional }));
+  }
+  return value;
+}
+
 /** `ONLYNE_NODE_ID` and friends override the JSON file for the fields an operator retunes per host. */
 function envOverride(container: Record<string, unknown>, field: string, env: Record<string, string | undefined>): void {
   const value = env[ENV_PREFIX + field.toUpperCase()];
@@ -67,28 +95,25 @@ function numberOrDefault(container: Record<string, unknown>, field: string, fall
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-function parseConnectors(raw: Json | undefined): ConnectorConfig[] {
-  if (raw === undefined) return [];
-  if (!Array.isArray(raw)) throw new OnlyneError('invalid_request', t('config.connectors'));
-  const connectors = raw.map((entry, index) => {
-    const item = requireObject(entry, `connectors[${index}]`);
-    return {
-      platform: requireString(item, 'platform'),
-      ...(typeof item.conversation === 'string' && item.conversation.length > 0 ? { conversation: item.conversation } : {}),
-      ...(typeof item.assignee === 'string' && item.assignee.length > 0 ? { assignee: item.assignee } : {}),
-      ...(item.script === undefined ? {} : { script: item.script }),
-      ...(typeof item.credential === 'string' && item.credential.length > 0 ? { credential: item.credential } : {}),
-      ...(typeof item.credential_file === 'string' && item.credential_file.length > 0 ? { credential_file: item.credential_file } : {}),
-    };
-  });
-  // One platform is one connection: two entries would share a resource namespace and the bridge
-  // would have to guess which credential serves a conversation.
-  const seen = new Set<string>();
-  for (const connector of connectors) {
-    if (seen.has(connector.platform)) throw new OnlyneError('invalid_request', t('config.platformTwice', { platform: connector.platform }));
-    seen.add(connector.platform);
+function parseChannel(raw: Json | undefined): ChannelConfig {
+  const item = requireObject(raw, 'channel');
+  const platform = requireString(item, 'platform');
+  if (!PLATFORM_NAME.test(platform)) {
+    throw new OnlyneError('invalid_request', t('config.platformName', { platform }));
   }
-  return connectors;
+  const webhook = item.webhook_path;
+  if (webhook !== undefined && (typeof webhook !== 'string' || !webhook.startsWith('/'))) {
+    throw new OnlyneError('invalid_request', t('config.webhookPath', { value: JSON.stringify(webhook) }));
+  }
+  return {
+    platform,
+    ...(typeof item.conversation === 'string' && item.conversation.length > 0 ? { conversation: item.conversation } : {}),
+    ...(typeof item.assignee === 'string' && item.assignee.length > 0 ? { assignee: item.assignee } : {}),
+    ...(item.script === undefined ? {} : { script: item.script }),
+    ...(typeof item.credential === 'string' && item.credential.length > 0 ? { credential: item.credential } : {}),
+    ...(typeof item.credential_file === 'string' && item.credential_file.length > 0 ? { credential_file: item.credential_file } : {}),
+    ...(webhook === undefined ? {} : { webhook_path: webhook }),
+  };
 }
 
 /** `language` is exactly `en` or `zh-CN`: a near miss would silently pick a different console language. */
@@ -107,14 +132,20 @@ export async function loadConfig(path: string, env: Record<string, string | unde
     throw new OnlyneError('invalid_request', t('config.unreadable', { path }));
   }
   const raw = requireObject(file, 'the configuration root');
-  const node = requireObject(raw.node, 'node');
+  // The aggregate gateway is retired: one process no longer serves several platforms, and a
+  // configuration still asking for it must be split by hand instead of half-migrated.
+  if (raw.connectors !== undefined) {
+    throw new OnlyneError('invalid_request', t('config.aggregateRetired'));
+  }
+  const node = raw.node === undefined ? {} : requireObject(raw.node, 'node');
   const server = requireObject(raw.server, 'server');
   const storage = requireObject(raw.storage, 'storage');
   const language = parseLanguage(raw.language);
+  const channel = parseChannel(raw.channel);
   envOverride(node, 'id', env);
   envOverride(server, 'bind', env);
   envOverride(server, 'port', env);
-  const owner = requireString(node, 'id') as NodeId;
+  const owner = parseNodeId(node.id, channel.platform);
   return {
     node: { id: owner },
     server: {
@@ -124,7 +155,7 @@ export async function loadConfig(path: string, env: Record<string, string | unde
     storage_path: requireString(storage, 'path'),
     ...(typeof raw.credentials_dir === 'string' && raw.credentials_dir.length > 0 ? { credentials_dir: raw.credentials_dir } : {}),
     ...(typeof raw.media_dir === 'string' && raw.media_dir.length > 0 ? { media_dir: raw.media_dir } : {}),
-    connectors: parseConnectors(raw.connectors),
+    channel,
     ...(Array.isArray(raw.peers)
       ? { peers: raw.peers.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0) }
       : {}),
