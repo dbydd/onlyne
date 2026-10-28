@@ -1739,6 +1739,37 @@ async function phasePendingCopy(): Promise<void> {
 }
 }
 
+/**
+ * A host that cannot hold an await or open a new execution context refuses the delivery at
+ * admission. The plan is the only part the sender can change, so the refusal names it; a bare
+ * "the runtime cannot fulfil this plan" leaves the sender guessing which half was refused.
+ */
+async function phasePlanRefusal(): Promise<void> {
+  const sender = serve(lazuliNode, base_url => rig(lazuliNode, base_url));
+  serve(dpdpNode, base_url => rig(dpdpNode, base_url, {
+    runtime: {
+      // This host can deliver into an existing context and cannot open one.
+      supports: async plan => plan.execution !== 'new',
+      notify: event => notified.push({ node: dpdpNode, event }),
+      inject: async (entry: Entry, context?: string) => {
+        void entry;
+        return { context: context ?? dpdpNode, consumed: true };
+      },
+      todo: async () => {},
+    },
+  }));
+  // A thread the receiver owns: the receiver is the node that admits, so its plan check runs.
+  const outcome = await sender.node.client.send(dpdpNode, {
+    id: 'plan-01', sender: lazuliNode, delivery_kind: '新上下文', msg: '这条要求接收方开一个新上下文。',
+    meta: { thread: { owner: dpdpNode, id: 'plan-thread' } },
+  }, { response: 'async', execution: 'new' });
+  check('plan.refused', outcome.admission === 'refused' && outcome.error?.code === 'unsupported_delivery'
+    ? '' : `the refused plan reported ${outcome.admission}/${outcome.error?.code ?? 'none'}: ${JSON.stringify(outcome)}`);
+  // Both halves of the plan are in the text, because the sender chooses both.
+  check('plan.named', outcome.error?.message.includes('async response') === true
+    && outcome.error.message.includes('new execution') ? '' : `the refusal read: ${outcome.error?.message ?? 'none'}`);
+}
+
 // ---- run --------------------------------------------------------------------
 
 /**
@@ -1777,6 +1808,7 @@ try {
   await phaseAuth();
   await phaseAddressee();
   await phasePendingCopy();
+  await phasePlanRefusal();
   await phaseMaintenance();
 } catch (error) {
   const problem = `unexpected error: ${text(error)}`;

@@ -58,7 +58,14 @@ export class MessageService {
       }
       try {
         if (!supported) {
-          return await this.refuse(tx, identity, digest, request, new OnlyneError('unsupported_delivery', 'The runtime cannot fulfill this delivery plan.'));
+          // The plan is the only thing the sender can change, so the refusal names it: a host
+          // that cannot hold an await or open a new context says so, instead of leaving the
+          // reader to guess which half of the plan it refused.
+          return await this.refuse(tx, identity, digest, request, new OnlyneError(
+            'unsupported_delivery',
+            `This host cannot deliver a ${request.plan.response} response with ${request.plan.execution} execution; nothing was stored.`,
+            { plan: { response: request.plan.response, execution: request.plan.execution } },
+          ));
         }
         this.#ctx.deadline(request.retry_until);
         return await this.append(tx, auth, request, digest, requestDigest, identity, operationKey);

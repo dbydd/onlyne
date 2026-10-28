@@ -89,8 +89,11 @@ function missingTrust(
   const surface = guide === undefined ? '' : `: ${guide.entry.join(' → ')}`;
   const failure = guide === undefined ? details : { ...details, entry: guide.entry };
   if (reason === 'no_record') {
+    // The exchange has a sanctioned start that is not a human step: `trust_begin` on this
+    // node, judged by this node's acquisition policy, and the peer's policy judges the
+    // statement that arrives. Naming only the panel hid that path (tern host report).
     return new OnlyneError('unavailable',
-      `${here} holds no trust record for ${target}, so this request cannot be signed. This agent cannot grant trust; the holder of ${here} completes the pairing through this node's Onlyne surface${surface}. ${retry}`,
+      `${here} holds no trust record for ${target}, so this request cannot be signed. Start the exchange with trust_begin, which the acquisition policy on ${here} judges; ${target} can also start one, and this node's policy judges the arriving statement. A holder can complete the pairing through this node's Onlyne surface${surface}. ${retry}`,
       failure);
   }
   if (reason === 'revoked') {
