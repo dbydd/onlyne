@@ -6,7 +6,7 @@ import { ensureKeyDir } from "@onlyne/node-host/keys";
 import { NetworkDiscovery } from "@onlyne/node-host/network";
 import { resolveLocale, setLocale } from "@onlyne/node-host/i18n";
 import { acquisitionOf } from "./acquire.ts";
-import { AcquisitionLog, approvePeer, handshakeEntry, isTrustThread, judgeApproval, judgementFacts, revokePeer, trustThread, TRUST_THREAD, type ApprovalDeps, type ApprovalJudgement } from "./handshake.ts";
+import { AcquisitionLog, approvePeer, beginPeer, handshakeEntry, isTrustThread, judgeApproval, judgementFacts, revokePeer, trustThread, TRUST_THREAD, type ApprovalDeps, type ApprovalJudgement, type ApprovalRequest } from "./handshake.ts";
 import { commandText as t } from "./ui/command-text.ts";
 import { registerMsgTool } from "./tool.ts";
 import { currentDecision, JudgeDecider } from "./decider.ts";
@@ -46,6 +46,8 @@ export interface PluginRuntime {
 	acquireAccept(node: string, fingerprint: string): Promise<TrustEntry>;
 	/** RFC 0018 §2/§3.1: an agent's revocation. The policy never applies to dropping a peer. */
 	acquireRevoke(node: string): Promise<void>;
+	/** RFC 0018 §2/§3.1: an agent's initiation, judged before the key read that would begin it. */
+	acquireBegin(node: string): Promise<TrustEntry>;
 	refreshDiscovery(): Promise<void>;
 	updateConfig(next: OnlyneConfig): Promise<void>;
 	close(): Promise<void>;
@@ -433,6 +435,23 @@ class OmpRuntime implements PluginRuntime {
 	async acquireRevoke(node: string): Promise<void> {
 		await revokePeer(this.peers, node);
 	}
+	/**
+	 * RFC 0018 §2/§3.1: the agent's initiation of one exchange. The judgement reads only what this
+	 * host already stores; the peer's key is read after it, so a refusal sends nothing.
+	 */
+	async acquireBegin(node: string): Promise<TrustEntry> {
+		const row = await this.node.trust.entry(node);
+		const statement = row === undefined ? undefined : (await this.log.observation(node, row.fingerprint))?.observed;
+		const records = (await this.node.discovery.listRecords()).filter(record => record.node_id === node);
+		const observed = outboundObserved({ statement, records, declared: row?.base_url });
+		const request: ApprovalRequest = {
+			node_id: node,
+			...(row === undefined ? {} : { fingerprint: row.fingerprint }),
+			...(observed === undefined ? {} : { observed }),
+		};
+		const committed = await beginPeer(this.peers, target => this.node.trust.begin(this.node.auth, target), request);
+		return committed.entry;
+	}
 	async trustRotate(): Promise<{ fingerprint: string }> {
 		const identity = await this.node.trust.rotate(this.node.auth);
 		return { fingerprint: identity.fingerprint };
@@ -590,6 +609,24 @@ export async function allPages<T>(read: (cursor?: string) => Promise<Page<T>>): 
 }
 
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+
+/**
+ * RFC 0018 §2.1–2.2: the address an outbound judgement reads for a peer this host may initiate
+ * with. The arrival address this host recorded for the peer's last statement is the strongest
+ * fact it holds; a peer that never sent one is judged at an address discovery verified by
+ * probing, and with no record at all at the address the library's own fallback would connect to.
+ */
+export function outboundObserved(facts: {
+	statement?: string;
+	records: readonly DiscoveryRecord[];
+	declared?: string;
+}): string | undefined {
+	if (facts.statement !== undefined && facts.statement !== "") return facts.statement;
+	const verified = facts.records
+		.filter(record => record.verified_at !== undefined)
+		.sort((left, right) => right.received_at.localeCompare(left.received_at));
+	return verified[0]?.base_url ?? (facts.declared === "" ? undefined : facts.declared);
+}
 
 /** A verified record beats an unverified one; within each class the newest observation wins. */
 function newerRecord(candidate: DiscoveryRecord, kept: DiscoveryRecord): boolean {

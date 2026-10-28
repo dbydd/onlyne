@@ -4,7 +4,7 @@ import { OnlyneError, trustPhase, type Json, type MsgInput, type SendOutcome } f
 import { runDecision } from "./decider.ts";
 import { createDraft, sendDraft } from "./drafts.ts";
 import { observeToolResult } from "./messages.ts";
-import { getRuntime } from "./runtime.ts";
+import { getRuntime, type PluginRuntime } from "./runtime.ts";
 import { toolText } from "./tool-text.ts";
 
 /** Custom entry naming a reply an `await` returned, left pending for the host bridge to confirm. */
@@ -60,12 +60,19 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 				// RFC 0018 §3.1: a trust action is mechanical — no judging, and no action kind
 				// invented for it, because the library executes exactly five and a trust action is
 				// not one of them (client.ts admits send, read, thread, resource and domain).
-				if (op === "trust_accept" || op === "trust_revoke") {
+				if (op === "trust_accept" || op === "trust_revoke" || op === "trust_begin") {
 					if (ctx.agent.kind === "sub") throw new OnlyneError("forbidden", toolText("failure.trust_main_only"));
-					const node = trustField(parsed.data.meta, "node_id");
+					const node = await trustNode(runtime, op, parsed.data.meta);
 					if (op === "trust_revoke") {
 						await runtime.acquireRevoke(node);
 						return { content: [{ type: "text", text: toolText("trust.revoked", { node }) }], details: { result: { op, node_id: node } } };
+					}
+					if (op === "trust_begin") {
+						const entry = await runtime.acquireBegin(node);
+						return {
+							content: [{ type: "text", text: toolText("trust.begun", { node, fingerprint: entry.fingerprint, phase: trustPhase(entry) }) }],
+							details: { result: entry },
+						};
 					}
 					const entry = await runtime.acquireAccept(node, trustField(parsed.data.meta, "fingerprint"));
 					return {
@@ -108,8 +115,9 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 				recordAwaitResult(pi, toolCallId, result, ctx);
 				const visible = visibleResult(result);
 				pi.logger.info("onlyne.msg.result", { kind: input.delivery_kind, ms: Date.now() - started, ...outcomeFacts(result) });
+				const text = op === "member_add" || op === "member_remove" ? membershipText(op, visible, parsed.data.meta) : summary(result);
 				return {
-					content: [{ type: "text", text: `${summary(result)}\n\n${JSON.stringify(visible, null, 2)}` }],
+					content: [{ type: "text", text: `${text}\n\n${JSON.stringify(visible, null, 2)}` }],
 					details: { result: visible },
 				};
 			} catch (error) {
@@ -264,4 +272,41 @@ function trustField(meta: Record<string, unknown> | undefined, field: string): s
 	const value = meta?.[field];
 	if (typeof value !== "string" || value.length === 0) throw new OnlyneError("invalid_request", toolText("failure.trust_fields", { field }));
 	return value;
+}
+
+/**
+ * RFC 0018 §3.1: the peer a trust op names, resolved through the same peer set a send resolves
+ * `meta.to` from. An ambiguous alias names its matches; an unknown one is `not_found` and says
+ * which action asked, because the same alias may be valid for another one.
+ */
+async function trustNode(runtime: PluginRuntime, op: string, meta: Record<string, unknown> | undefined): Promise<string> {
+	const node = trustField(meta, "node_id");
+	try {
+		return await runtime.decider.peerId(node);
+	} catch (error) {
+		if (error instanceof OnlyneError && error.error.code === "not_found") {
+			throw new OnlyneError("not_found", toolText("failure.trust_node_unknown", { action: op, node }), error.error.details);
+		}
+		throw error;
+	}
+}
+
+/** The sentence one membership op earns: the member, the thread, and where a later array send lands. */
+function membershipText(op: "member_add" | "member_remove", result: unknown, meta: Record<string, unknown> | undefined): string {
+	const named = result !== null && typeof result === "object" && "peer" in result && typeof result.peer === "string"
+		? result.peer
+		: threadLabel(meta?.to);
+	return toolText(op === "member_add" ? "thread.member_added" : "thread.member_removed", {
+		member: named,
+		thread: threadLabel(meta?.thread),
+	});
+}
+
+/** A reference as the caller wrote it: one name, or `owner/id` for the record form. */
+function threadLabel(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return "";
+	const owner = "owner" in value ? value.owner : undefined;
+	const id = "id" in value ? value.id : undefined;
+	return typeof owner === "string" && typeof id === "string" ? `${owner}/${id}` : "";
 }

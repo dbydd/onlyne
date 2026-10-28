@@ -111,6 +111,10 @@ export function currentDecision(): DecisionScope | undefined {
  * already include the addressee. Derived from local records alone (RFC 0016 §5), so it costs no
  * judgement. A node may hold several open threads with one peer; the newest is the conversation
  * still in use, and a caller that wants a fresh topic names one or plans `execution: new`.
+ *
+ * Only a thread holding this node and the addressee continues: a thread with a third member is a
+ * group conversation, and folding a private message into it would put a body in front of every
+ * member. A group is addressed by naming it, which is why `meta.thread` wins over this lookup.
  */
 export async function reuseThread(deps: DeciderDeps, to: NodeId): Promise<ThreadRef | undefined> {
 	const self = deps.config.node.id;
@@ -128,7 +132,7 @@ export async function reuseThread(deps: DeciderDeps, to: NodeId): Promise<Thread
 			deps.log?.("onlyne.thread.members_unreadable", { thread: threadKey(thread.thread_ref), error: message(error) });
 			continue;
 		}
-		if (members.includes(to)) return thread.thread_ref;
+		if (members.includes(to) && members.every(member => member === self || member === to)) return thread.thread_ref;
 	}
 	return undefined;
 }
@@ -1352,6 +1356,14 @@ export class JudgeDecider {
 		}
 		if (value.length === 0) throw new OnlyneError("invalid_request", text("error.meta_to_empty"));
 		return this.#peerId(value);
+	}
+
+	/**
+	 * RFC 0018 §3.1: the node a mechanical `op` names, resolved against the same peer set a send
+	 * resolves `meta.to` from, so a name that addresses a peer once addresses it everywhere.
+	 */
+	async peerId(alias: string): Promise<NodeId> {
+		return this.#peerId(alias);
 	}
 
 	/**

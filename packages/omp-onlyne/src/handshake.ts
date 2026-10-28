@@ -1,4 +1,4 @@
-import { OnlyneError, type Json, type Message, type NodeId, type Storage, type ThreadRef, type TrustEntry, type TrustPhase } from "@onlyne/lib";
+import { OnlyneError, type Json, type KeyExchange, type Message, type NodeId, type Storage, type ThreadRef, type TrustEntry, type TrustPhase } from "@onlyne/lib";
 import { evaluateAcquisition, type AcquireInput, type AcquireVerdict, type AcquisitionPolicy } from "./acquire.ts";
 import { bridgeText as t } from "./bridge-text.ts";
 import { hostText } from "./host-text.ts";
@@ -163,7 +163,8 @@ export function handshakeEntry(input: HandshakeInput): { msg: string; trust: { [
 export interface ApprovalJudgement {
 	at: string;
 	node_id: NodeId;
-	fingerprint: string;
+	/** Absent when no fingerprint has been proved yet: an initiation reads the peer's key after the gate. */
+	fingerprint?: string;
 	policy: AcquisitionPolicy;
 	input: AcquireInput;
 	verdict: AcquireVerdict;
@@ -175,7 +176,7 @@ export function judgementFacts(judgement: ApprovalJudgement): Record<string, unk
 	return {
 		at: judgement.at,
 		node: judgement.node_id,
-		fingerprint: judgement.fingerprint,
+		fingerprint: judgement.fingerprint ?? null,
 		policy: judgement.policy.policy,
 		allow: [...judgement.policy.allow],
 		observed: input.observed ?? null,
@@ -206,7 +207,8 @@ export interface ApprovalDeps {
 
 export interface ApprovalRequest {
 	node_id: NodeId;
-	fingerprint: string;
+	/** The fingerprint the peer proved. Omitted by an initiation, whose key read comes after the gate. */
+	fingerprint?: string;
 	/** The statement's own connection address, when the caller is holding it. */
 	observed?: string;
 	/**
@@ -223,7 +225,8 @@ export interface ApprovalRequest {
  * and every recorded address are checked with it (§2.1–2.2).
  */
 export async function judgeApproval(deps: ApprovalDeps, request: ApprovalRequest): Promise<ApprovalJudgement> {
-	const observed = request.observed ?? await deps.observed(request.node_id, request.fingerprint);
+	const observed = request.observed
+		?? (request.fingerprint === undefined ? undefined : await deps.observed(request.node_id, request.fingerprint));
 	const declared = await deps.declared(request.node_id);
 	const input: AcquireInput = {
 		...(observed === undefined || observed === "" ? {} : { observed }),
@@ -256,6 +259,26 @@ export async function approvePeer(deps: ApprovalDeps, nodeId: NodeId, fingerprin
 	const entry = await deps.accept(nodeId, fingerprint);
 	await deps.log.settle(nodeId, fingerprint);
 	return entry;
+}
+
+/**
+ * RFC 0018 §2/§3.1: the agent's `trust_begin`. The judgement reads stored facts only and runs
+ * before `exchange`, which is this path's first outbound request — the key read that starts the
+ * exchange — so a refusal sends nothing and leaves the peer's row untouched. On an allow the
+ * library commits the local approval and mails the statement, and the entry it returns carries
+ * the phase that commit produced.
+ */
+export async function beginPeer(
+	deps: ApprovalDeps,
+	exchange: (nodeId: NodeId) => Promise<KeyExchange>,
+	request: ApprovalRequest,
+): Promise<{ session: KeyExchange; entry: TrustEntry }> {
+	const judgement = await judgeApproval(deps, request);
+	if (!judgement.verdict.allowed) throw approvalRefused(judgement);
+	const session = await exchange(request.node_id);
+	const entry = await session.confirm(session.fingerprint);
+	await deps.log.settle(request.node_id, entry.fingerprint);
+	return { session, entry };
 }
 
 /**
