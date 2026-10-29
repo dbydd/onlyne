@@ -7,7 +7,7 @@ const en = {
 	"param.meta": "Explicit references and operation fields",
 	description: `The only surface for Onlyne messages, threads and resources. There is no CLI and nothing else to look up: call this tool with your intent instead of reading docs or source first.
 
-Shape: { delivery_kind, msg, meta }. delivery_kind names the intent in plain language ("reply to dpdp's greeting", "show this thread", "read that message"). meta carries references you already know: to, thread, context, in_reply_to {thread,seq} or {sender,id}, relation (reply|followup), mentions, message {sender,id} or {thread,seq}, resource {owner,id}, operation, expected_revision, op, title, scope, seq, attention, cursor, page_size, data, domain_id, owner, since, event_id, operation_id.
+Shape: { delivery_kind, msg, meta }. delivery_kind names the intent in plain language ("reply to dpdp's greeting", "show this thread", "read that message"). meta carries references you already know: to, thread, context, in_reply_to {thread,seq} (preferred) or {sender,id}, relation (reply|followup), mentions, message {sender,id} or {thread,seq}, resource {owner,id}, operation, expected_revision, op, title, scope, seq, attention, cursor, page_size, data, domain_id, owner, since, event_id, operation_id.
 
 A send is one call. The result is the delivery fact: admission "accepted" means the receiver recorded the message; wait "timed_out" only means no reply arrived before the wait bound, the message is still delivered; reply_body "withheld" means this context already showed that body. Report the outcome and stop there.
 
@@ -32,21 +32,21 @@ meta.to takes one node or a list of nodes. A list is delivered one target at a t
 
 Use cases, each a complete call:
 
-- Reply to a message you received. Do not name a thread; the receiver lands the reply where the original lives:
-  { delivery_kind: "answer dpdp's question", msg: "Yes, the second set is fine.", meta: { in_reply_to: { sender: "urn:onlyne:agent:dpdp", id: "<message id>" }, relation: "reply" } }
+- Reply to a message you received. Reference it as {thread, seq}, copied from the delivery card — never an id from memory; the receiver lands the reply where the original lives:
+  { delivery_kind: "answer dpdp's question", msg: "Yes, the second set is fine.", meta: { in_reply_to: { thread: "<thread id>", seq: "<seq>" }, relation: "reply" } }
 - Send a fresh message to one peer: { delivery_kind: "greet lazuli", msg: "Hello from the workbench.", meta: { to: "lazuli" } }
 - Send the same note to two peers: { delivery_kind: "notify both", msg: "Report is up.", meta: { to: ["caerulea", "lazuli"] } } — you get one result per target, and a failure on one does not hide the other.
 - Read the whole exchange with one peer: read \`onlyne://conversations/<sender>/<id>\` from a list you got at \`onlyne://conversations\`. Read one message with \`onlyne://messages/<sender>/<id>\`.
 - Check what happened to a message you sent: read \`onlyne://outbound/<message-id>\`; it shows the landing the receiver reported, whether it is accepted, and the reply if one arrived.
 - Look at what a resource offers before operating it: read \`onlyne://resources\` or \`onlyne://resources/<owner>/<id>\`, then send the operation as { delivery_kind: "list the operations of this resource", msg: "show me what it can do", meta: { resource: { owner: "<node>", id: "<resource>" }, operation: "<name>" } }. meta.data carries the arguments; meta.expected_revision requires the revision you read.
-- In a subagent, answer without sending: { delivery_kind: "draft the reply", msg: "Here is the answer.", meta: { op: "draft", to: "dpdp", relation: "reply", in_reply_to: { sender: "urn:onlyne:agent:dpdp", id: "<message id>" } } } returns { draft_id }. The main session sends exactly that draft: { delivery_kind: "send the drafted reply", msg: "send draft", meta: { draft_id: "<draft id>" } }.
+- In a subagent, answer without sending: { delivery_kind: "draft the reply", msg: "Here is the answer.", meta: { op: "draft", to: "dpdp", relation: "reply", in_reply_to: { thread: "<thread id>", seq: "<seq>" } } } returns { draft_id }. The main session sends exactly that draft: { delivery_kind: "send the drafted reply", msg: "send draft", meta: { draft_id: "<draft id>" } }.
 - Approve a peer whose invitation waits for you: { delivery_kind: "accept the trust handshake", msg: "accept the peer", meta: { op: "trust_accept", node_id: "<node>", fingerprint: "<fingerprint>" } }. The acquisition policy judges it first, and a refusal names the rule it matched and leaves the peer as it was.
 - Drop an approval: { delivery_kind: "revoke the trust handshake", msg: "revoke the peer", meta: { op: "trust_revoke", node_id: "<node>" } }. Revocation is never judged by the policy and names no fingerprint.
 - Start an exchange with a discovered peer you are not paired with yet: { delivery_kind: "start the handshake with lazuli", msg: "start the exchange", meta: { op: "trust_begin", node_id: "lazuli" } }. The acquisition policy judges it before anything is sent: a refusal names the rule it matched and leaves the peer as it was, and an allow commits the local approval, sends the statement and reports the phase that followed.
 - Put a peer into a conversation, so the thread carries several members: { delivery_kind: "add dpdp to the plan thread", msg: "add dpdp", meta: { op: "member_add", thread: "<thread id or title>", to: "dpdp" } }; one call per member when meta.to is a list. Take one out with op "member_remove". Adding a member puts them in that thread, so a later meta.to array WITH meta.thread addresses one thread, while without meta.thread each target gets its own.
 - When a send fails with no trusted key, do not retry: the error names both nodes, and a pending invitation is confirmed by the acquisition policy or by that node's holder, not by another send. Report it and stop.
 
-The judge role chooses the action and plan from your intent, so never invent message ids, idempotency keys or revisions. A reply or followup states its relation; omitting it is rejected rather than assumed. A reply targets the original reply authority, so a conflicting to is rejected. A subagent session reads its own slice (onlyne://threads, onlyne://inbox, onlyne://contexts) and returns the result to the main session, which does the sending.`,
+The judge role chooses the action and plan from your intent, so never invent message ids, idempotency keys or revisions. Reference a message as {thread, seq}; when a call states neither a reference nor a relation and this context has unanswered inbound messages, the judge asks which one it answers. A reply targets the original reply authority, so a conflicting to is rejected. A subagent session reads its own slice (onlyne://threads, onlyne://inbox, onlyne://contexts) and returns the result to the main session, which does the sending.`,
 	"summary.no_result": "Onlyne returned no structured result.",
 	"summary.addressee": "Sent to {to}",
 	"summary.addressee_self": "Sent to yourself",
@@ -89,7 +89,7 @@ const zh: Record<keyof typeof en, string> = {
 	"param.meta": "显式引用与操作字段",
 	description: `Onlyne 消息、thread 与资源的唯一入口。没有 CLI，也没有别处要查：把意图交给这个工具，不要先去读文档或源码。
 
-形状：{ delivery_kind, msg, meta }。delivery_kind 用日常语言说出意图（“回复 dpdp 的问候”“看看这个 thread”“读那条消息”）。meta 放你已经知道的引用：to、thread、context、in_reply_to {thread,seq} 或 {sender,id}、relation（reply|followup）、mentions、message {sender,id} 或 {thread,seq}、resource {owner,id}、operation、expected_revision、op、title、scope、seq、attention、cursor、page_size、data、domain_id、owner、since、event_id、operation_id。
+形状：{ delivery_kind, msg, meta }。delivery_kind 用日常语言说出意图（“回复 dpdp 的问候”“看看这个 thread”“读那条消息”）。meta 放你已经知道的引用：to、thread、context、in_reply_to {thread,seq}（首选）或 {sender,id}、relation（reply|followup）、mentions、message {sender,id} 或 {thread,seq}、resource {owner,id}、operation、expected_revision、op、title、scope、seq、attention、cursor、page_size、data、domain_id、owner、since、event_id、operation_id。
 
 发送是一次调用。结果就是投递事实：admission "accepted" 表示接收方已经记录这条消息；wait "timed_out" 只表示等待期内没有回信，消息本身已经投递；reply_body "withheld" 表示这个上下文已经展示过那段正文。报告结果，到此为止。
 
@@ -114,21 +114,21 @@ meta.to 接受一个节点或一组节点。一组会逐个目标投递，每个
 
 用例，每个都是完整调用：
 
-- 回复你收到的消息。不要指名 thread；接收方会把回信放到原消息所在的 thread：
-  { delivery_kind: "回答 dpdp 的问题", msg: "可以，第二组没问题。", meta: { in_reply_to: { sender: "urn:onlyne:agent:dpdp", id: "<message id>" }, relation: "reply" } }
+- 回复你收到的消息。引用写成 {thread, seq}，从投递卡片上照抄——绝不凭记忆写 id；接收方会把回信放到原消息所在的 thread：
+  { delivery_kind: "回答 dpdp 的问题", msg: "可以，第二组没问题。", meta: { in_reply_to: { thread: "<thread id>", seq: "<seq>" }, relation: "reply" } }
 - 给一个 peer 发新消息：{ delivery_kind: "向 lazuli 问好", msg: "来自工作台的问候。", meta: { to: "lazuli" } }
 - 把同一段话发给两个 peer：{ delivery_kind: "通知双方", msg: "报告已上传。", meta: { to: ["caerulea", "lazuli"] } } —— 每个目标各得一条结果，某个目标失败不会掩盖另一个。
 - 读与某个 peer 的整段往来：先读 \`onlyne://conversations\` 拿到一条，再读 \`onlyne://conversations/<sender>/<id>\`。读单条消息用 \`onlyne://messages/<sender>/<id>\`。
 - 查你发出的消息后来怎样了：读 \`onlyne://outbound/<message-id>\`；它显示接收方报告的落点、是否被接纳，以及回信（如果到了）。
 - 操作资源前先看它提供什么：读 \`onlyne://resources\` 或 \`onlyne://resources/<owner>/<id>\`，然后发操作 { delivery_kind: "列出该资源的操作", msg: "看看它能做什么", meta: { resource: { owner: "<node>", id: "<resource>" }, operation: "<name>" } }。meta.data 带参数；meta.expected_revision 要求版本与你读到的一致。
-- 在子代理里，只写不发：{ delivery_kind: "起草回复", msg: "这是答案。", meta: { op: "draft", to: "dpdp", relation: "reply", in_reply_to: { sender: "urn:onlyne:agent:dpdp", id: "<message id>" } } } 返回 { draft_id }。主会话原样发出这份草稿：{ delivery_kind: "发出起草的回复", msg: "发送草稿", meta: { draft_id: "<draft id>" } }。
+- 在子代理里，只写不发：{ delivery_kind: "起草回复", msg: "这是答案。", meta: { op: "draft", to: "dpdp", relation: "reply", in_reply_to: { thread: "<thread id>", seq: "<seq>" } } } 返回 { draft_id }。主会话原样发出这份草稿：{ delivery_kind: "发出起草的回复", msg: "发送草稿", meta: { draft_id: "<draft id>" } }。
 - 批准一个在等你决定的对端：{ delivery_kind: "批准信任握手", msg: "批准这个对端", meta: { op: "trust_accept", node_id: "<node>", fingerprint: "<fingerprint>" } }。先由获取策略判定；被拒时错误里写明命中的规则，对端保持原样。
 - 撤回一次批准：{ delivery_kind: "撤销信任握手", msg: "撤销这个对端", meta: { op: "trust_revoke", node_id: "<node>" } }。撤销永远不受策略限制，也不需要指纹。
 - 与一个已发现但尚未配对的对端发起交换：{ delivery_kind: "与 lazuli 开始握手", msg: "开始交换", meta: { op: "trust_begin", node_id: "lazuli" } }。获取策略会在发出任何请求之前判定：被拒时错误里写明命中的规则，对端保持原样；放行时提交本地批准、发出陈述，并报告其后的信任阶段。
 - 把一个对端加进一段对话，让这个 thread 带多个成员：{ delivery_kind: "把 dpdp 加进 plan thread", msg: "加上 dpdp", meta: { op: "member_add", thread: "<thread id 或标题>", to: "dpdp" } }；meta.to 是列表时每个成员各一次调用。用 op "member_remove" 移出。加入成员就是把他放进那个 thread，所以之后带 meta.thread 的 meta.to 数组只指向一个 thread，不带 meta.thread 时每个目标各得一个。
 - 发送失败且没有可信密钥时，不要重试：错误里写明了两个节点；待确认的邀请由获取策略或那一侧的持有者确认，再发一次不会。报告它，然后停下。
 
-动作和执行计划由 judge 角色根据你的意图选择，所以永远不要自己编 message id、幂等键或版本号。回信或 followup 必须说明关系；省略会被拒绝，而不是被假定。回信只针对原来的回信权限方，所以冲突的 to 会被拒绝。子代理会话读自己的切片（onlyne://threads、onlyne://inbox、onlyne://contexts），把结果交回主会话，由主会话发送。`,
+动作和执行计划由 judge 角色根据你的意图选择，所以永远不要自己编 message id、幂等键或版本号。引用消息一律写成 {thread, seq}；当一次调用既没有引用也没有 relation、而本上下文还有未答复的入站消息时，由 judge 判断它在回答哪一条。回信只针对原来的回信权限方，所以冲突的 to 会被拒绝。子代理会话读自己的切片（onlyne://threads、onlyne://inbox、onlyne://contexts），把结果交回主会话，由主会话发送。`,
 	"summary.no_result": "Onlyne 没有返回结构化结果。",
 	"summary.addressee": "已发给 {to}",
 	"summary.addressee_self": "已发给自己",

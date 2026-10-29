@@ -1,6 +1,6 @@
 {
 	"name": "omp-onlyne",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Onlyne v3 for OMP: one msg tool, thread-aware attention and SystemOne delivery decisions",
 	"type": "module",
 	"main": "./index.ts",
@@ -39,8 +39,8 @@
 		"test": "bun test"
 	},
 	"dependencies": {
-		"@onlyne/lib": "^3.0.0",
-		"@onlyne/node-host": "^3.0.0"
+		"@onlyne/lib": "^3.1.0",
+		"@onlyne/node-host": "^3.1.0"
 	},
 	"peerDependencies": {
 		"@oh-my-pi/pi-agent-core": "*",

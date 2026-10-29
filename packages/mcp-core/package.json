@@ -1,6 +1,6 @@
 {
   "name": "@onlyne/mcp-core",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "MCP client session and resource driver that maps tools/list and tools/call onto Onlyne resource operations",
   "type": "module",
   "main": "./src/index.ts",
@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "@onlyne/lib": "^3.0.0"
+    "@onlyne/lib": "^3.1.0"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

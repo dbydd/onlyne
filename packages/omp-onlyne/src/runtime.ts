@@ -202,6 +202,8 @@ class OmpRuntime implements PluginRuntime {
 			listJoinedThreads: async () => (await allPages(cursor => this.node.threads.joined(this.node.auth, { page_size: 100, cursor })))
 				.filter(thread => !isTrustThread(this.config.node.id, thread.thread_ref)),
 			listMessages: (thread, cursor) => this.node.messages.list(this.node.auth, thread, { attention: "thread", page_size: 100, cursor }),
+			listInbox: async () => (await allPages(cursor => this.node.messages.inbox(this.node.auth, { page_size: 100, cursor })))
+				.map(row => ({ context: row.context, attention: row.attention })),
 			threadMembers: async thread => (await this.node.threads.describe(this.node.auth, thread)).members.map(member => member.peer),
 		});
 		const bridge = createRuntimeBridge({ pi: this.pi, main: this.main, decider: this.decider, contexts: this.contexts, nodeId: this.config.node.id });

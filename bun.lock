@@ -7,7 +7,7 @@
     },
     "packages/im-core": {
       "name": "@onlyne/im-core",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "dependencies": {
         "@onlyne/lib": "^3.0.0",
       },
@@ -18,7 +18,7 @@
     },
     "packages/im-fake": {
       "name": "@onlyne/im-fake",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "dependencies": {
         "@onlyne/im-core": "^3.0.0",
         "@onlyne/lib": "^3.0.0",
@@ -30,7 +30,7 @@
     },
     "packages/im-gateway": {
       "name": "@onlyne/im-gateway",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "bin": {
         "onlyne-im-gateway": "src/main.ts",
         "onlyne-im-migrate": "src/migrate-main.ts",
@@ -61,7 +61,7 @@
     },
     "packages/im-lark": {
       "name": "@onlyne/im-lark",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "dependencies": {
         "@larksuiteoapi/node-sdk": "^1.76.0",
         "@onlyne/im-core": "^3.0.0",
@@ -75,7 +75,7 @@
     },
     "packages/im-qq": {
       "name": "@onlyne/im-qq",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "dependencies": {
         "@onlyne/im-core": "^3.0.0",
         "@onlyne/lib": "^3.0.0",
@@ -87,7 +87,7 @@
     },
     "packages/im-wechat": {
       "name": "@onlyne/im-wechat",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "dependencies": {
         "@onlyne/im-core": "^3.0.0",
         "@onlyne/lib": "^3.0.0",
@@ -99,7 +99,7 @@
     },
     "packages/lib": {
       "name": "@onlyne/lib",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "devDependencies": {
         "@types/bun": "^1.3.0",
         "typescript": "^5.9.0",
@@ -107,7 +107,7 @@
     },
     "packages/mcp-core": {
       "name": "@onlyne/mcp-core",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.32.2",
         "@onlyne/lib": "workspace:*",
@@ -119,7 +119,7 @@
     },
     "packages/mcp-gateway": {
       "name": "@onlyne/mcp-gateway",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "bin": "./src/main.ts",
       "dependencies": {
         "@onlyne/im-gateway": "workspace:*",
@@ -134,7 +134,7 @@
     },
     "packages/node-host": {
       "name": "@onlyne/node-host",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "dependencies": {
         "@onlyne/lib": "^3.0.0",
         "bonjour-service": "^1.4.4",
@@ -146,7 +146,7 @@
     },
     "packages/omp-onlyne": {
       "name": "omp-onlyne",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@onlyne/lib": "^3.0.0",
         "@onlyne/node-host": "workspace:*",

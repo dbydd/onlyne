@@ -43,6 +43,12 @@ instead; any other platform has a single transport and refuses `websocket`. `cha
 defaults to `/im/webhook` and addresses the callback only: with the gateway socket selected no
 path is routed to the connector, and the connector's status reports the transport it runs.
 
+The node publishes an execution context directory at `/onlyne/v3/contexts`. `contexts` names the
+aliases it lists and defaults to `["main"]` — the alias a sender's send resolves when it continues
+work on this gateway without naming a context, so a drafted reply needs no explicit
+`meta.context`. An explicit empty array publishes an empty directory. The gateway consumes no
+model context: the aliases are delivery labels, and a reply lands in the conversation's thread.
+
 Credentials resolve in this order: `channel.credential`, `channel.credential_file`, then the
 platform variables. Lark uses `FEISHU_APP_ID` with `FEISHU_APP_SECRET`. QQ uses
 `QQ_BOT_APP_ID` with `QQ_BOT_APP_SECRET`. WeChat uses `WECHAT_ILINK_BOT_TOKEN`. A missing

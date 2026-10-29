@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Entry, Page, Thread, ThreadRef } from "@onlyne/lib";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { fitState, needsReplyOf, JudgeDecider, knownPeers, reuseThread, type DeciderDeps, type DecisionScope, type PeerRecord } from "../src/decider.ts";
+import { fitState, needsReplyOf, JudgeDecider, knownPeers, reuseThread, type Answers, type DeciderDeps, type DecisionScope, type PeerRecord, type Questions } from "../src/decider.ts";
 import type { ContextRegistry } from "../src/store.ts";
 import type { ContextRecord, OnlyneConfig } from "../src/types.ts";
 
@@ -59,6 +59,8 @@ interface Stubs {
 	trust?: Array<{ node_id: string; phase: string }>;
 	members?: Record<string, string[]>;
 	peers?: PeerRecord[];
+	inbox?: Array<{ context?: string; attention: { entry?: Entry; disposition?: string } }>;
+	judge?: (state: Record<string, unknown>, questions: Questions) => Promise<Answers>;
 }
 
 function decider(records: ContextRecord[] = [], stubs: Stubs = {}): JudgeDecider {
@@ -77,7 +79,14 @@ function decider(records: ContextRecord[] = [], stubs: Stubs = {}): JudgeDecider
 		listTrust: async () => stubs.trust ?? [],
 		threadMembers: async ref => members[ref.id] ?? [],
 		listReceiverContexts: async () => [],
+		listInbox: async () => stubs.inbox ?? [],
+		...(stubs.judge === undefined ? {} : { judge: stubs.judge }),
 	});
+}
+
+/** A judge stub that answers every question key from one defaults table. */
+function judged(defaults: Record<string, string>): NonNullable<Stubs["judge"]> {
+	return async (_state, questions) => Object.fromEntries(Object.keys(questions).map(key => [key, { choice: defaults[key] }])); 
 }
 
 function scope(meta: Record<string, unknown>, readOnly = false): DecisionScope {
@@ -250,6 +259,80 @@ describe("reply references from the field reports", () => {
 		expect(messages[0]).not.toContain("belongs to its original");
 		expect(messages[1]).not.toContain("belongs to its original");
 	});
+
+	// caerulea reply authority: the ref and the authority both carry the resolved id, so a
+	// short name on one side never reads as a second target. `cc` is the only unambiguous
+	// short alias in the fixture; `b` is shared by two nodes and stays ambiguous by design.
+	test("a short-name reference resolves to the same identity as the target", async () => {
+		const des = decider([], { judge: judged({ intent: "communicate" }) });
+		const action = await des.decide(scope({ to: unique, in_reply_to: { sender: "cc", id: "m-1" }, relation: "reply", response: "async", execution: "new" }));
+		expect(action).toMatchObject({ kind: "send", to: unique, in_reply_to: { sender: unique, id: "m-1" } });
+	});
+
+	// decider-auto-in-reply-to, case 2: a reference the node can prove wrong is refused before
+	// the wire, with the sender the id really belongs to.
+	test("an id that belongs to another sender is refused with the actual owner", async () => {
+		const des = decider([], {
+			inbox: [{ attention: { entry: { ...entry, message: { id: "m-9", sender: other, delivery_kind: "ask", msg: "hi" } } } }],
+			judge: judged({ intent: "communicate" }),
+		});
+		await expect(des.decide(scope({ to: unique, in_reply_to: { sender: unique, id: "m-9" }, relation: "reply", response: "async", execution: "new" })))
+			.rejects.toThrow("belongs to");
+	}
+	);
+});
+
+describe("O-2A original selection", () => {
+	const inbound: Entry = { ...entry, message: { id: "m-9", sender: other, delivery_kind: "ask", msg: "请确认第二组参数。" } };
+
+	test("the judge picks the original and the plugin copies its exact ref", async () => {
+		const asked: string[][] = [];
+		const des = decider([], {
+			inbox: [{ attention: { entry: inbound } }],
+			judge: async (state, questions) => {
+				asked.push(Object.keys(questions));
+				return judged({ intent: "communicate", original: "answer_1", relation: "reply" })(state, questions);
+			},
+		});
+		const action = await des.decide(scope({ to: other, response: "async", execution: "new" }));
+		expect(asked.some(keys => keys.includes("original"))).toBe(true);
+		expect(action).toMatchObject({ kind: "send", to: other, in_reply_to: { sender: other, id: "m-9" }, relation: "reply" });
+	});
+
+	test("new_message proceeds without a reference", async () => {
+		const des = decider([], {
+			inbox: [{ attention: { entry: inbound } }],
+			judge: judged({ intent: "communicate", original: "new_message" }),
+		});
+		const action = await des.decide(scope({ to: other, response: "async", execution: "new" }));
+		expect(action).toMatchObject({ kind: "send", to: other, response: "async", execution: "new" });
+		expect((action as { in_reply_to?: unknown }).in_reply_to).toBeUndefined();
+	});
+
+	test("an empty candidate set asks nothing and sends as new", async () => {
+		const asked: string[][] = [];
+		const des = decider([], {
+			judge: async (state, questions) => {
+				asked.push(Object.keys(questions));
+				return judged({ intent: "communicate" })(state, questions);
+			},
+		});
+		await des.decide(scope({ to: other, response: "async", execution: "new" }));
+		expect(asked.some(keys => keys.includes("original"))).toBe(false);
+	});
+
+	test("a record delivered to another context is not this call's candidate", async () => {
+		const asked: string[][] = [];
+		const des = decider([{ ...record({ alias: "ctx-1", agent_id: "Other" }) }], {
+			inbox: [{ context: "ctx-1", attention: { entry: inbound } }],
+			judge: async (state, questions) => {
+				asked.push(Object.keys(questions));
+				return judged({ intent: "communicate" })(state, questions);
+			},
+		});
+		await des.decide(scope({ to: other, response: "async", execution: "new" }));
+		expect(asked.some(keys => keys.includes("original"))).toBe(false);
+	});
 });
 
 describe("hierarchical decision nodes", () => {
@@ -305,6 +388,7 @@ describe("identity outlives liveness", () => {
 			listTrust: async () => [{ node_id: other, phase: "exchanged", base_url: "http://127.0.0.1:7802/onlyne/v3" }],
 			threadMembers: async () => [node, other],
 			listReceiverContexts: async () => [],
+		listInbox: async () => [],
 		} as unknown as DeciderDeps;
 		// Both questions read the same source, so the peer cannot resolve for one and vanish
 		// from the other (audit §2.2).

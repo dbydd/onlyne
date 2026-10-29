@@ -1,6 +1,6 @@
 {
   "name": "@onlyne/im-qq",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "QQ official Bot OpenAPI v2 connector for the Onlyne IM gateway: gateway WebSocket or webhook events, text and markdown messages, recall and typing",
   "type": "module",
   "main": "./src/index.ts",
@@ -25,8 +25,8 @@
     "test": "bun tests/verify.ts && bun tests/send.ts && bun tests/webhook.ts && bun tests/gateway.ts"
   },
   "dependencies": {
-    "@onlyne/im-core": "^3.0.0",
-    "@onlyne/lib": "^3.0.0"
+    "@onlyne/im-core": "^3.1.0",
+    "@onlyne/lib": "^3.1.0"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

@@ -1,6 +1,6 @@
 {
   "name": "@onlyne/im-lark",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Lark (Feishu) connector for the Onlyne IM gateway: messages, cards, reactions, recall and attachments",
   "type": "module",
   "main": "./src/index.ts",
@@ -26,9 +26,9 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.76.0",
-    "@onlyne/im-core": "^3.0.0",
-    "@onlyne/lib": "^3.0.0",
-    "@onlyne/node-host": "^3.0.0"
+    "@onlyne/im-core": "^3.1.0",
+    "@onlyne/lib": "^3.1.0",
+    "@onlyne/node-host": "^3.1.0"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

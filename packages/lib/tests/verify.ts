@@ -1683,8 +1683,10 @@ async function phaseAuth(): Promise<void> {
 /**
  * A caller names an alias and the decision resolves it before delivery, while the receipt
  * names the thread owner — this node, because it started the conversation. The outcome has to
- * carry both spellings, or the alias send is indistinguishable from a message this node
- * addressed to itself.
+ * carry the resolved addressee even when the spelling matched, or an initiator's send is
+ * indistinguishable from a message this node addressed to itself; the alias's own spelling
+ * rides beside it. And the entry has to actually reach the addressee: the grant push teaches
+ * the peer the thread, its reconcile pulls the entry, and the peer's inbox holds it.
  */
 async function phaseAddressee(): Promise<void> {
   const aliases: Record<string, string> = { dpdp: dpdpNode };
@@ -1696,15 +1698,99 @@ async function phaseAddressee(): Promise<void> {
       return { kind: 'send', to, response: 'async', execution: 'existing' };
     },
   }));
-  serve(dpdpNode, base_url => rig(dpdpNode, base_url));
+  const peer = serve(dpdpNode, base_url => rig(dpdpNode, base_url));
 
   const aliased = await sender.node.client.msg({ delivery_kind: '问候', msg: '你好 dpdp。', meta: { to: 'dpdp' } }) as SendOutcome;
   check('client.msg.resolved', aliased.admission === 'accepted' && aliased.requested === 'dpdp' && aliased.resolved === dpdpNode
     && aliased.receipt?.thread_ref.owner === lazuliNode
     ? '' : `an alias send reported ${JSON.stringify(aliased)}`);
   const named = await sender.node.client.msg({ delivery_kind: '问候', msg: '你好 dpdp。', meta: { to: dpdpNode } }) as SendOutcome;
-  check('client.msg.named', named.admission === 'accepted' && named.resolved === undefined && named.requested === undefined
+  check('client.msg.named', named.admission === 'accepted' && named.resolved === dpdpNode && named.requested === undefined
     ? '' : `a node-id send reported ${JSON.stringify(named)}`);
+  // The receipt alone cannot prove arrival: the addressee's own inbox must hold the entry.
+  await peer.node.client.reconcile();
+  const inbox = await peer.node.messages.inbox({ actor: dpdpNode }, {});
+  const held = inbox.items.find(row => row.attention.message_ref.id === aliased.receipt?.message_ref.id);
+  check('client.msg.peer-inbox', held !== undefined && held.attention.entry?.message.msg === '你好 dpdp。'
+    ? '' : `the addressee held ${inbox.items.length} inbox rows without the sent message`);
+}
+
+/**
+ * A send into a thread this node owns can reach its addressee only through a signed grant or
+ * a signed reconcile, so a peer without a trust row can never see the entry. Such a send is
+ * refused before anything is stored — `not_found`, no outbound record, nothing for the window
+ * to re-drive — instead of an `accepted` that only the grant push could have earned.
+ */
+async function phaseInitiateTrust(): Promise<void> {
+  // phaseAuth's keyed rig is local to that phase; this one needs only the signing half.
+  const signing = (node_id: string, base_url: string, extra: Partial<Plugins> = {}): Rig => {
+    const storage = new MemoryStorage();
+    const shared: Shared = { injected: [], allow: true };
+    const material = generateKeyMaterial();
+    const plugins: Plugins = {
+      storage,
+      resolve: async (node: string): Promise<Target> => ({ node_id: node, base_url: urls[node] ?? base_url }),
+      authenticate: async (): Promise<Auth | null> => null,
+      decide: async () => { throw new OnlyneError('decision_unavailable', 'No plugin decision.'); },
+      keys: async () => material,
+      mayAdmit: async () => true,
+      inboundThread: async () => true,
+      runtime: {
+        supports: async () => true,
+        notify: event => notified.push({ node: node_id, event }),
+        inject: async (entry: Entry, context?: string) => {
+          shared.injected.push(entry);
+          return { context: context ?? node_id, consumed: shared.allow };
+        },
+        todo: async () => {},
+      },
+      ...extra,
+    };
+    const options: NodeOptions = { node_id, base_url, plugins, now: () => clock.value, id: () => crypto.randomUUID(), wait_ms: 5_000 };
+    return { node: new OnlyneNode(options), storage, shared, recreate: () => new OnlyneNode({ ...options }) };
+  };
+  const decide = { decide: async (input: { meta?: Record<string, Json> }) => {
+    const to = input.meta?.to;
+    if (typeof to !== 'string') throw new OnlyneError('decision_unavailable', 'The input named no target.');
+    return { kind: 'send' as const, to, response: 'async' as const, execution: 'existing' as const };
+  } };
+  let discoveryDown = false;
+  const start = serve(lazuliNode, base_url => signing(lazuliNode, base_url, {
+    ...decide,
+    resolve: async node => {
+      if (discoveryDown && node === dpdpNode) throw new OnlyneError('not_found', 'No discovery record names this node.');
+      return { node_id: node, base_url: urls[node] ?? base_url };
+    },
+  }));
+  const peer = serve(dpdpNode, base_url => signing(dpdpNode, base_url));
+  await start.node.trust.request({ actor: lazuliNode }, dpdpNode, (await peer.node.keys.describe())!.fingerprint);
+  await peer.node.trust.request({ actor: dpdpNode }, lazuliNode, (await start.node.keys.describe())!.fingerprint);
+
+  const first = await start.node.client.msg({ delivery_kind: '问候', msg: '你好 dpdp。', meta: { to: dpdpNode } }) as SendOutcome;
+  check('initiate.trust.paired', first.admission === 'accepted' && first.resolved === dpdpNode
+    ? '' : `a paired initiate reported ${JSON.stringify(first)}`);
+
+  // The discovery catalog answers not_found, but the trust row carries the peer's address:
+  // delivery falls back to it, and the address it proves is written back into the catalog,
+  // so a peer that moved (or a catalog that expired) stays reachable through the pairing.
+  discoveryDown = true;
+  const third = await start.node.client.msg({ delivery_kind: '问候', msg: '换条路也要送到。', meta: { to: dpdpNode } }) as SendOutcome;
+  check('address.trust-fallback', third.admission === 'accepted'
+    ? '' : `a send with an empty discovery catalog reported ${JSON.stringify(third)}`);
+  const written = await start.storage.transaction(async tx => tx.scan<{ node_id: string; source: string }>(key('discovery') + '/'));
+  check('address.trust-fallback.written', written.some(row => row.value.node_id === dpdpNode && row.value.source === 'trust-row')
+    ? '' : `the fallback left no discovery record: ${JSON.stringify(written.map(row => row.value))}`);
+
+  await start.storage.transaction(async tx => tx.delete(key('trust', dpdpNode)));
+  const second = await start.node.client.msg({ delivery_kind: '问候', msg: '还在吗?', meta: { to: dpdpNode } })
+    .then(() => 'accepted', error => error instanceof OnlyneError ? error.error.code : String(error));
+  check('initiate.trust.deleted', second === 'not_found'
+    ? '' : `a send to an unpaired peer reported ${second}`);
+  const stuck = await start.storage.transaction(async tx =>
+    (await tx.scan<{ state: string }>(key('outbound') + '/'))
+      .filter(row => row.value.state === 'pending' || row.value.state === 'unknown'));
+  check('initiate.trust.deleted.no-retry', stuck.length === 0
+    ? '' : `the refused send left ${stuck.length} records for the window to re-drive`);
 }
 
 /**
@@ -1807,6 +1893,7 @@ try {
   await phaseSettlement();
   await phaseAuth();
   await phaseAddressee();
+  await phaseInitiateTrust();
   await phasePendingCopy();
   await phasePlanRefusal();
   await phaseMaintenance();

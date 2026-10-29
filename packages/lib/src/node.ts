@@ -9,6 +9,7 @@ import { DiscoveryService } from './discovery.ts';
 import { OnlyneClient } from './client.ts';
 import { KeyService, TrustService } from './keys.ts';
 import { FetchTransport } from './transport.ts';
+import { composeResolver } from './resolve.ts';
 import { createHttpHandler } from './http.ts';
 import { HistoryService } from './history.ts';
 
@@ -35,8 +36,15 @@ export class OnlyneNode {
     this.history = new HistoryService(ctx);
     this.keys = new KeyService(ctx);
     this.trust = new TrustService(ctx, this.keys);
+    this.discovery = new DiscoveryService(ctx);
     const transport = options.plugins.transport ?? new FetchTransport(
-      options.plugins.resolve,
+      // The composed resolver is the one address authority (resolve.ts): discovery first,
+      // the trust row as the fallback that writes a moved peer's address back.
+      composeResolver({
+        resolve: options.plugins.resolve,
+        trust: this.trust,
+        observe: (base_url, source, expectedNode) => this.discovery.observe(base_url, source, expectedNode),
+      }),
       fetch,
       options.plugins.keys === undefined ? undefined : { trust: this.trust },
     );
@@ -44,7 +52,6 @@ export class OnlyneNode {
     // transport instead of reaching the network on its own.
     this.resources = createResourceService(ctx, transport);
     this.domains = new DomainService(ctx);
-    this.discovery = new DiscoveryService(ctx);
     this.transport = transport;
     this.client = new OnlyneClient(ctx, transport, this.messages, this.threads, this.resources, this.domains, this.trust);
     this.trust.bindLoop(this.client);

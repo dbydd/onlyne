@@ -143,6 +143,7 @@ function peerDecider(peers: PeerRecord[]): JudgeDecider {
 		listPeers: async () => peers,
 		listTrust: async () => [],
 		listReceiverContexts: async () => [],
+		listInbox: async () => [],
 	});
 }
 
@@ -187,6 +188,7 @@ function rig(): Rig {
 		listPeers: async () => peers,
 		listTrust: async () => [],
 		listReceiverContexts: async () => [],
+		listInbox: async () => [],
 	};
 	const decider = new JudgeDecider(deps);
 	const grants: string[] = [];

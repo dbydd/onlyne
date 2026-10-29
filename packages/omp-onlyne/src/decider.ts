@@ -20,6 +20,7 @@ import {
 	OnlyneError,
 } from "@onlyne/lib";
 import { getLocale } from "@onlyne/node-host/i18n";
+import { isTrustThread } from "./handshake.ts";
 import type { ContextRecord, OnlyneConfig } from "./types.ts";
 import { canAnswer, type ContextRegistry } from "./store.ts";
 import { text } from "./decider-text.ts";
@@ -32,14 +33,14 @@ interface ChoiceQuestion {
 	criteria: Record<string, string>;
 }
 
-type Questions = Record<string, ChoiceQuestion>;
+export type Questions = Record<string, ChoiceQuestion>;
 
 interface ChoiceAnswer {
 	type?: string;
 	choice?: string;
 }
 
-type Answers = Record<string, ChoiceAnswer | undefined>;
+export type Answers = Record<string, ChoiceAnswer | undefined>;
 
 /** A decision input that either carries its records or states why it has none. */
 type Source<T> = { available: true; value: T } | { available: false; reason: string };
@@ -190,9 +191,13 @@ export interface DeciderDeps {
 	listPeers(): Promise<PeerRecord[]>;
 	/** Every trust row this node holds, in any phase. Identity outlives a discovery record. */
 	listTrust(): Promise<Array<{ node_id: NodeId; phase: string; base_url?: string }>>;
+	/** The inbound records this node holds; O-2A's candidate set reads the entries from them. */
+	listInbox(): Promise<Array<{ context?: string; attention: { entry?: Entry; disposition?: string } }>>;
 	/** Contexts the target node publishes for `execution: existing`. */
 	listReceiverContexts(nodeId: NodeId): Promise<ReceiverContext[]>;
 	resourceQuery?(meta: Record<string, Json>): Promise<ResourceReadQuery>;
+	/** Test seam: answers the judge's questions without a model. Production never sets it. */
+	judge?: (state: Row, questions: Questions) => Promise<Answers>;
 }
 
 const TODO_ENTRY = "mouriya.omp.todo-more";
@@ -213,6 +218,8 @@ const INBOUND_CONTEXT_CAP = 3;
 /** Threads and entries a target question scans for recent unanswered inbound messages. */
 const RECENT_INBOUND_THREADS = 3;
 const RECENT_INBOUND_PER_THREAD = 3;
+/** The O-2A candidate list is capped; the judge reads one line per candidate. */
+const REPLY_CANDIDATES = 5;
 /** Newest branch rows that may reach the trigger derivation; older work is history, not decision material. */
 const HISTORY_ROWS = 40;
 /** One row's text cap: a pasted terminal dump must not crowd out the rest of the state. */
@@ -337,8 +344,15 @@ export class JudgeDecider {
 
 	/** Nodes O-2A / O-3A / O-3A-Ctx for a send, reply or followup. */
 	async #communicate(scope: DecisionScope, meta: Record<string, Json>): Promise<Action> {
-		const reply = await this.#reply(meta);
+		let reply = await this.#reply(meta);
 		const explicitRelation = relation(meta);
+		if (reply === undefined && explicitRelation === undefined) {
+			// Node O-2A: no reference and no relation. The judge still answers one question —
+			// whether this call answers one of the inbound messages this context can see — and
+			// the plugin copies the exact ref from the record it names. Candidates are evidence
+			// for the question only: recency or being the sole pending message never binds one.
+			reply = await this.#originalQuestion(scope);
+		}
 		const lockedRelation = reply !== undefined
 			? explicitRelation ?? await this.#relationQuestion(scope, meta)
 			: undefined;
@@ -387,6 +401,102 @@ export class JudgeDecider {
 			response: plan.response,
 			execution: plan.execution,
 		};
+	}
+
+	/**
+	 * Node O-2A: the original this call answers. The judge chooses among the inbound records
+	 * this context can see and nobody has answered yet, plus `new_message`; the plugin copies
+	 * the exact MessageRef and the owner-attested reply authority from the record it names, so
+	 * no message id ever travels from the model to the wire.
+	 */
+	async #originalQuestion(scope: DecisionScope): Promise<{ ref: MessageRef; authority: NodeId; thread_ref?: ThreadRef } | undefined> {
+		const candidates = await this.#replyCandidates(scope);
+		if (candidates.length === 0) return undefined;
+		const started = Date.now();
+		const keyOf = (index: number): string => `answer_${index + 1}`;
+		const criteria: Record<string, string> = { new_message: text("judge.original.new") };
+		const facts = candidates.map((entry, index) => {
+			criteria[keyOf(index)] = text("judge.original.candidate", {
+				from: entry.message.sender, kind: entry.message.delivery_kind,
+				thread: threadKey(entry.thread_ref), seq: entry.seq, body: boundText(entry.message.msg),
+			});
+			return { key: keyOf(index), from: entry.message.sender, kind: entry.message.delivery_kind, thread: threadKey(entry.thread_ref), seq: entry.seq };
+		});
+		const answers = await this.#judge(
+			scope.ctx,
+			{ focus: this.#focus(scope), trigger: this.#trigger(scope.ctx), candidates: facts },
+			{ original: { type: "choice", instructions: text("judge.original.instructions"), criteria } },
+			scope.signal,
+		);
+		this.#record("outbound.o2a_original", scope.input, answers, Date.now() - started);
+		const picked = choice(answers, "original");
+		if (picked === undefined || picked === "new_message") return undefined;
+		const entry = candidates[Number(picked.slice("answer_".length)) - 1];
+		if (entry === undefined) {
+			throw new OnlyneError("decision_unavailable", text("error.reply_relation"));
+		}
+		return {
+			ref: { sender: entry.message.sender, id: entry.message.id },
+			authority: entry.reply_authority,
+			thread_ref: entry.thread_ref,
+		};
+	}
+
+	/**
+	 * The inbound records this call can see and nobody has answered: rows delivered to this
+	 * session's context (the main session also sees rows no context claimed), minus the host's
+	 * handshake bookkeeping, minus entries a local reply already references. This set is what
+	 * O-2A offers the judge; it is never an answer by itself (RFC 0016 §7).
+	 */
+	async #replyCandidates(scope: DecisionScope): Promise<Entry[]> {
+		if (scope.readOnly === true) return [];
+		try {
+			const here = await this.#decisionContext(scope.ctx);
+			if (here === undefined) return [];
+			const rows = await this.deps.listInbox();
+			const candidates: Entry[] = [];
+			for (const row of rows) {
+				const entry = row.attention.entry;
+				if (entry === undefined || row.attention.disposition === "expired") continue;
+				if (entry.message.sender === this.deps.config.node.id) continue;
+				if (isTrustThread(this.deps.config.node.id, entry.thread_ref)) continue;
+				const deliveredHere = here.main
+					? row.context === undefined || row.context === "main"
+					: row.context === here.alias;
+				if (!deliveredHere) continue;
+				if (await this.#answered(entry)) continue;
+				candidates.push(entry);
+				if (candidates.length >= REPLY_CANDIDATES) break;
+			}
+			return candidates;
+		} catch (error) {
+			// A failed read narrows the question, not the decision: the call proceeds as a new message.
+			this.deps.log?.("onlyne.judge.hint_unavailable", { what: "reply_candidates", error: message(error) });
+			return [];
+		}
+	}
+
+	/** The context this session answers in: the main session, or a registered subagent context. */
+	async #decisionContext(ctx: ExtensionContext): Promise<{ alias?: string; main: boolean } | undefined> {
+		if (ctx.agent.id === this.deps.mainAgentId) return { main: true };
+		const record = (await this.deps.contexts.list()).find(row => row.agent_id === ctx.agent.id);
+		return record === undefined ? undefined : { alias: record.alias, main: false };
+	}
+
+	/** Whether this node already answered the entry in the thread that holds it. */
+	async #answered(entry: Entry): Promise<boolean> {
+		let cursor: string | undefined;
+		for (let page = 0; page < MAX_TAIL_PAGES; page++) {
+			const result = await this.deps.listMessages(entry.thread_ref, cursor);
+			for (const row of result.items) {
+				const ref = row.message.meta?.in_reply_to;
+				if (row.message.sender === this.deps.config.node.id && ref !== undefined
+					&& ref.sender === entry.message.sender && ref.id === entry.message.id) return true;
+			}
+			cursor = result.next_cursor ?? undefined;
+			if (cursor === undefined) return false;
+		}
+		return false;
 	}
 
 	/** Node O-2A question 1: the reply/followup/new relation, asked only when meta left it open. */
@@ -439,15 +549,20 @@ export class JudgeDecider {
 				target: {
 					type: "choice",
 					instructions: text("judge.target.instructions"),
-					criteria: Object.fromEntries(peers.map(peer => [
-						peer.node_id,
-						text("judge.target.peer", {
-							node: peer.node_id,
-							base_url: peer.base_url,
-							instance: peer.instance_id,
-							last_seen: peer.last_seen,
-						}),
-					])),
+					criteria: {
+						// The abstain exit: an unnamed recipient must surface as ambiguous_target,
+						// never as a low-confidence random pick among peers.
+						none: text("judge.target.none"),
+						...Object.fromEntries(peers.map(peer => [
+							peer.node_id,
+							text("judge.target.peer", {
+								node: peer.node_id,
+								base_url: peer.base_url,
+								instance: peer.instance_id,
+								last_seen: peer.last_seen,
+							}),
+						])),
+					},
 				},
 			},
 			scope.signal,
@@ -598,7 +713,8 @@ export class JudgeDecider {
 		const matches = (await this.#namedThreads()).filter(thread => thread.ref.id === value || thread.title === value);
 		if (matches.length > 1) throw new OnlyneError("ambiguous_target", text("error.ambiguous_local_thread", { value }));
 		if (matches.length === 1) return matches[0]!.ref;
-		const slash = value.indexOf("/");
+		// The same slash grammar as #threadByAlias; a bare id names a thread the addressee hosts.
+		const slash = value.lastIndexOf("/");
 		if (slash > 0 && slash < value.length - 1) {
 			return { owner: value.slice(0, slash), id: value.slice(slash + 1) };
 		}
@@ -925,6 +1041,7 @@ export class JudgeDecider {
 				throw new OnlyneError("decision_unavailable", text("error.state_budget", { chars, cap: STATE_BUDGET_CHARS }));
 			}
 			if (dropped.length > 0) this.deps.log?.("onlyne.judge.trimmed", { dropped, chars });
+			if (this.deps.judge !== undefined) return await this.deps.judge(fitted as Row, questions);
 			const settings = (await Settings.current) ?? (await Settings.loadReadOnly({ cwd: scope.cwd }));
 			const judge = resolveJudge({
 				settings,
@@ -1342,9 +1459,11 @@ export class JudgeDecider {
 		const matches = (await this.#namedThreads()).filter(thread => thread.ref.id === alias || thread.title === alias);
 		if (matches.length === 1) return matches[0]!.ref;
 		if (matches.length > 1) throw new OnlyneError("ambiguous_target", text("error.ambiguous_thread", { alias }));
-		if (alias.includes("/")) {
-			const [owner, id] = alias.split("/", 2);
-			if (owner !== undefined && id !== undefined && owner.length > 0 && id.length > 0) return { owner, id };
+		// One slash grammar for every textual thread reference: the owner is the part before the
+		// LAST slash, which is safe for urn owners and for ids that never carry a slash.
+		const slash = alias.lastIndexOf("/");
+		if (slash > 0 && slash < alias.length - 1) {
+			return { owner: alias.slice(0, slash), id: alias.slice(slash + 1) };
 		}
 		throw new OnlyneError("not_found", text("error.thread_not_found", { alias }));
 	}
@@ -1448,11 +1567,22 @@ export class JudgeDecider {
 		const id = stringField(record, "id");
 		if (sender !== undefined && id !== undefined) {
 			// The authority is an identity, not the caller's spelling: `caerulea` and
-			// `urn:onlyne:agent:caerulea` name the same node, and the delivery target is always
-			// resolved. Comparing a raw string against a resolved id produced two contradictory
-			// errors in a row (cyanea report 1, problem 1).
+			// `urn:onlyne:agent:caerulea` name the same node, so both the ref and the authority
+			// carry the resolved id and every later comparison is like-for-like. Comparing a raw
+			// string against a resolved one produced two contradictory errors in a row
+			// (cyanea report 1, problem 1).
 			const authority = await this.#peerId(sender).catch(() => sender);
-			return { ref: { sender, id }, authority };
+			// A reference the node can prove wrong is refused here, before the ref reaches the
+			// wire and dies in the peer's not_found: an id that names a different sender locally
+			// is a definite error, and the error names the message the id really belongs to.
+			const elsewhere = (await this.deps.listInbox()).find(row =>
+				row.attention.entry !== undefined && row.attention.entry.message.id === id
+				&& row.attention.entry.message.sender !== authority);
+			if (elsewhere !== undefined) {
+				const actual = elsewhere.attention.entry!.message.sender;
+				throw new OnlyneError("invalid_request", text("error.reply_reference_conflict", { named: sender, actual }));
+			}
+			return { ref: { sender: authority, id }, authority };
 		}
 		const threadAlias = stringField(record, "thread");
 		const seq = seqField(record, "seq");

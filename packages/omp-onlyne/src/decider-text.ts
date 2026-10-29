@@ -7,11 +7,11 @@ import { createTranslator } from "@onlyne/node-host/i18n";
 const en = {
 	"judge.o1.instructions":
 		"Choose the one action the model's message asks for. communicate: deliver a message, reply or progress note to another agent. inspect: look up local or network state. manage_thread: create, close, describe or change members of a local thread. manage_domain: manage this node's domain membership. operate_resource: operate a resource the message names explicitly.",
-	"judge.o1.communicate": "The message is meant for another agent or node, including asking a peer something.",
+	"judge.o1.communicate": "The message is meant for another agent or node: delivering, replying, asking, reporting, or starting a new task or topic with one. Work another agent should carry out is this intent even when the action sounds physical (deploy, archive, clean up).",
 	"judge.o1.inspect":
-		"The message asks to see node-level state: who is online, the inbox, a thread's messages, one message, or delivery evidence. The thread registry and a thread's members are not this.",
+		"The message asks to see node-level state: who is online, the neighbors or contacts list, the inbox, a thread's messages, one message, or delivery evidence. Listing or reading any of these is inspect. The thread registry and a thread's members are not this.",
 	"judge.o1.manage_thread":
-		"The message works on threads themselves: list the threads, describe one thread's members, create, close, add or remove a member. Reading a thread's messages is inspect.",
+		"The message works on threads themselves: list the threads, describe one thread's members, create, close, add or remove a member. Reading a thread's messages is inspect. Starting a new task or conversation with a peer is communicate, not this.",
 	"judge.o1.manage_domain":
 		"The message changes or reads this node's domain membership: join, leave, list or describe the membership, or discover a domain's members.",
 	"judge.o1.operate_resource":
@@ -20,12 +20,14 @@ const en = {
 	"judge.relation.instructions":
 		"The message references an earlier message. Is it a final reply or a progress supplement?",
 	"judge.relation.reply": "A final answer that may release the original sender's wait.",
-	"judge.relation.followup": "A supplement or progress note that does not release a wait.",
+	"judge.relation.followup": "A supplement or progress note that does not release a wait. A courtesy acknowledgement of a message that asked for nothing (收到、感谢同步) is this, or a plain new message — not a reply that releases an expectation nobody holds.",
 
 	"judge.target.instructions":
-		"Choose the node that should receive this message. Each candidate is named by its node id; the alias is its short name.",
+		"Choose the node that should receive this message. Each candidate is named by its node id; the alias is its short name. none: no candidate is named or implied by this call — refusing beats a random guess.",
 	"judge.target.peer":
 		"Discovered peer {node} at {base_url} (instance {instance}, last seen {last_seen}).",
+	"judge.target.none":
+		"No candidate is named or implied by this call; sending would be a guess.",
 
 	"judge.response.instructions":
 		"Two facts decide: does the receiver have to act, and can the sender continue without the answer?",
@@ -50,7 +52,7 @@ const en = {
 		"The message does not continue any published context and starts fresh work instead.",
 
 	"judge.inbound.instructions":
-		"Choose where this inbound message is handled. main_agent: the main session takes it. A context alias: the named execution context continues the work it was created for. new_subagent: fresh independent work in a new subagent.",
+		"Choose where this inbound message is handled. main_agent: the main session takes it — a message that needs no answer and is not a self-contained work item always lands here, however clearly it says no follow-up is wanted. A context alias: the named execution context continues the work it was created for. new_subagent: fresh independent work in a new subagent.",
 	"judge.inbound.main_agent": "The message needs an answer, or no registered context's work matches it.",
 	"judge.inbound.context": "{summary} (state: {state}, agent: {agent})",
 	"judge.inbound.context_same_thread":
@@ -59,11 +61,11 @@ const en = {
 		"The message is a self-contained work item with its own background, and needs no answer. A status note, greeting, relay or summary is not this.",
 
 	"judge.needs_answer.instructions":
-		"Does the sender expect this node to answer? A reference to an earlier message does not by itself create that expectation.",
+		"Does the sender expect this node to answer? A reference to an earlier message does not by itself create that expectation, and a message that explicitly says no reply is needed (不用回、不用发给我、报告直接入库即可) is always no, however much work it requests.",
 	"judge.needs_answer.yes":
 		"The sender asks a question, greets and waits for an answer, requests work whose result must be reported back, or otherwise needs a reply from this node. plan.response await or async is consistent with this.",
 	"judge.needs_answer.no":
-		"The sender expects nothing back: it completes a reply this node asked for, reports status, records a fact, or says no answer is needed. plan.response none is consistent with this.",
+		"The sender expects nothing back: it completes a reply this node asked for, reports status, records a fact, or explicitly says no reply is needed. plan.response none is consistent with this.",
 
 	"judge.insertion.instructions":
 		"The message goes to the main session. Choose when it should enter the agent's work.",
@@ -118,10 +120,17 @@ const en = {
 	"judge.domain_op.describe": "Describe this node's membership.",
 	"judge.domain_op.discover": "Discover a domain's declared members.",
 
+	"judge.original.instructions":
+		"This call states neither an in_reply_to reference nor a relation. Decide whether it answers one of the listed inbound messages — records this context can see that nobody has answered yet — or starts a new message. Decide from what the call is for; recency or being the only candidate never makes a call an answer.",
+	"judge.original.new": "Not an answer to any of them; a new message on its own topic.",
+	"judge.original.candidate": "Answer the inbound message from {from} ({kind}) at thread {thread} seq {seq}: {body}",
+
 	"error.outbound_intent": "The decision did not choose an outbound intent.",
 	"error.relation_needs_reference": "A relation needs an in_reply_to reference.",
 	"error.reply_authority":
 		"The reply must go to its original reply authority {authority}, not {target}.",
+	"error.reply_reference_conflict":
+		"The referenced message id belongs to {actual}, not to the sender you named ({named}). Answer that message, or name its sender.",
 	"error.delivery_target": "The decision did not choose a delivery target.",
 	"error.execution_context_missing":
 		'{to} publishes no execution context this message continues. Send it with execution "new" to start one.',
@@ -222,11 +231,11 @@ const en = {
 const zh: Record<keyof typeof en, string> = {
 	"judge.o1.instructions":
 		"选择模型这条消息要求执行的那一个动作。communicate：向另一个 agent 投递消息、回复或进度说明。inspect：查询本地或网络状态。manage_thread：创建、关闭、描述本地 thread 或变更其成员。manage_domain：管理本节点的域成员身份。operate_resource：操作消息明确点名的资源。",
-	"judge.o1.communicate": "这条消息是发给另一个 agent 或节点的，包括向对端提问。",
+	"judge.o1.communicate": "这条消息是发给另一个 agent 或节点的：投递、回复、提问、汇报，或与对端开启一项新任务、新话题。交给另一个 agent 去做的操作也属此类，即使动作听起来像物理操作（部署、归档、清理）。",
 	"judge.o1.inspect":
-		"这条消息要求查看节点级状态：谁在线、inbox、某个 thread 的消息、单条消息或投递凭据。thread 注册表和某个 thread 的成员不属于此。",
+		"这条消息要求查看节点级状态：谁在线、邻居或联系人列表、inbox、某个 thread 的消息、单条消息或投递凭据。列出或读取其中任何一项都属 inspect。thread 注册表和某个 thread 的成员不属于此。",
 	"judge.o1.manage_thread":
-		"这条消息作用于 thread 本身：列出 thread、描述某个 thread 的成员、创建、关闭、添加或移除成员。读取 thread 内的消息属于 inspect。",
+		"这条消息作用于 thread 本身：列出 thread、描述某个 thread 的成员、创建、关闭、添加或移除成员。读取 thread 内的消息属于 inspect。与对端开启一项新任务或新对话属于 communicate,不属于此。",
 	"judge.o1.manage_domain":
 		"这条消息改变或读取本节点的域成员身份：加入、离开、列出或描述成员身份，或发现某个域的成员。",
 	"judge.o1.operate_resource":
@@ -234,12 +243,19 @@ const zh: Record<keyof typeof en, string> = {
 
 	"judge.relation.instructions": "这条消息引用了更早的一条消息。它是最终回复还是进度补充？",
 	"judge.relation.reply": "一个最终答复，可以解除原发送方的等待。",
-	"judge.relation.followup": "一个补充或进度说明，不解除任何等待。",
+	"judge.relation.followup": "一个补充或进度说明，不解除任何等待。对并未索取回答的消息致意确认（收到、感谢同步）属此，或干脆作为新消息——而不是解除无人持有的等待的 reply。",
+
+	"judge.original.instructions":
+		"这次调用既没有 in_reply_to 引用，也没有 relation。请判断它是否在回答下面列出的某条入站消息（本上下文可见、且尚无人答复的记录），还是一条独立的新消息。按调用的目的判断；最新或唯一候选本身不能说明它就是回答。",
+	"judge.original.new": "都不是；这是一条独立话题的新消息。",
+	"judge.original.candidate": "回答来自 {from} 的入站消息（{kind}），位于 thread {thread} seq {seq}：{body}",
 
 	"judge.target.instructions":
-		"选择应当接收这条消息的节点。每个候选以其 node id 命名，alias 是它的短名。",
+		"选择应当接收这条消息的节点。每个候选以其 node id 命名，alias 是它的短名。none：这次调用没有点名或暗示任何候选——宁可拒绝也不随机猜测。",
 	"judge.target.peer":
 		"已发现的 peer {node}，位于 {base_url}（实例 {instance}，最后出现于 {last_seen}）。",
+	"judge.target.none":
+		"这次调用没有点名或暗示任何候选；强行发送只是猜测。",
 
 	"judge.response.instructions":
 		"两个事实决定：接收方是否必须动手，以及发送方能否在没有答复的情况下继续。",
@@ -261,7 +277,7 @@ const zh: Record<keyof typeof en, string> = {
 	"judge.context.none": "这条消息不延续任何已发布的上下文，而是开启新工作。",
 
 	"judge.inbound.instructions":
-		"选择这条入站消息在哪里处理。main_agent：由主会话处理。上下文别名：由该执行上下文延续它当初被创建来处理的工作。new_subagent：在新的 subagent 中处理独立的新工作。",
+		"选择这条入站消息在哪里处理。main_agent：由主会话处理——不需要答复、也不是自成一体工作项的消息一律落在这里，无论它把「不用后续处理」说得多明确。上下文别名：由该执行上下文延续它当初被创建来处理的工作。new_subagent：在新的 subagent 中处理独立的新工作。",
 	"judge.inbound.main_agent": "这条消息需要答复，或没有任何已注册上下文的工作与之匹配。",
 	"judge.inbound.context": "{summary}（state: {state}, agent: {agent}）",
 	"judge.inbound.context_same_thread":
@@ -270,7 +286,7 @@ const zh: Record<keyof typeof en, string> = {
 		"这条消息是一个自带背景、自成一体的工作项，且无需答复。状态说明、问候、转达或汇总不属于此。",
 
 	"judge.needs_answer.instructions":
-		"发送方是否期待本节点答复？仅引用更早的消息本身并不构成这种期待。",
+		"发送方是否期待本节点答复？仅引用更早的消息本身并不构成这种期待；明说不必回复（不用回、不用发给我、报告直接入库即可）的消息，无论请求多少工作，一律为 no。",
 	"judge.needs_answer.yes":
 		"发送方提出问题、问候并等待答复、请求必须回报结果的工作，或以其他方式需要本节点回复。plan.response 为 await 或 async 与此一致。",
 	"judge.needs_answer.no":
@@ -329,6 +345,8 @@ const zh: Record<keyof typeof en, string> = {
 	"error.outbound_intent": "决策没有选择出站意图。",
 	"error.relation_needs_reference": "relation 需要 in_reply_to 引用。",
 	"error.reply_authority": "回复必须发往其原始回复权威 {authority}，而不是 {target}。",
+	"error.reply_reference_conflict":
+		"引用的消息 id 属于 {actual}，而不是你指名的发送方（{named}）。请回答那条消息，或改用它的发送方。",
 	"error.delivery_target": "决策没有选择投递目标。",
 	"error.execution_context_missing":
 		'{to} 未发布这条消息所延续的执行上下文。要以 execution "new" 发送以新建一个。',

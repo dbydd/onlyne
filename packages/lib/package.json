@@ -1,6 +1,6 @@
 {
   "name": "@onlyne/lib",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Decentralized agent messaging: threads, durable admission, attention, reply correlation, resources with handover, and an HTTP binding",
   "type": "module",
   "main": "./src/index.ts",

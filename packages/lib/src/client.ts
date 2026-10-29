@@ -1,7 +1,7 @@
 import type { Context } from './core.ts';
 import { canonical, decimal, fail, key, page, requireValue, utc } from './core.ts';
 import type {
-  Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Json, LocalAttention,
+  Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Grant, Json, LocalAttention,
   InjectOutcome, JoinedThread, Member, Message, MessageQuery, MessageRef, MsgInput, Mutation, NodeId, Outbound, Page, PageOptions, SendRequest,
   TraceEvent, Thread, ThreadDescription, ThreadRef, Transaction, Transport, MaintenanceClock, PreparedSend,
   ResourceReadQuery, ResourceReadResult, ResourceInventory, Resource, AttentionSettlement,
@@ -20,9 +20,9 @@ export interface SendOutcome {
   /** The target as the caller spelled it, present only with `resolved` when the two differ. */
   requested?: string;
   /**
-   * The node `requested` resolved to. A receipt names the thread owner, which is this node
-   * whenever it started the conversation, so without this pair an alias send reads as a
-   * message this node addressed to itself.
+   * The node `requested` resolved to. Present whenever the addressee differs from the
+   * endpoint that stores the entry — which is this node whenever it started the
+   * conversation — so an initiator's receipt never reads as a message the node sent itself.
    */
   resolved?: NodeId;
   /**
@@ -40,6 +40,12 @@ export interface SendOptions {
   retry_until?: string;
   idempotency_key?: string;
   expected_author?: string;
+  /**
+   * The caller's own spelling of the addressee. Recorded on the outbound record beside the
+   * resolved node id when the two differ, so the record shows both what was asked and what
+   * was resolved (RFC 0005 §4: the receipt reports the landing, not the request).
+   */
+  requested?: string;
   /**
    * The sender's own consumption identity for the awaited reply (RFC 0008 §5). It stays
    * local and never stands in for the wire plan's receiver-side context.
@@ -317,19 +323,31 @@ export class OnlyneClient {
       },
     };
     if (ref.owner === ctx.options.node_id && to !== ctx.options.node_id) {
-      await this.#ensureMember(ref, to);
+      // The addressee can only ever learn this entry through a signed grant or a signed
+      // reconcile, so a send that names a peer this node never paired with is refused before
+      // anything is stored: it would otherwise read `accepted` while the peer can never see it.
+      if (this.#trust !== undefined && ctx.options.plugins.keys !== undefined) {
+        const pairing = await this.#trust.entry(to);
+        if (pairing === undefined) {
+          fail('not_found', `No trust record names ${to}. Pair the nodes (trust_begin) before addressing them; nothing was stored.`);
+        }
+      }
+      const member = await this.#ensureMember(ref, to);
       // The participant is told about the thread now, not on a later maintenance pass: this
       // exchange is also where the participant's own policy answers, so a peer that revoked
       // this node refuses the conversation at the point the sender can still see it.
       try {
-        await this.#pushGrant(ref, to);
+        await this.#pushGrant(ref, member);
       } catch (error) {
         const failure = failureOf(error);
         return { admission: admissionOf(failure), error: failure };
       }
     }
 
-    return this.#deliver(ref.owner, normalized, plan, options);
+    const outcome = await this.#deliver(ref.owner, normalized, plan, options, to);
+    // The storing endpoint is this node whenever it started the conversation; the outcome
+    // still names the peer it addresses, or the receipt reads as a message sent to oneself.
+    return to !== ref.owner ? { ...outcome, resolved: to } : outcome;
   }
 
   /** The reply-authority route: the receiver owns the landing, so no thread is named here. */
@@ -338,7 +356,7 @@ export class OnlyneClient {
   }
 
   /** Records one outbound request, then transmits it or waits for its answer. */
-  async #deliver(target: string, message: Message, plan: DeliveryPlan, options: SendOptions): Promise<SendOutcome> {
+  async #deliver(target: string, message: Message, plan: DeliveryPlan, options: SendOptions, addressee?: NodeId): Promise<SendOutcome> {
     const ctx = this.#ctx;
     const slot = outboundKey(message.sender, message.id);
     const request: SendRequest = {
@@ -349,6 +367,15 @@ export class OnlyneClient {
       plan,
     };
     const digest = messageDigest(request);
+    // Who the send addresses, beside where the entry is stored: an initiator's own thread
+    // stores locally, so the record must still name the peer, or the receipt reads as a
+    // message the node sent itself.
+    const addressed = {
+      ...(addressee !== undefined && addressee !== target ? { addressee } : {}),
+      ...(typeof options.requested === 'string' && options.requested !== (addressee ?? target)
+        ? { requested: options.requested }
+        : {}),
+    };
     // The same message identity with different content is a conflict, never a rewrite:
     // the slot keeps the first request and the caller sends a new message id instead.
     const record = await ctx.storage.transaction(async tx => {
@@ -368,6 +395,7 @@ export class OnlyneClient {
       const fresh: StoredOutbound = {
         request, expected_author: options.expected_author ?? target, state: 'pending', digest,
         created_at: new Date(ctx.now()).toISOString(),
+        ...addressed,
         ...(options.context === undefined ? {} : { local_context: options.context }),
       };
       await tx.put(slot, fresh);
@@ -483,25 +511,24 @@ export class OnlyneClient {
   }
 
   /**
-   * Grants the addressee `post` and `read` in a thread this node owns, once. The notice the
-   * owner issues here is what teaches the participant the ThreadRef it reconciles against.
+   * Grants the addressee `post` and `read` in a thread this node owns, once, and returns the
+   * member row: the grant notice is keyed by the member revision, so the caller can push that
+   * exact notice instead of scanning the outbox for one it might not recognize.
    */
-  async #ensureMember(ref: ThreadRef, peer: string): Promise<void> {
+  async #ensureMember(ref: ThreadRef, peer: string): Promise<Member> {
     const existing = await this.#ctx.storage.transaction(tx => tx.get<Member>(key('member', ref.owner, ref.id, peer)));
-    if (existing !== undefined) return;
+    if (existing !== undefined) return existing;
     await this.#threads.member(this.#auth(), ref, peer, {}, {
       idempotency_key: this.#ctx.id(), retry_until: this.#window(undefined),
     });
+    return this.#ctx.storage.transaction(async tx => requireValue(await tx.get<Member>(key('member', ref.owner, ref.id, peer))));
   }
 
-  /** Delivers one outstanding notice to its recipient; a refusal here is the send's answer. */
-  async #pushGrant(ref: ThreadRef, peer: string): Promise<void> {
-    const notices = await this.#allPages(cursor =>
-      this.#threads.notices(this.#auth(), { page_size: 100, ...(cursor === undefined ? {} : { cursor }) }));
-    const notice = notices.find(grant =>
-      grant.recipient === peer && grant.thread_ref.owner === ref.owner && grant.thread_ref.id === ref.id);
-    if (notice === undefined) return;
-    await this.#remote(peer, 'POST', '/grants', { grant: notice }, undefined, this.#ctx.options.wait_ms ?? 60_000);
+  /** Delivers the outstanding notice for one member's revision; none outstanding, nothing to push. */
+  async #pushGrant(_ref: ThreadRef, member: Member): Promise<void> {
+    const notice = await this.#ctx.storage.transaction(tx => tx.get<Grant>(key('notice', member.revision)));
+    if (notice === undefined || notice.acked) return;
+    await this.#remote(member.peer, 'POST', '/grants', { grant: notice }, undefined, this.#ctx.options.wait_ms ?? 60_000);
   }
 
   // ---- inbound path -----------------------------------------------------------
@@ -716,7 +743,9 @@ export class OnlyneClient {
     const action = await this.#decide(input);
     if (action.kind !== 'send') return this.#dispatch(action, options);
     const prepared = this.#prepare(input, action);
-    return this.#addressed(await this.send(prepared.to, prepared.message, prepared.plan, options), input.meta?.to, prepared.to);
+    const outcome = await this.send(prepared.to, prepared.message, prepared.plan,
+      { ...options, ...(typeof input.meta?.to === 'string' ? { requested: input.meta.to } : {}) });
+    return this.#addressed(outcome, input.meta?.to, prepared.to);
   }
 
   async prepare(input: MsgInput): Promise<PreparedSend> {
@@ -795,10 +824,12 @@ export class OnlyneClient {
 
   /**
    * The caller's own spelling beside the node the decision resolved it to. Equal spellings say
-   * nothing new; a bare alias that resolved to a peer is the case the receipt cannot show.
+   * nothing new; a bare alias that resolved to a peer is the case the receipt cannot show. A
+   * `resolved` the send already derived (the addressee of an initiator's own thread) is kept.
    */
   #addressed(outcome: SendOutcome, requested: Json | undefined, resolved: NodeId): SendOutcome {
-    return typeof requested !== 'string' || requested === resolved ? outcome : { ...outcome, requested, resolved };
+    const merged: SendOutcome = outcome.resolved === undefined ? { ...outcome, resolved } : outcome;
+    return typeof requested !== 'string' || requested === resolved ? merged : { ...merged, requested };
   }
 
   // ---- internals ---------------------------------------------------------------
@@ -898,7 +929,8 @@ export class OnlyneClient {
       const guarantee = (receipt as { guarantee?: unknown }).guarantee;
       this.#trace({
         event: 'outbound.admitted', sender: request.message.sender, message: request.message.id,
-        target: request.target_endpoint, state: 'accepted', ...(typeof guarantee === 'string' ? { guarantee } : {}),
+        target: request.target_endpoint, ...(record.addressee === undefined ? {} : { resolved: record.addressee }),
+        state: 'accepted', ...(typeof guarantee === 'string' ? { guarantee } : {}),
       });
       return { admission: 'accepted', receipt };
     } catch (error) {
@@ -907,7 +939,8 @@ export class OnlyneClient {
       await this.#commit(record, { state: admissionOf(failure), error: failure });
       this.#trace({
         event: 'outbound.admitted', sender: request.message.sender, message: request.message.id,
-        target: request.target_endpoint, state: admissionOf(failure), code: failure.code,
+        target: request.target_endpoint, ...(record.addressee === undefined ? {} : { resolved: record.addressee }),
+        state: admissionOf(failure), code: failure.code,
       });
       const stored = await this.#ctx.storage.transaction(tx => tx.get<StoredOutbound>(outboundKey(request.message.sender, request.message.id)));
       return {

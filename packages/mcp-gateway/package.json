@@ -1,6 +1,6 @@
 {
   "name": "@onlyne/mcp-gateway",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Onlyne MCP gateway: one node that hosts MCP servers as resources and exposes their tools as operations",
   "type": "module",
   "main": "./src/index.ts",
@@ -28,10 +28,10 @@
     "smoke:fast": "MOUNT_SMOKE_INTERVAL_MS=3000 bun tests/mounts-smoke.ts"
   },
   "dependencies": {
-    "@onlyne/im-gateway": "^3.0.0",
-    "@onlyne/lib": "^3.0.0",
-    "@onlyne/mcp-core": "^3.0.0",
-    "@onlyne/node-host": "^3.0.0"
+    "@onlyne/im-gateway": "^3.1.0",
+    "@onlyne/lib": "^3.1.0",
+    "@onlyne/mcp-core": "^3.1.0",
+    "@onlyne/node-host": "^3.1.0"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

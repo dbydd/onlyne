@@ -51,6 +51,12 @@ export interface GatewayConfig {
   channel: ChannelConfig;
   /** Seed endpoints to observe at startup; discovery itself stays in lib. */
   peers?: string[];
+  /**
+   * The aliases the node publishes in its execution context directory (`GET /contexts`), which
+   * a sender's draft send reads to continue work here. Unset publishes `["main"]`; an explicit
+   * empty array publishes an empty directory.
+   */
+  contexts?: string[];
   /** The language of the gateway's own console text; unset follows `ONLYNE_LANG`. */
   language?: Locale;
 }
@@ -190,6 +196,9 @@ export async function loadConfig(path: string, env: Record<string, string | unde
     channel,
     ...(Array.isArray(raw.peers)
       ? { peers: raw.peers.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0) }
+      : {}),
+    ...(Array.isArray(raw.contexts)
+      ? { contexts: [...new Set(raw.contexts.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0))] }
       : {}),
     ...(language === undefined ? {} : { language }),
   };

@@ -404,6 +404,9 @@ ok('a node identity for another platform is refused', mismatch instanceof Onlyne
   && String(mismatch.message).includes('urn:onlyne:gateway:im-lark'));
 const derived = await loadConfig(await writeConfig({ ...base, node: undefined }), {});
 ok('an omitted identity derives from the platform', derived.node.id === 'urn:onlyne:gateway:im-lark');
+const contextKeys = await loadConfig(await writeConfig({ ...base, contexts: ['support', 'support', '', 5] }), {});
+ok('the contexts key keeps the strings, deduped in order', contextKeys.contexts?.join(',') === 'support');
+ok('an omitted contexts key stays unset, so the gateway publishes the default', loaded.contexts === undefined);
 
 // The receive path: QQ's gateway socket is the default, the signed callback stays selectable.
 const qqBase = { ...base, node: undefined, channel: { platform: 'qq' } };
@@ -438,6 +441,25 @@ const webhookGateway = await createImGateway(transportConfig('webhook'), { facto
 const servedCallback = await webhookGateway.webhook(new Request('http://127.0.0.1/qq/callback', { method: 'POST' }));
 ok('a webhook channel still serves the callback path', servedCallback.status === 200);
 await webhookGateway.stop();
+
+// 8. The execution context directory: a sender's draft send that names no context reads this
+// directory (`GET /contexts`, the decider's own probe) instead of failing `contexts_unreadable`.
+const contexts = await call(gateway, 'GET', '/contexts');
+const directory = rows(contexts.body);
+ok('the gateway publishes a readable context directory with main', contexts.status === 200
+  && directory.some(row => row?.alias === 'main' && row?.state === 'idle' && typeof row?.summary === 'string'));
+const nodeDescription = await call(gateway, 'GET', '/description');
+ok('the node description advertises the context directory', nodeDescription.status === 200
+  && Array.isArray(nodeDescription.body.features) && nodeDescription.body.features.includes('contexts'));
+const overrideConfig = {
+  ...config('urn:onlyne:gateway:im-fake-b', 3998, { platform: 'fake' }),
+  contexts: ['orders', 'support'],
+};
+const overrideGateway = await createImGateway(overrideConfig, { factories: { fake: factory }, log });
+const overrideContexts = await call(overrideGateway, 'GET', '/contexts');
+ok('the configured contexts replace the default directory', overrideContexts.status === 200
+  && rows(overrideContexts.body).map(row => row?.alias).join(',') === 'orders,support');
+await overrideGateway.stop();
 
 await rm(dir, { recursive: true, force: true });
 

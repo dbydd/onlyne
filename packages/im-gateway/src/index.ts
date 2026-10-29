@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
-  OnlyneNode, OnlyneError, MemoryStorage, type Auth, type MaintenanceClock, type NodeId,
+  OnlyneNode, OnlyneError, MemoryStorage, type Auth, type Json, type MaintenanceClock, type NodeId,
   type KeyHook, type OperationRequest, type Plugins, type Resource, type ResourceRef, type Storage,
   type ThreadRef, type TraceEvent, type Transport,
 } from '@onlyne/lib';
@@ -489,6 +489,15 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
     resolve,
     prepareResourceOperation: prepareOperation,
     domainCandidates: domain_id => node.discovery.candidates(domain_id),
+    /**
+     * The published context directory a sender's draft send reads (RFC 0005): without it the
+     * caller must guess `meta.context` or its send fails `contexts_unreadable`. The gateway
+     * consumes no model context, so the aliases are delivery labels — `main` is the fallback
+     * every host publishes, and the configured list overrides it.
+     */
+    executionContexts: async () => (config.contexts ?? ['main']).map(alias => ({
+      alias, summary: t('context.summary'), state: 'idle',
+    })) as Json,
     ...(options.keys === undefined ? {} : { keys: options.keys }),
     decide: () => { throw new OnlyneError('decision_unavailable', t('error.decide')); },
     runtime: {

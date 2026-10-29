@@ -167,6 +167,10 @@ export interface OperationRecord {
 export interface Outbound {
   request: SendRequest; expected_author: NodeId; state: 'pending' | 'accepted' | 'refused' | 'unknown';
   receipt?: Receipt; error?: Failure; created_at?: string;
+  /** The peer this send addresses when it differs from the endpoint that stores the entry. */
+  addressee?: NodeId;
+  /** The caller's own spelling of the addressee, when it differs from the resolved node id. */
+  requested?: string;
 }
 export interface HistoryMessage {
   message_ref: MessageRef; message: Message; direction: 'in' | 'out';
@@ -227,7 +231,7 @@ export type TraceEvent =
   | { event: 'inbound.settled'; thread: ThreadRef; seq: string; settlement: AttentionSettlement }
   | { event: 'inbound.resource-check.failed'; thread: ThreadRef; seq: string; resource_ref: ResourceRef; code: ErrorCode; attempts: number }
   | { event: 'consumption.confirmed'; thread: ThreadRef; seq: string; context: string; via: 'fragment' | 'tool_result' }
-  | { event: 'outbound.admitted'; sender: NodeId; message: string; target: string; state: string; guarantee?: string; code?: string }
+  | { event: 'outbound.admitted'; sender: NodeId; message: string; target: string; state: string; guarantee?: string; code?: string; resolved?: NodeId }
   | { event: 'outbound.redriven'; sender: NodeId; message: string; target: string }
   | { event: 'outbound.expired'; sender: NodeId; message: string; code: string }
   | { event: 'await.settled'; thread: ThreadRef; seq: string; waiters: number }
