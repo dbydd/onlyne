@@ -1,6 +1,7 @@
 import type { Entry, Json, NodeId, Storage, ThreadRef } from '@onlyne/lib';
 import { leveled, type LeveledLog, type LogSink } from '@onlyne/node-host';
 import { redactWebhook, webhookHeaderValue, type WebhookConfig } from './config.ts';
+import { grokBotChatFromThread } from './threads.ts';
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -55,12 +56,16 @@ function backoff(base: number, attempts: number): number {
 
 /** JSON body Grok Bot receives for one inbound Onlyne message. */
 export function webhookPayload(nodeId: NodeId, entry: Entry): Json {
+  const chat = grokBotChatFromThread(entry.thread_ref, entry.message.sender);
+  const grokbot = { chat_kind: chat.kind, chat_id: chat.chat_id };
+  const originalMeta = (entry.message.meta ?? {}) as Record<string, Json>;
+  const meta = { ...originalMeta, grokbot } as Json;
   const message = {
     id: entry.message.id,
     sender: entry.message.sender,
     delivery_kind: entry.message.delivery_kind,
     msg: entry.message.msg,
-    ...(entry.message.meta === undefined ? {} : { meta: entry.message.meta as Json }),
+    meta,
   };
   return {
     node_id: nodeId,
@@ -74,7 +79,7 @@ export function webhookPayload(nodeId: NodeId, entry: Entry): Json {
     delivery_kind: entry.message.delivery_kind,
     msg: entry.message.msg,
     message,
-    ...(entry.message.meta === undefined ? {} : { meta: entry.message.meta as Json }),
+    meta,
   };
 }
 

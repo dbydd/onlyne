@@ -10,6 +10,24 @@ are the same pieces every gateway uses. It does not call a model. Inbound delive
 webhook POST. Outbound replies are a small authenticated HTTP path so Grok Bot can send back
 through this node's identity after it wakes.
 
+## One account, one node, many threads
+
+Keys are provisioned **per account** (operator / account scope), not per Grok Bot assistant.
+Run **one grok-bot node** (one node id, one keypair, one webhook) for that account. Every
+assistant DM and every group chat is a separate Onlyne thread under that node:
+
+| Chat | Thread id | Owner |
+|---|---|---|
+| Assistant DM | `grokbot:dm:<agent_id>` | this grok-bot node |
+| Group chat | `grokbot:group:<group_id>` | this grok-bot node |
+
+`<agent_id>` and `<group_id>` are taken as-is (Onlyne node ids keep their `urn:onlyne:…`
+colons). Example: a DM with `urn:onlyne:agent:alice` is thread
+`{ "owner": "urn:onlyne:gateway:grok-bot", "id": "grokbot:dm:urn:onlyne:agent:alice" }`.
+
+Do not stand up one grok-bot process or keypair per assistant. Pairing and trust stay at
+account/node scope; isolation is the thread id plus `meta.grokbot`.
+
 ## Run
 
 ```sh
@@ -56,6 +74,25 @@ key as the header value with no prefix. Set `webhook.header` to any HTTP field G
 Do not put the live URL or key in a committed file. Keep them in the process environment, or in
 a local file that git ignores.
 
+## Inbound threads
+
+This node does **not** invent a random thread on first contact. Every peer admission is bound
+to a stable grok-bot thread **before** `admit`:
+
+1. If `message.meta.thread` is already a grok-bot-owned `grokbot:dm:…` or `grokbot:group:…`
+   id, that id is kept.
+2. Else `meta.data.grokbot` (the HTTP-safe bag) or `meta.grokbot` selects the chat:
+   - `chat_kind`: `dm` (default) or `group`
+   - `chat_id`: assistant / group id (`agent_id` is a DM alias, `group_id` a group alias)
+3. Else the sender is a DM: `grokbot:dm:<sender>`.
+
+A `group` kind without `chat_id` / `group_id` is refused. The node creates the thread and the
+sender's membership if they do not already exist, then admits onto that `thread_ref`. Two DMs
+or two groups never share a thread.
+
+A peer that still names a legacy random UUID owned by this node is honored so an old
+conversation can continue; new admissions without a thread always get the stable scheme.
+
 ## Inbound POST
 
 The node POSTs immediately after an inbound message is admitted (or injected from a grant).
@@ -69,7 +106,10 @@ The body is JSON:
   "reply_authority": "urn:onlyne:agent:alice",
   "message_id": "msg-01",
   "timestamp": "2026-11-03T14:00:00.000Z",
-  "thread": { "owner": "urn:onlyne:gateway:grok-bot", "id": "…" },
+  "thread": {
+    "owner": "urn:onlyne:gateway:grok-bot",
+    "id": "grokbot:dm:urn:onlyne:agent:alice"
+  },
   "seq": "1",
   "delivery_kind": "note",
   "msg": "hello",
@@ -78,10 +118,27 @@ The body is JSON:
     "sender": "urn:onlyne:agent:alice",
     "delivery_kind": "note",
     "msg": "hello",
-    "meta": {}
+    "meta": {
+      "thread": {
+        "owner": "urn:onlyne:gateway:grok-bot",
+        "id": "grokbot:dm:urn:onlyne:agent:alice"
+      },
+      "grokbot": { "chat_kind": "dm", "chat_id": "urn:onlyne:agent:alice" }
+    }
+  },
+  "meta": {
+    "thread": {
+      "owner": "urn:onlyne:gateway:grok-bot",
+      "id": "grokbot:dm:urn:onlyne:agent:alice"
+    },
+    "grokbot": { "chat_kind": "dm", "chat_id": "urn:onlyne:agent:alice" }
   }
 }
 ```
+
+`meta.grokbot.chat_kind` and `meta.grokbot.chat_id` are always present so a multi-bot router
+can fan out without parsing the thread id. They match the landed thread when the id uses the
+stable scheme; a legacy random UUID falls back to `{ "chat_kind": "dm", "chat_id": "<sender>" }`.
 
 The sender key is only in the configured header. Logs name the URL origin and path, never the
 key, never a query string.
@@ -96,21 +153,34 @@ shows the queue.
 
 ## Outbound replies
 
-Grok Bot replies by POSTing to this process, not by speaking Onlyne itself:
+Grok Bot replies by POSTing to this process, not by speaking Onlyne itself. The supported way
+to continue the same conversation is to echo `thread` and `in_reply_to` from the webhook:
 
 ```sh
 curl -X POST http://127.0.0.1:3995/grok/reply \
   -H "Authorization: Bearer $GROK_BOT_WEBHOOK_KEY" \
   -H "content-type: application/json" \
-  -d '{"to":"urn:onlyne:agent:alice","msg":"ack","thread":{"owner":"urn:onlyne:gateway:grok-bot","id":"…"},"in_reply_to":{"sender":"urn:onlyne:agent:alice","id":"msg-01"}}'
+  -d '{"to":"urn:onlyne:gateway:grok-bot","msg":"ack","thread":{"owner":"urn:onlyne:gateway:grok-bot","id":"grokbot:dm:urn:onlyne:agent:alice"},"in_reply_to":{"sender":"urn:onlyne:agent:alice","id":"msg-01"}}'
 ```
+
+`to` is this node (`node_id` in the webhook): the grok-bot node owns the thread and admits the
+reply. `in_reply_to` also notifies the original sender.
+
+| Body | What happens |
+|---|---|
+| `thread` + `in_reply_to` from the webhook | Lands on that `thread_ref` (supported continue) |
+| `thread` only | Lands on that thread as a new root in the conversation |
+| `in_reply_to` only | Recovers the original message's landing when this node admitted it |
+| neither | Refused (`not_found`): this node has no default thread and does not invent one |
 
 The path is `reply_path` (default `/grok/reply`). It uses the same sender key as the inbound
 webhook. The node sends the message under its own identity with `response: none`. This path is
 a host surface; `/onlyne/v3` is unchanged.
 
 For a richer outbound surface — listing inbox, threads, neighbors, resources — run
-`@onlyne/mcp-server` beside this node.
+`@onlyne/mcp-server` beside this node. That is a **separate process with its own node id and
+store**. Multi-bot fan-out on this account is isolated by grok-bot threads; MCP tools read the
+MCP node's own store unless the two identities are later unified.
 
 ## Status
 
@@ -124,7 +194,10 @@ The answer names the node, the redacted webhook, and the owed / failed / deliver
 ## Library use
 
 ```ts
-import { createGrokBotNode } from '@onlyne/grok-bot';
+import { createGrokBotNode, grokBotThreadId } from '@onlyne/grok-bot';
+
+grokBotThreadId({ kind: 'dm', chat_id: 'urn:onlyne:agent:alice' });
+// 'grokbot:dm:urn:onlyne:agent:alice'
 ```
 
 Tests inject `fetch` and `storage: 'memory'`. The CLI always supplies an identity key.

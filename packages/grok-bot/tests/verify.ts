@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OnlyneError, type Entry } from '@onlyne/lib';
 import {
-  createGrokBotNode, expandEnv, loadConfig, webhookHeaderValue, webhookPayload,
+  createGrokBotNode, expandEnv, grokBotChatFromMessage, grokBotThreadId, loadConfig,
+  parseGrokBotThreadId, webhookHeaderValue, webhookPayload,
   type FetchLike, type GrokBotConfig,
 } from '../src/index.ts';
 
@@ -26,7 +27,10 @@ const waitFor = async (predicate: () => boolean | Promise<boolean>, timeoutMs = 
 
 const GROK = 'urn:onlyne:gateway:grok-bot';
 const SENDER = 'urn:onlyne:agent:alice';
+const BOB = 'urn:onlyne:agent:bob';
 const KEY = 'test-sender-key-do-not-commit';
+const aliceDm = grokBotThreadId({ kind: 'dm', chat_id: SENDER });
+const bobDm = grokBotThreadId({ kind: 'dm', chat_id: BOB });
 const rec = (value: unknown): Record<string, unknown> | undefined =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 
@@ -87,6 +91,27 @@ ok('ONLYNE_GROK_* and ONLYNE_NODE_ID / PORT override the file',
   && overridden.server.port === 4010);
 
 ok('$$ expands to a literal dollar', expandEnv('cost-$$5', {}, 'x') === 'cost-$5');
+
+ok('DM thread id is grokbot:dm:<agent_id>',
+  grokBotThreadId({ kind: 'dm', chat_id: SENDER }) === `grokbot:dm:${SENDER}`
+  && parseGrokBotThreadId(`grokbot:dm:${SENDER}`)?.kind === 'dm'
+  && parseGrokBotThreadId(`grokbot:dm:${SENDER}`)?.chat_id === SENDER);
+ok('group thread id is grokbot:group:<group_id>',
+  grokBotThreadId({ kind: 'group', chat_id: 'room-9' }) === 'grokbot:group:room-9'
+  && parseGrokBotThreadId('grokbot:group:room-9')?.kind === 'group'
+  && parseGrokBotThreadId('grokbot:group:room-9')?.chat_id === 'room-9');
+ok('a random UUID is not a grok-bot thread id', parseGrokBotThreadId(crypto.randomUUID()) === undefined);
+ok('meta.data.grokbot selects a group chat',
+  grokBotChatFromMessage({
+    id: 'm', sender: SENDER, delivery_kind: 'note', msg: 'hi',
+    meta: { data: { grokbot: { chat_kind: 'group', chat_id: 'room-9' } } },
+  }, SENDER).kind === 'group'
+  && grokBotChatFromMessage({
+    id: 'm', sender: SENDER, delivery_kind: 'note', msg: 'hi',
+    meta: { data: { grokbot: { chat_kind: 'group', chat_id: 'room-9' } } },
+  }, SENDER).chat_id === 'room-9');
+ok('a message without grokbot fields is a DM with the sender',
+  grokBotChatFromMessage({ id: 'm', sender: SENDER, delivery_kind: 'note', msg: 'hi' }, SENDER).chat_id === SENDER);
 ok('the default Authorization value is Bearer plus the key',
   webhookHeaderValue({ key: KEY, scheme: 'Bearer' }) === `Bearer ${KEY}`);
 ok('an empty scheme sends the raw key', webhookHeaderValue({ key: KEY, scheme: '' }) === KEY);
@@ -150,14 +175,25 @@ const mut = () => ({
   retry_until: new Date(Date.now() + 60_000).toISOString(),
 });
 
-const admit = async (id: string, msg: string): Promise<void> => {
-  await grok.node.messages.admit({ actor: SENDER }, {
+const admitOn = async (
+  target: Awaited<ReturnType<typeof createGrokBotNode>>,
+  sender: string,
+  id: string,
+  msg: string,
+  meta?: Record<string, unknown>,
+): Promise<void> => {
+  await target.node.messages.admit({ actor: sender }, {
     ...mut(),
-    message: { id, sender: SENDER, delivery_kind: 'note', msg },
+    message: {
+      id, sender, delivery_kind: 'note', msg,
+      ...(meta === undefined ? {} : { meta: meta as never }),
+    },
     target_endpoint: GROK,
     plan: { response: 'none', execution: 'existing' },
   });
 };
+const admit = async (id: string, msg: string, meta?: Record<string, unknown>): Promise<void> =>
+  admitOn(grok, SENDER, id, msg, meta);
 
 await admit('msg-01', 'hello grok');
 ok('an inbound admission POSTs the webhook', await waitFor(() => posts.length >= 1) && posts.length >= 1);
@@ -173,7 +209,12 @@ ok('the JSON body names sender, message id, timestamp, content and thread',
   && firstBody.msg === 'hello grok'
   && typeof firstBody.timestamp === 'string'
   && rec(firstBody.thread)?.owner === GROK
+  && rec(firstBody.thread)?.id === aliceDm
   && rec(firstBody.message)?.id === 'msg-01');
+const firstMeta = rec(firstBody.meta);
+const firstGrokbot = rec(firstMeta?.grokbot);
+ok('the webhook meta carries grokbot.chat_kind and grokbot.chat_id',
+  firstGrokbot?.chat_kind === 'dm' && firstGrokbot?.chat_id === SENDER);
 
 const logged = JSON.stringify(logs);
 ok('logs never include the sender key', !logged.includes(KEY));
@@ -319,6 +360,65 @@ ok('webhookPayload includes sender, message id, timestamp and metadata',
   payload?.sender === SENDER && payload?.message_id === 'm'
   && payload?.timestamp === '2026-11-03T00:00:00.000Z'
   && rec(payload?.meta)?.mentions !== undefined);
+ok('webhookPayload falls back to a DM keyed by the sender for a legacy thread id',
+  rec(rec(payload?.meta)?.grokbot)?.chat_kind === 'dm'
+  && rec(rec(payload?.meta)?.grokbot)?.chat_id === SENDER);
+
+const stableSample = {
+  ...sample,
+  thread_ref: { owner: GROK, id: 'grokbot:group:room-9' },
+} as Entry;
+const stableMeta = rec(rec(webhookPayload(GROK, stableSample))?.meta);
+const stableGrokbot = rec(stableMeta?.grokbot);
+ok('webhookPayload reads grokbot.chat_kind/chat_id from a stable thread id',
+  stableGrokbot?.chat_kind === 'group' && stableGrokbot?.chat_id === 'room-9');
+
+// --- thread isolation -------------------------------------------------------
+
+posts.length = 0;
+webhookCalls = 0;
+webhookStatus = 204;
+const isolated = await createGrokBotNode(config(), { storage: 'memory', fetch: mockFetch, log });
+await admitOn(isolated, SENDER, 'iso-a1', 'alice first');
+await admitOn(isolated, SENDER, 'iso-a2', 'alice second');
+await admitOn(isolated, BOB, 'iso-b1', 'bob first');
+await admitOn(isolated, SENDER, 'iso-g1', 'group one', {
+  data: { grokbot: { chat_kind: 'group', chat_id: 'room-1' } },
+});
+await admitOn(isolated, BOB, 'iso-g2', 'group two', {
+  data: { grokbot: { chat_kind: 'group', chat_id: 'room-2' } },
+});
+ok('two messages from the same sender share grokbot:dm:<sender>', await waitFor(async () => {
+  const listed = await isolated.node.messages.list(isolated.node.auth, { owner: GROK, id: aliceDm }, {
+    attention: 'thread', page_size: 50,
+  });
+  return listed.items.some(entry => entry.message.id === 'iso-a1')
+    && listed.items.some(entry => entry.message.id === 'iso-a2');
+}));
+const aliceThread = await isolated.node.messages.list(isolated.node.auth, { owner: GROK, id: aliceDm }, {
+  attention: 'thread', page_size: 50,
+});
+const bobThread = await isolated.node.messages.list(isolated.node.auth, { owner: GROK, id: bobDm }, {
+  attention: 'thread', page_size: 50,
+});
+ok('a second sender lands on its own DM thread',
+  bobThread.items.some(entry => entry.message.id === 'iso-b1')
+  && aliceThread.items.every(entry => entry.message.sender !== BOB)
+  && bobThread.items.every(entry => entry.message.sender !== SENDER));
+const groupOne = await isolated.node.messages.list(isolated.node.auth, { owner: GROK, id: 'grokbot:group:room-1' }, {
+  attention: 'thread', page_size: 50,
+});
+const groupTwo = await isolated.node.messages.list(isolated.node.auth, { owner: GROK, id: 'grokbot:group:room-2' }, {
+  attention: 'thread', page_size: 50,
+});
+ok('each Grok Bot group chat has its own thread',
+  groupOne.items.some(entry => entry.message.id === 'iso-g1')
+  && groupTwo.items.some(entry => entry.message.id === 'iso-g2')
+  && groupOne.items.every(entry => entry.message.id !== 'iso-g2')
+  && aliceThread.items.every(entry => entry.message.id !== 'iso-g1'));
+ok('group webhook meta names grokbot.chat_kind=group',
+  posts.some(post => rec(rec(post.body.meta)?.grokbot)?.chat_kind === 'group'
+    && rec(rec(post.body.meta)?.grokbot)?.chat_id === 'room-1'));
 
 // --- outbound reply ---------------------------------------------------------
 
@@ -337,14 +437,70 @@ const badKey = await replyNode.fetch(new Request('http://127.0.0.1/grok/reply', 
 }));
 ok('the reply path refuses a wrong sender key', badKey.status === 401);
 
+posts.length = 0;
+webhookCalls = 0;
+await admitOn(replyNode, SENDER, 'reply-src', 'please acknowledge');
+ok('the inbound that a reply will continue reached the webhook', await waitFor(() =>
+  posts.some(post => post.body.message_id === 'reply-src')));
+const inbound = posts.find(post => post.body.message_id === 'reply-src')?.body ?? {};
+const inboundThread = rec(inbound.thread);
+
+const omitted = await replyNode.fetch(new Request('http://127.0.0.1/grok/reply', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', Authorization: `Bearer ${KEY}` },
+  body: JSON.stringify({ to: GROK, msg: 'orphan reply', delivery_kind: 'reply' }),
+}));
+const omittedBody = rec(JSON.parse(await omitted.text()));
+ok('a reply that omits thread and in_reply_to is refused',
+  omitted.status !== 201
+  && omittedBody?.admission !== 'accepted'
+  && (rec(omittedBody?.error)?.code === 'not_found' || rec(omittedBody?.error)?.code !== undefined));
+
 const sent = await replyNode.fetch(new Request('http://127.0.0.1/grok/reply', {
   method: 'POST',
   headers: { 'content-type': 'application/json', Authorization: `Bearer ${KEY}` },
-  body: JSON.stringify({ to: GROK, msg: 'ack from grok', delivery_kind: 'reply' }),
+  body: JSON.stringify({
+    to: GROK,
+    id: 'reply-ack',
+    msg: 'ack from grok',
+    delivery_kind: 'reply',
+    thread: inboundThread,
+    in_reply_to: { sender: SENDER, id: 'reply-src' },
+  }),
 }));
 const sentBody = rec(JSON.parse(await sent.text()));
+const sentReceipt = rec(sentBody?.receipt);
 ok('an authenticated reply is sent through this node',
   sent.status === 201 && sentBody?.admission === 'accepted');
+ok('a reply that brings back the inbound thread lands on that thread_ref',
+  rec(sentReceipt?.thread_ref)?.owner === GROK
+  && rec(sentReceipt?.thread_ref)?.id === aliceDm
+  && rec(sentReceipt?.thread_ref)?.id === inboundThread?.id);
+
+const continued = await replyNode.node.messages.list(replyNode.node.auth, { owner: GROK, id: aliceDm }, {
+  attention: 'thread', page_size: 50,
+});
+ok('the continued thread holds both the inbound note and the reply',
+  continued.items.some(entry => entry.message.id === 'reply-src')
+  && continued.items.some(entry => entry.message.id === 'reply-ack'
+    && entry.message.meta?.in_reply_to?.sender === SENDER
+    && entry.message.meta?.in_reply_to?.id === 'reply-src'));
+
+const recovered = await replyNode.fetch(new Request('http://127.0.0.1/grok/reply', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', Authorization: `Bearer ${KEY}` },
+  body: JSON.stringify({
+    to: GROK,
+    id: 'reply-recovered',
+    msg: 'recovered by in_reply_to',
+    delivery_kind: 'reply',
+    in_reply_to: { sender: SENDER, id: 'reply-src' },
+  }),
+}));
+const recoveredBody = rec(JSON.parse(await recovered.text()));
+ok('omitting thread but sending in_reply_to recovers the original landing',
+  recovered.status === 201
+  && rec(rec(recoveredBody?.receipt)?.thread_ref)?.id === aliceDm);
 
 const statusRes = await replyNode.fetch(new Request('http://127.0.0.1/grok/status'));
 const statusBody = rec(JSON.parse(await statusRes.text()));
@@ -352,6 +508,7 @@ const webhook = rec(statusBody?.webhook);
 ok('GET /grok/status redacts the sender key',
   statusRes.status === 200 && webhook?.key === 'set' && JSON.stringify(statusBody).includes(KEY) === false);
 
+await isolated.stop();
 await replyNode.stop();
 await grok.stop();
 await rm(dir, { recursive: true, force: true });

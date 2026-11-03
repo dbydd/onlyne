@@ -53,6 +53,8 @@ packages/mcp-server     反向：把本节点的消息/thread/邻居暴露为 MC
 
 `mcp-gateway` 把 **远程 MCP server** 接成 Onlyne 资源。`mcp-server` 把 **本 Onlyne 节点** 接成 MCP 工具，给 Cursor / Claude Desktop / Grok Bot 这类 MCP 客户端用。两者方向相反，不要混用配置。
 
+`@onlyne/mcp-server` 可以与 `@onlyne/grok-bot` 并列跑成两个进程。Grok Bot 同一账户下多 assistant / 群的隔离边界是 grok-bot 节点上的 thread（`grokbot:dm:<agent_id>` / `grokbot:group:<group_id>`），不是 MCP。MCP 工具读的是 MCP 节点自己的 store；两套身份合并之前看不到 grok-bot 的会话。一对账户钥对应一个 grok-bot 节点，不要按 bot 再拆密钥。
+
 `mcp-gateway` 复用 `FileStorage` 与 `node-host` 的发现和信任终端。网关状态区显示 server 与工具数、任务与下次触发时间、推送队列与最近结果。`ONLYNE_NO_TUI=1` 保留 JSON 日志。MCP server 连接器不单独成包：`mcp-core` 的标准协议实现覆盖各 server，特殊 URL 和认证头由配置提供。
 
 ## 3. 资源映射

@@ -18,7 +18,9 @@ const en = {
   'error.decide': 'The Grok Bot node forwards inbound messages; it does not decide sends.',
   'error.noContext': 'The Grok Bot node consumes no model context.',
   'error.replyAuth': 'The reply endpoint requires the configured sender key.',
-  'error.replyBody': 'The reply body needs to, msg, and optional thread / in_reply_to fields.',
+  'error.replyBody': 'The reply body needs to, msg, and optional thread / in_reply_to fields. Bring back thread and in_reply_to from the webhook to continue the same conversation.',
+  'error.groupChatId': 'A Grok Bot group thread needs grokbot.chat_id (or grokbot.group_id) in message meta.',
+  'error.chatKind': 'grokbot.chat_kind is dm or group, not {kind}.',
   'context.summary': 'Delivery into the Grok Bot node; a reply continues in the conversation thread.',
 } as const;
 
@@ -40,7 +42,9 @@ const zh: Record<keyof typeof en, string> = {
   'error.decide': 'Grok Bot 节点只转发入站消息，不做发送决策。',
   'error.noContext': 'Grok Bot 节点不消费模型上下文。',
   'error.replyAuth': '回复端点需要配置中的发送密钥。',
-  'error.replyBody': '回复正文需要 to、msg，以及可选的 thread / in_reply_to 字段。',
+  'error.replyBody': '回复正文需要 to、msg，以及可选的 thread / in_reply_to 字段。把 webhook 里的 thread 和 in_reply_to 带回来才能继续同一会话。',
+  'error.groupChatId': 'Grok Bot 群会话需要在消息 meta 里提供 grokbot.chat_id（或 grokbot.group_id）。',
+  'error.chatKind': 'grokbot.chat_kind 只能是 dm 或 group，而不是 {kind}。',
   'context.summary': '投递到 Grok Bot 节点；回复继续落在该会话 thread。',
 };
 

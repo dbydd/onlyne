@@ -151,6 +151,11 @@ Each inbound message POSTs JSON to the webhook URL (Authorization: Bearer \<key\
 The URL and key come from the environment, never from a committed file. Grok Bot replies with
 `POST /grok/reply` using the same key. See `packages/grok-bot/README.md`.
 
+One account key, one grok-bot node (default `urn:onlyne:gateway:grok-bot`), many threads. Do
+not provision a keypair per assistant. Each Grok Bot DM is `grokbot:dm:<agent_id>` and each
+group is `grokbot:group:<group_id>` under that node. Echo `thread` and `in_reply_to` from the
+webhook on `/grok/reply` to continue the same conversation.
+
 ## Onlyne MCP server
 
 ```json
@@ -163,7 +168,9 @@ The URL and key come from the environment, never from a committed file. Grok Bot
 
 This process is an Onlyne node that an MCP client drives over stdio (`send_message`, inbox,
 threads, neighbors). Register it as `command: onlyne-mcp-server` with the config path as the
-argument. It is not a substitute for `onlyne-mcp-gateway`. See `packages/mcp-server/README.md`.
+argument. It is not a substitute for `onlyne-mcp-gateway`. It is also not the grok-bot node:
+MCP reads this node's store; grok-bot threads stay on the grok-bot node until identities are
+unified. See `packages/mcp-server/README.md`.
 
 ## Key exchange is per pair
 

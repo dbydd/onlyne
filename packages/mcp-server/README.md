@@ -32,6 +32,12 @@ The CLI always creates or loads an identity key under `~/.config/onlyne/keys/`. 
 with peers the same way as any other Onlyne node (trust terminal on a gateway, `/onlyne` on OMP).
 This process skips the trust TUI so it cannot corrupt the stdio stream.
 
+This is a **separate identity from `@onlyne/grok-bot`**. Grok Bot fan-out on one account is
+isolated by grok-bot threads (`grokbot:dm:<agent_id>`, `grokbot:group:<group_id>`) under the
+single grok-bot node / account key. MCP tools read **this** node's store — inbox, threads,
+neighbors — not the grok-bot node's, unless the two identities are later unified. Running
+MCP as its own process is the supported split.
+
 ## Register in an MCP client
 
 Cursor / Claude Desktop / any stdio MCP client:

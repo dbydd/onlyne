@@ -10,6 +10,7 @@ import {
   DEFAULT_STATUS_PATH, redactWebhook, webhookHeaderValue, type GrokBotConfig,
 } from './config.ts';
 import { t } from './node-text.ts';
+import { installGrokBotAdmit } from './threads.ts';
 import { enqueueNotify, WebhookDispatcher, type FetchLike } from './webhook.ts';
 
 export type { GrokBotConfig, WebhookConfig } from './config.ts';
@@ -19,6 +20,11 @@ export {
   webhookHeaderValue,
 } from './config.ts';
 export { deliveryId, urlForLog, webhookPayload, WebhookDispatcher, type FetchLike } from './webhook.ts';
+export {
+  bindGrokBotInbound, grokBotChatFromMessage, grokBotChatFromThread, grokBotThreadId,
+  parseGrokBotThreadId, GROK_BOT_DM_PREFIX, GROK_BOT_GROUP_PREFIX,
+  type GrokBotChat, type GrokBotChatKind,
+} from './threads.ts';
 
 export const STATUS_PATH = DEFAULT_STATUS_PATH;
 
@@ -123,9 +129,8 @@ export async function createGrokBotNode(config: GrokBotConfig, options: GrokBotO
     })) as Json,
     ...(options.keys === undefined ? {} : { keys: options.keys }),
     decide: () => { throw new OnlyneError('decision_unavailable', t('error.decide')); },
-    // First contact opens a thread on this node so any authenticated peer can wake Grok Bot
-    // without a pre-shared membership. Discovery and signatures still gate the wire.
-    inboundThread: async () => true,
+    // Do not invent a random first-contact thread. Inbound admissions are bound to
+    // grokbot:dm:<agent_id> / grokbot:group:<group_id> before admit (installGrokBotAdmit).
     runtime: {
       notify: event => {
         if (event.event === 'trust') {
@@ -153,6 +158,7 @@ export async function createGrokBotNode(config: GrokBotConfig, options: GrokBotO
     now: options.now ?? (() => Date.now()),
     id: () => crypto.randomUUID(),
   });
+  installGrokBotAdmit(node, owner);
 
   const replyAuth = (request: Request): boolean => {
     const got = request.headers.get(config.webhook.header);
@@ -176,6 +182,10 @@ export async function createGrokBotNode(config: GrokBotConfig, options: GrokBotO
       || typeof object.msg !== 'string') {
       return Response.json({ error: { code: 'invalid_request', message: t('error.replyBody') } }, { status: 400 });
     }
+    // The supported continue-conversation body brings back `thread` and `in_reply_to`
+    // from the webhook. Omitting `thread` does not invent a grokbot:dm/group id: an
+    // `in_reply_to` that this node admitted can recover that landing; both omitted is
+    // refused (this node has no default thread).
     const thread = threadRef(object.thread);
     const inReplyTo = messageRef(object.in_reply_to);
     const deliveryKind = typeof object.delivery_kind === 'string' && object.delivery_kind.length > 0
