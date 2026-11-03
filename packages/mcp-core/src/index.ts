@@ -1,7 +1,7 @@
 import type { Json, NodeId, Resource, ResourceDriver, ResourceRef } from '@onlyne/lib';
 import { OnlyneError } from '@onlyne/lib';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamablehttp.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 export interface McpServerOptions {
   name: string;

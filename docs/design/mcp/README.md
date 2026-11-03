@@ -48,7 +48,10 @@ MCP server 继续提供工具调用。网关另外持有挂载任务、运行记
 ```
 packages/mcp-core      会话层：HTTP streamable transport、initialize、tools/list、tools/call、错误分类
 packages/mcp-gateway    多 server 组装、持久定时任务、运行记录、controller 推送、CLI
+packages/mcp-server     反向：把本节点的消息/thread/邻居暴露为 MCP 工具，stdio transport
 ```
+
+`mcp-gateway` 把 **远程 MCP server** 接成 Onlyne 资源。`mcp-server` 把 **本 Onlyne 节点** 接成 MCP 工具，给 Cursor / Claude Desktop / Grok Bot 这类 MCP 客户端用。两者方向相反，不要混用配置。
 
 `mcp-gateway` 复用 `FileStorage` 与 `node-host` 的发现和信任终端。网关状态区显示 server 与工具数、任务与下次触发时间、推送队列与最近结果。`ONLYNE_NO_TUI=1` 保留 JSON 日志。MCP server 连接器不单独成包：`mcp-core` 的标准协议实现覆盖各 server，特殊 URL 和认证头由配置提供。
 
@@ -116,5 +119,5 @@ HTTP streamable transport（MCP 2025-03-26）：
 ## 7. 开放项
 
 - `resources/list`/`resources/read`/`resources/subscribe`（MCP 的资源数据原语）：Hindsight 不用它们，先不接；RFC 0015 §2 的映射表在需要数据源型 server 时再落。
-- stdio transport：本地 CLI 型 MCP server（如 filesystem）用 stdio；先只做 HTTP，stdio 增量加。
+- stdio transport：本地 CLI 型 MCP server（如 filesystem）用 stdio；网关侧仍先只做 HTTP，stdio 作客户端增量另加。本仓库另有 `@onlyne/mcp-server`，用官方 SDK 的 stdio transport 把 Onlyne 节点暴露给 MCP 客户端，与网关把远程 MCP server 接进来不是同一件事。
 - 工具级授权策略（RFC 0015 §4 的本地策略）：目前节点级允许即全部工具可用，工具过滤是配置增量。

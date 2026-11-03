@@ -18,6 +18,8 @@ Onlyne v3 是面向 agent 消息与资源协作的去中心化 TypeScript 系统
 | [`packages/im-gateway`](packages/im-gateway/README.md) | `@onlyne/im-gateway`：每个 IM 通道独立运行节点，托管会话资源并提供信任终端 |
 | [`packages/mcp-core`](packages/mcp-core/README.md) | `@onlyne/mcp-core`：MCP 会话与资源驱动 |
 | [`packages/mcp-gateway`](packages/mcp-gateway/README.md) | `@onlyne/mcp-gateway`：MCP 资源、持久定时任务与 controller 结果推送 |
+| [`packages/grok-bot`](packages/grok-bot/README.md) | `@onlyne/grok-bot`：把入站消息 POST 到 Grok Bot webhook 的通信节点 |
+| [`packages/mcp-server`](packages/mcp-server/README.md) | `@onlyne/mcp-server`：把一个 Onlyne 节点暴露为 MCP 工具与资源的 stdio 服务器 |
 | [`packages/omp-onlyne`](packages/omp-onlyne/README.md) | OMP 接入：单一 `msg` 工具、judge 选择投递、入站注入 |
 
 `packages/` 只放可发布的运行时代码。后续包与 `lib` 并列。
@@ -29,7 +31,7 @@ Onlyne v3 是面向 agent 消息与资源协作的去中心化 TypeScript 系统
 包之间有依赖，按依赖顺序发布：
 
 ```sh
-for pkg in lib node-host im-core im-fake im-lark im-qq im-wechat im-gateway mcp-core mcp-gateway omp-onlyne; do
+for pkg in lib node-host im-core im-fake im-lark im-qq im-wechat im-gateway mcp-core mcp-gateway grok-bot mcp-server omp-onlyne; do
   npm publish "packages/$pkg"
 done
 ```
