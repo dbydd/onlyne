@@ -21,18 +21,21 @@ The repository holds the draft protocol specifications, the runtime packages, an
 | [`packages/grok-bot`](packages/grok-bot/README.md) | `@onlyne/grok-bot`: a communication node that POSTs inbound messages to a Grok Bot webhook |
 | [`packages/mcp-server`](packages/mcp-server/README.md) | `@onlyne/mcp-server`: stdio MCP server that exposes one Onlyne node as tools and resources |
 | [`packages/omp-onlyne`](packages/omp-onlyne/README.md) | OMP integration: one `msg` tool, judge-selected delivery, and inbound injection |
+| [`packages/desktop-bot`](packages/desktop-bot/README.md) | `@onlyne/desktop-bot`: native bot teams, per-bot `.omp` configuration, OMP RPC sessions and extensible widgets |
 
 `packages/` holds publishable runtime code only. Further packages sit beside `lib` as they land.
 
-Every package ships TypeScript source for Bun, so `engines.bun` is the only runtime requirement.
+Runtime libraries ship TypeScript source for Bun. The desktop package also uses Electron and an installed OMP RPC executable.
 Scoped packages publish with `access: public`.
+
+Run `bun install` and `bun run desktop` to open the desktop application. Onlyne runs inside the application. Each bot owns its configuration and network identity.
 
 ## Publishing
 
 The packages depend on each other, so publish in dependency order:
 
 ```sh
-for pkg in lib node-host im-core im-fake im-lark im-qq im-wechat im-gateway mcp-core mcp-gateway grok-bot mcp-server omp-onlyne; do
+for pkg in lib node-host im-core im-fake im-lark im-qq im-wechat im-gateway mcp-core mcp-gateway grok-bot mcp-server omp-onlyne desktop-bot; do
   npm publish "packages/$pkg"
 done
 ```

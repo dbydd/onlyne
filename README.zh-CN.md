@@ -21,17 +21,20 @@ Onlyne v3 是面向 agent 消息与资源协作的去中心化 TypeScript 系统
 | [`packages/grok-bot`](packages/grok-bot/README.md) | `@onlyne/grok-bot`：把入站消息 POST 到 Grok Bot webhook 的通信节点 |
 | [`packages/mcp-server`](packages/mcp-server/README.md) | `@onlyne/mcp-server`：把一个 Onlyne 节点暴露为 MCP 工具与资源的 stdio 服务器 |
 | [`packages/omp-onlyne`](packages/omp-onlyne/README.md) | OMP 接入：单一 `msg` 工具、judge 选择投递、入站注入 |
+| [`packages/desktop-bot`](packages/desktop-bot/README.md) | `@onlyne/desktop-bot`：原生桌面 bot 团队、每个 bot 独立的 `.omp` 配置、OMP RPC 会话与可扩展 widget |
 
 `packages/` 只放可发布的运行时代码。后续包与 `lib` 并列。
 
-每个包发布 TypeScript 源码，运行时要求写在 `engines.bun`。带作用域的包使用 `access: public` 发布。
+运行时库发布供 Bun 执行的 TypeScript 源码。桌面包还使用 Electron 和已安装的 OMP RPC 可执行程序。带作用域的包使用 `access: public` 发布。
+
+执行 `bun install` 和 `bun run desktop` 可打开桌面应用。Onlyne 内置于应用中，每个 bot 独立持有配置与网络身份。
 
 ## 发布
 
 包之间有依赖，按依赖顺序发布：
 
 ```sh
-for pkg in lib node-host im-core im-fake im-lark im-qq im-wechat im-gateway mcp-core mcp-gateway grok-bot mcp-server omp-onlyne; do
+for pkg in lib node-host im-core im-fake im-lark im-qq im-wechat im-gateway mcp-core mcp-gateway grok-bot mcp-server omp-onlyne desktop-bot; do
   npm publish "packages/$pkg"
 done
 ```
