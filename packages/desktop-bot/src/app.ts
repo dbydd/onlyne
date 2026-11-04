@@ -34,6 +34,13 @@ const identifier = (value: unknown): string => {
   return result;
 };
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
+function demoLine(bot: { id: string; name: string }, spoken: string): string {
+  const line = spoken.length > 0 ? spoken.slice(0, 180) : 'nothing yet';
+  if (bot.id === 'mira') return `Demo reply. I heard “${line}”. I will not pair a peer from a sentence. The trust screen is where a fingerprint is read back.`;
+  if (bot.id === 'jun') return `Demo reply. About “${line}”: I keep the claim next to its source, and I will not add a tool from this chat.`;
+  if (bot.id === 'lark') return `Demo reply. “${line}” does not put a credential on this desk. I only report what the gateway already shows.`;
+  return `Demo reply from ${bot.name}. You wrote “${line}”. No model is running; this answer is simulated.`;
+}
 const contentText = (value: unknown): string => {
   if (!Array.isArray(value)) return '';
   const parts: string[] = [];
@@ -333,12 +340,16 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
     await connection.close();
   };
 
-  const prompt = async (bot: Bot, conversation: Conversation, message: string): Promise<void> => {
+  const prompt = async (bot: Bot, conversation: Conversation, message: string, userText?: string): Promise<void> => {
     if (options.demo === true) {
+      const spoken = (userText ?? '').replace(/\s+/g, ' ').trim();
+      if (spoken === '/fail' || spoken.startsWith('/fail ')) {
+        emit({ type: 'error', botId: bot.id, conversationId: conversation.id, message: 'Executable not found in $PATH: "omp"' });
+        return;
+      }
       emit({ type: 'typing', conversationId: conversation.id, botId: bot.id, demo: true });
-      await new Promise(resolve => setTimeout(resolve, 650));
-      const excerpt = message.replace(/\s+/g, ' ').trim().slice(0, 160);
-      const text = `Demo reply from ${bot.name}. No model is running; this answer is simulated so the desk can be tried. I read: “${excerpt || 'your message'}”.`;
+      await new Promise(resolve => setTimeout(resolve, 400));
+      const text = demoLine(bot, spoken);
       await save(state => {
         state.messages.push({ id: shortId('msg'), conversationId: conversation.id, role: 'assistant', botId: bot.id, text, createdAt: Date.now() });
       });
@@ -631,7 +642,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
               includeHistory: conversation.kind === 'group',
               members: conversation.botIds.map(botFor),
             });
-            void prompt(botFor(id), conversation, compiled.prompt);
+            void prompt(botFor(id), conversation, compiled.prompt, body);
           }
           if (conversation.greeting !== undefined && conversation.greeted !== true) {
             await save(state => { const target = state.conversations.find(item => item.id === conversation.id); if (target !== undefined) target.greeted = true; });
@@ -646,7 +657,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
           if (!conversation.botIds.includes(bot.id)) throw new Error('Bot is not a member of this conversation');
           const transcript = snapshot().messages.filter(item => item.conversationId === conversation.id && item.id !== last.id);
           const compiled = compileScene(bot, conversation, transcript, last.text, { includeHistory: conversation.kind === 'group', members: conversation.botIds.map(botFor) });
-          await prompt(bot, conversation, compiled.prompt);
+          await prompt(bot, conversation, compiled.prompt, last.text);
           return { retried: last.id };
         }
         case 'message.regenerate': {
@@ -659,7 +670,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
           await save(current => { current.messages = current.messages.filter(item => item.id !== last.id); });
           const transcript = snapshot().messages.filter(item => item.conversationId === conversation.id);
           const compiled = compileScene(bot, conversation, transcript, 'Regenerate your previous reply with different wording and a different action. Do not repeat it.', { includeHistory: true });
-          await prompt(bot, conversation, compiled.prompt);
+          await prompt(bot, conversation, compiled.prompt, 'Please write that again, in different words.');
           return { removed: last.id, state: compiled.stats };
         }
         case 'harness.preview': {

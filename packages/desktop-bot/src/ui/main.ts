@@ -39,7 +39,7 @@ import {
 	type WorkspaceSpec,
 } from "./layout.ts";
 import type { WorkspaceContribution } from "./api.ts";
-import { chord, commandKey, formatWhen, middleEllipsis } from "../desk-format.ts";
+import { chord, commandKey, formatDeskHash, formatWhen, middleEllipsis, parseDeskHash } from "../desk-format.ts";
 
 const MOD = commandKey(navigator.platform, navigator.userAgent);
 
@@ -399,27 +399,18 @@ function persistLayout(): void {
 	}
 }
 
-function setDock(id: string | null, options?: { quiet?: boolean }): void {
-	const previous = layout.dock;
+function setDock(id: string | null): void {
+	if (layout.dock === id) return;
 	dockKey = "";
 	layout = { ...layout, dock: id };
 	persistLayout();
-	if (options?.quiet === true || previous === id) return;
-	const name = id === null ? "the stage" : panels.get(id)?.title ?? id;
-	notify(id === null ? "Dock closed." : `${name} is docked beside the conversation.`, "info", {
-		label: "Undo",
-		run: () => setDock(previous, { quiet: true }),
-	});
+	renderStatusbar();
+	writeRoute();
 }
 
 function toggleDock(): void {
-	if (layout.dock) {
-		setDock(null);
-		return;
-	}
-	const pin = activePanel ?? "inbox";
-	setDock(pin);
-	if (activePanel === pin) showChat();
+	if (layout.dock) setDock(null);
+	else setDock(activePanel ?? "health");
 }
 
 function resetLayout(): void {
@@ -430,7 +421,7 @@ function resetLayout(): void {
 }
 
 function openWorkspace(spec: WorkspaceSpec): void {
-	if (spec.panel === null) showChat();
+	if (spec.panel === null) showChat({ focus: true });
 	else openPanel(spec.panel);
 }
 
@@ -1549,6 +1540,12 @@ function buildShell(): void {
 }
 
 function wireStaticEvents(): void {
+	refs.transcript.addEventListener("mousedown", (event) => {
+		const target = event.target;
+		if (!(target instanceof HTMLElement)) return;
+		if (target.closest("button, a, input, textarea, summary")) return;
+		event.preventDefault();
+	});
 	refs.transcript.addEventListener("scroll", () => {
 		const node = refs.transcript;
 		stickToBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 56;
@@ -1664,6 +1661,7 @@ function wireStaticEvents(): void {
 			void refresh().catch(() => undefined);
 		}
 	});
+	window.addEventListener("hashchange", () => restoreRoute());
 	window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
 		if (themeSetting === "system") applyTheme("system");
 	});
@@ -1818,8 +1816,7 @@ function renderRail(): void {
 		button.addEventListener("contextmenu", (event) => {
 			if (spec.panel === null) return;
 			event.preventDefault();
-			setDock(spec.panel);
-			if (activePanel === spec.panel) showChat();
+			setDock(layout.dock === spec.panel ? null : spec.panel);
 		});
 		refs.railBots.append(button);
 	}
@@ -2131,6 +2128,15 @@ function renderStatusbar(): void {
 			connectionLabel,
 		),
 	);
+	if (layout.dock) {
+		const docked = panels.get(layout.dock);
+		items.push(h("button", {
+			class: "status-item docked",
+			type: "button",
+			title: "Close the dock",
+			onclick: () => setDock(null),
+		}, `Docked ${docked?.title ?? layout.dock}`));
+	}
 	const conversation = selectedConversation();
 	if (conversation) items.push(h("span", { class: "status-item", title: conversation.id, text: conversation.title }));
 	const auto = conversation ? autoStatus.get(conversation.id) : undefined;
@@ -2159,10 +2165,6 @@ function renderStatusbar(): void {
 				middleEllipsis(nodeId, 10, 8),
 			),
 		);
-	}
-	if (layout.dock) {
-		const docked = panels.get(layout.dock);
-		items.push(h("button", { class: "status-item", type: "button", title: "Close the dock", onclick: () => setDock(null) }, `Dock ${docked?.title ?? layout.dock}`));
 	}
 	const frames = framesByConversation.get(selectedConversationId ?? "")?.length ?? 0;
 	items.push(h("span", { class: "status-item", title: "Runtime frames received in this conversation", text: `${frames} frame${frames === 1 ? "" : "s"}` }));
@@ -2326,11 +2328,9 @@ function renderMessage(message: ChatMessage): HTMLElement {
 	const head = h(
 		"div",
 		{ class: "msg-head" },
-		role === "user"
-			? h("span", { class: "avatar sm", "aria-hidden": "true", text: "YOU" })
-			: avatarNode(author, botAvatarOf(botOf(message.botId))),
-		h("span", { class: "msg-author", text: author }),
-		h("span", { class: "msg-role", text: role }),
+		role === "user" ? false : avatarNode(author, botAvatarOf(botOf(message.botId))),
+		h("span", { class: "msg-author", text: role === "user" ? "You" : author }),
+		role === "user" ? false : h("span", { class: "msg-role", text: role }),
 		(() => {
 			const when = formatWhen(message.createdAt);
 			return h("time", { class: "msg-time", datetime: new Date(message.createdAt).toISOString(), title: when.title, text: when.label });
@@ -3005,6 +3005,7 @@ function selectConversation(id: string): void {
 	renderAll();
 	syncHostSelection();
 	activateBotPlugins();
+	writeRoute();
 	refs.composerInput.focus();
 }
 
@@ -3622,7 +3623,8 @@ function renderBotDetail(conversation: Conversation, bot: Bot): HTMLElement {
 		["Host plugins", plugins.host.length ? plugins.host.join(", ") : "none"],
 		["Renderer plugins", plugins.renderer.length ? plugins.renderer.join(", ") : "none"],
 		["Capabilities", bot.capabilities.length ? bot.capabilities.map(capabilityName).join(", ") : "none"],
-		["Messages", String(messages.length)],
+		["In conversation", String(messagesOf(conversation.id).length)],
+		["From this bot", String(messages.length)],
 	];
 	if (usage.length) pairs.push(["Usage", usage.map((entry) => `${entry.key} ${compactNumber(entry.total)}`).join(" · ")]);
 	const teamAdmin = state.teamAdminId === bot.id;
@@ -4882,6 +4884,46 @@ function registerPanelInternal(id: string, title: string, render: (snapshot: Des
 	panels.set(id, { id, title, render });
 }
 
+let routing = false;
+
+function writeRoute(): void {
+	if (routing || !shellReady) return;
+	const next = formatDeskHash({
+		screen: activePanel ?? "chat",
+		...(selectedConversationId ? { selection: selectedConversationId } : {}),
+		...(layout.dock ? { dock: layout.dock } : {}),
+	});
+	if (location.hash === next) return;
+	history.pushState({ onlyne: true }, "", next);
+}
+
+function restoreRoute(): void {
+	if (!shellReady) return;
+	const route = parseDeskHash(location.hash || "#/chat");
+	routing = true;
+	try {
+		if (route.selection && state.conversations.some(item => item.id === route.selection)) selectedConversationId = route.selection;
+		const dock = route.dock && panels.has(route.dock) ? route.dock : null;
+		if (layout.dock !== dock) {
+			dockKey = "";
+			layout = { ...layout, dock };
+			persistLayout();
+		}
+		const screen = route.screen === "chat" || !panels.has(route.screen) ? null : route.screen;
+		if (screen === null) {
+			activePanel = null;
+			renderAll();
+		} else {
+			activePanel = screen;
+			renderAll();
+			renderPanel();
+		}
+		renderStatusbar();
+	} finally {
+		routing = false;
+	}
+}
+
 function openPanel(id: string): void {
 	if (!panels.has(id)) {
 		notify(`Unknown view: ${id}`, "error");
@@ -4896,9 +4938,10 @@ function openPanel(id: string): void {
 	renderView();
 	renderPanel();
 	renderDock();
+	writeRoute();
 }
 
-function showChat(): void {
+function showChat(options?: { focus?: boolean }): void {
 	if (activePanel === "settings") resetSettingsPreview();
 	activePanel = null;
 	closeDrawers();
@@ -4907,7 +4950,8 @@ function showChat(): void {
 	renderTopbar();
 	renderView();
 	renderDock();
-	refs.composerInput.focus();
+	writeRoute();
+	if (options?.focus) refs.composerInput.focus();
 }
 
 function withPageHeader(id: string, title: string, content: HTMLElement): HTMLElement {
@@ -4918,7 +4962,7 @@ function withPageHeader(id: string, title: string, content: HTMLElement): HTMLEl
 			h("div", { class: "desk-page-copy" },
 				h("p", { class: "eyebrow", text: "Desk" }),
 				h("h1", { text: title }),
-				h("p", { class: "lede", text: place?.hint || "Panel" }),
+				place?.hint ? h("p", { class: "lede", text: place.hint }) : false,
 			),
 		),
 		content,
@@ -5825,7 +5869,7 @@ function openPalette(): void {
 
 	const firstAction = actions[0];
 	const actionName = textInput(firstAction?.name ?? "");
-	const actionPayload = textArea(safeJson(firstAction?.payload() ?? {}), { rows: "6" });
+	const actionPayload = textArea("{}", { rows: "6" });
 	const actionResult = h("pre", { class: "palette-result" });
 
 	const botSelect = selectEl(
@@ -5901,6 +5945,28 @@ function openPalette(): void {
 			...(spec.shortcut ? { kbd: `G ${spec.shortcut.toUpperCase()}` } : {}),
 			run: () => { openWorkspace(spec); closePalette(); },
 		}));
+		for (const conversation of state.conversations) {
+			jumps.push({
+				kind: "jump",
+				title: conversation.title,
+				description: conversation.kind === "group" ? "Open this group" : "Open this conversation",
+				run: () => {
+					selectedConversationId = conversation.id;
+					showChat({ focus: true });
+					closePalette();
+				},
+			});
+		}
+		for (const panel of panels.values()) {
+			if (panel.botId) continue;
+			if (BUILTIN_WORKSPACES.some(item => item.panel === panel.id)) continue;
+			jumps.push({
+				kind: "jump",
+				title: panel.title,
+				description: "Library",
+				run: () => { openPanel(panel.id); closePalette(); },
+			});
+		}
 		jumps.push(
 			{ kind: "jump", title: "Toggle theme", description: "Switch the dark and light themes", run: () => { void toggleTheme(); closePalette(); } },
 			{ kind: "jump", title: layout.dock ? "Close dock" : "Dock this panel", description: "Pin a panel beside the stage. Undo is offered.", kbd: chord(MOD, "\\"), run: () => { toggleDock(); closePalette(); } },
@@ -5979,7 +6045,7 @@ function openPalette(): void {
 	const modal = openModal({
 		title: "Jump",
 		anchor: true,
-		wide: developerMode(),
+		wide: false,
 		body: h(
 			"div",
 			{ class: "palette-grid" },
@@ -6089,7 +6155,7 @@ function notify(message: string, level: Level = "info", action?: { label: string
 	toast.addEventListener("mouseenter", () => { paused = true; remaining -= Date.now() - started; });
 	toast.addEventListener("mouseleave", () => { paused = false; started = Date.now(); tick(); });
 	refs.toasts.append(toast);
-	while (refs.toasts.children.length > 4) refs.toasts.firstElementChild?.remove();
+	while (refs.toasts.children.length > 3) refs.toasts.firstElementChild?.remove();
 	tick();
 }
 
@@ -6390,6 +6456,8 @@ async function hydrate(): Promise<void> {
 	await markDemo();
 	await loadRendererPlugins();
 	renderAll();
+	if (location.hash.length > 2) restoreRoute();
+	else writeRoute();
 	syncHostSelection();
 	activateBotPlugins();
 }

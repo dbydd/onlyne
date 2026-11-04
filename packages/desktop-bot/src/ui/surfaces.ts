@@ -125,15 +125,14 @@ function botSelect(state: DesktopState, onChange: () => void): HTMLSelectElement
   return select;
 }
 
-function page(eyebrow: string, title: string, lede: string, tools: Child[], body: HTMLElement, note?: string): HTMLElement {
-  return h('div', { class: 'desk-page' },
+function page(eyebrow: string, title: string, lede: string, tools: Child[], body: HTMLElement, layout: 'single' | 'split' | 'grid' = 'single'): HTMLElement {
+  return h('div', { class: `desk-page layout-${layout}` },
     h('header', { class: 'desk-page-head' },
       h('div', { class: 'desk-page-copy' },
         h('p', { class: 'eyebrow', text: eyebrow }),
         h('h1', { text: title }),
         h('p', { class: 'lede', text: lede })),
       h('div', { class: 'desk-page-tools' }, ...tools)),
-    note === undefined ? false : h('p', { class: 'mode-note', text: note }),
     body);
 }
 
@@ -219,7 +218,7 @@ function inboxPanel(api: DesktopUiApi): (state: DesktopState) => HTMLElement {
     const body = h('div', { class: 'desk-split' });
     let filter: 'waiting' | 'all' = 'waiting';
     const tools = [botSelect(state, () => { void load(); })];
-    const root = page('Network', 'Inbox', 'Messages admitted to this bot’s node. Waiting rows have not been injected into a conversation.', tools, body);
+    const root = page('Network', 'Inbox', 'Messages admitted to this bot’s node. Waiting rows have not been injected into a conversation.', tools, body, 'split');
     const load = async (): Promise<void> => {
       body.replaceChildren(skeleton(5));
       try {
@@ -248,7 +247,7 @@ function inboxPanel(api: DesktopUiApi): (state: DesktopState) => HTMLElement {
             ['Delivery', pick(isRecord(attention.entry) && isRecord(attention.entry.message) ? attention.entry.message : null, ['delivery_kind']) || 'note'],
             ['Sequence', pick(attention, ['seq'])],
             ['Thread', thread === null ? '' : `${pick(thread, ['owner'])} / ${pick(thread, ['id'])}`],
-            ['When', pick(isRecord(attention.entry) ? attention.entry : null, ['at'])],
+            ['When', whenView(pick(isRecord(attention.entry) ? attention.entry : null, ['at']))],
           ]),
           h('blockquote', { class: 'desk-quote', text: messageBody(row) || 'This row has no message body.' }));
       };
@@ -295,10 +294,13 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
     const url = h('input', { type: 'url', placeholder: 'Peer URL', 'aria-label': 'Peer URL', autocomplete: 'off', spellcheck: 'false' });
     const errorLine = h('p', { class: 'field-error', hidden: true });
     const connect = h('button', { class: 'btn primary', type: 'button' }, 'Observe');
-    const query = h('input', { type: 'search', placeholder: 'Filter peers', 'aria-label': 'Filter peers' });
+    const query = h('input', { type: 'text', placeholder: 'Filter peers', 'aria-label': 'Filter peers', autocomplete: 'off' });
+    const clearFilter = h('button', { class: 'btn sm', type: 'button' }, 'Clear filter');
+    const filterMeta = h('p', { class: 'filter-meta' });
     let rows: Record<string, unknown>[] = [];
+    let pinned = '';
     const tools = [botSelect(state, () => { void load(); })];
-    const root = page('Network', 'Neighbors', 'Peers this node has seen. Observing records an address. It does not approve a fingerprint.', tools, body);
+    const root = page('Network', 'Neighbors', 'Peers this node has seen. Observing records an address. It does not approve a fingerprint.', tools, body, 'grid');
     const runConnect = (): void => {
       const parsed = parsePeerUrl(url.value);
       if (!parsed.ok) {
@@ -312,8 +314,12 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
       url.removeAttribute('aria-invalid');
       connect.disabled = true;
       void api.command('onlyne.action', { action: 'connect', args: { url: parsed.url }, ...scopePayload(api.state()) })
-        .then(() => {
+        .then(value => {
           url.value = '';
+          query.value = '';
+          const record = isRecord(value) ? value : {};
+          const peer = isRecord(record.peer) ? record.peer : record;
+          pinned = pick(peer, ['nodeId', 'node_id']);
           hooks.notify('Peer observed. Pairing still happens on Trust.', 'ok');
           return load();
         })
@@ -326,6 +332,7 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
     connect.addEventListener('click', runConnect);
     url.addEventListener('input', () => { errorLine.hidden = true; url.removeAttribute('aria-invalid'); });
     query.addEventListener('input', () => paint(rows));
+    clearFilter.addEventListener('click', () => { query.value = ''; pinned = ''; paint(rows); });
     const load = async (): Promise<void> => {
       body.replaceChildren(skeleton());
       try {
@@ -341,22 +348,28 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
     const paint = (all: Record<string, unknown>[]): void => {
       const needle = query.value.trim().toLowerCase();
       const visible = all.filter(row => {
+        const id = pick(row, ['nodeId', 'node_id']);
+        if (id === pinned) return true;
         if (needle.length === 0) return true;
-        const blob = [pick(row, ['nodeId', 'node_id']), pick(row, ['baseUrl', 'base_url']), peerPhaseLabel(pick(row, ['phase', 'state']))].join(' ').toLowerCase();
+        const blob = [id, pick(row, ['baseUrl', 'base_url']), peerPhaseLabel(pick(row, ['phase', 'state']))].join(' ').toLowerCase();
         return blob.includes(needle);
       });
+      filterMeta.textContent = needle.length === 0 ? `${all.length} peers` : `Showing ${visible.length} of ${all.length} · filter “${query.value.trim()}”`;
+      clearFilter.hidden = needle.length === 0;
       const grid = h('div', { class: 'card-grid' });
-      for (const row of visible) grid.append(neighborCard(row));
+      for (const row of visible) grid.append(neighborCard(row, pick(row, ['nodeId', 'node_id']) === pinned));
       const empty = visible.length === 0
         ? emptyBlock(
           all.length === 0 ? 'No neighbors yet' : 'No peers match',
-          all.length === 0 ? 'Observe a full http(s) URL. Approval is a separate step on Trust, after a fingerprint is on screen.' : 'Try a node name, host, or status such as Trusted.',
-          all.length === 0 ? h('button', { class: 'btn primary', type: 'button', onclick: () => url.focus() }, 'Observe a peer') : undefined,
+          all.length === 0 ? 'Observe a full http(s) URL. Approval is a separate step on Trust, after a fingerprint is on screen.' : 'Nothing matches this filter. Clear it to see every peer, including one you just observed.',
+          all.length === 0
+            ? h('button', { class: 'btn primary', type: 'button', onclick: () => url.focus() }, 'Observe a peer')
+            : h('button', { class: 'btn primary', type: 'button', onclick: () => { query.value = ''; pinned = ''; paint(all); } }, 'Clear filter'),
         )
         : false;
-      body.replaceChildren(connectBar(), query, empty === false ? grid : empty);
+      body.replaceChildren(connectBar(), h('div', { class: 'filter-row' }, query, clearFilter), filterMeta, empty === false ? grid : empty);
     };
-    const neighborCard = (row: Record<string, unknown>): HTMLElement => {
+    const neighborCard = (row: Record<string, unknown>, fresh = false): HTMLElement => {
       const nodeId = pick(row, ['nodeId', 'node_id']);
       const endpoint = pick(row, ['baseUrl', 'base_url']);
       const phase = pick(row, ['phase', 'state']) || 'no_exchange';
@@ -382,7 +395,7 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
       });
       const copy = h('button', { class: 'btn sm', type: 'button' }, 'Copy endpoint');
       copy.addEventListener('click', () => copyValue(hooks, endpoint, 'Endpoint copied.'));
-      return h('article', { class: 'peer-card' },
+      return h('article', { class: fresh ? 'peer-card fresh' : 'peer-card' },
         h('div', { class: 'peer-top' }, h('h2', { text: shortNode(nodeId) }), chip(label, toneForPhase(phase))),
         identifier(nodeId, hooks),
         kv([
@@ -537,7 +550,7 @@ function threadsPanel(api: DesktopUiApi): (state: DesktopState) => HTMLElement {
     const query = h('input', { type: 'search', placeholder: 'Filter threads', 'aria-label': 'Filter threads' });
     const body = h('div', { class: 'desk-stack' }, query, split);
     const tools = [botSelect(state, () => { void load(); })];
-    const root = page('Network', 'Threads', 'Threads this node owns, and threads it was invited into. A joined thread stays read-only here.', tools, body);
+    const root = page('Network', 'Threads', 'Threads this node owns, and threads it was invited into. A joined thread stays read-only here.', tools, body, 'split');
     query.addEventListener('input', () => { void load(); });
     const load = async (): Promise<void> => {
       split.replaceChildren(skeleton());
@@ -627,7 +640,7 @@ function resourcesPanel(api: DesktopUiApi): (state: DesktopState) => HTMLElement
     const query = h('input', { type: 'search', placeholder: 'Filter resources', 'aria-label': 'Filter resources' });
     const body = h('div', { class: 'desk-stack' }, query, split);
     const tools = [botSelect(state, () => { void load(); })];
-    const root = page('Network', 'Resources', 'Resources this desk can see, grouped by owner. Operations are the calls a controller is allowed to make.', tools, body);
+    const root = page('Network', 'Resources', 'Resources this desk can see, grouped by owner. Operations are the calls a controller is allowed to make.', tools, body, 'split');
     query.addEventListener('input', () => { void load(); });
     const load = async (): Promise<void> => {
       split.replaceChildren(skeleton());
@@ -695,7 +708,7 @@ function healthPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState)
   return state => {
     const body = h('div', { class: 'desk-stack' });
     const tools = [botSelect(state, () => { void load(); })];
-    const root = page('Desk', 'Health', 'The application, the selected bot’s runtime, and that bot’s Onlyne node.', tools, body);
+    const root = page('Desk', 'Health', 'The application, the selected bot’s runtime, and that bot’s Onlyne node.', tools, body, 'grid');
     const load = async (): Promise<void> => {
       body.replaceChildren(skeleton());
       try {
@@ -751,7 +764,7 @@ function integrationsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: Desktop
   return state => {
     const body = h('div', { class: 'desk-stack' });
     const tools = [botSelect(state, () => { void load(); })];
-    const root = page('Desk', 'Integrations', 'Grok Bot threads and MCP servers visible from this node. Secrets stay in the process environment.', tools, body);
+    const root = page('Desk', 'Integrations', 'Grok Bot threads and MCP servers visible from this node. Secrets stay in the process environment.', tools, body, 'grid');
     const load = async (): Promise<void> => {
       body.replaceChildren(skeleton());
       try {
@@ -789,7 +802,7 @@ function integrationsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: Desktop
               const ref = isRecord(item.resource_ref) ? item.resource_ref : null;
               const operations = Array.isArray(item.operations) ? item.operations.filter((entry): entry is string => typeof entry === 'string') : [];
               return h('article', { class: 'peer-card' },
-                h('div', { class: 'peer-top' }, h('h3', { text: pick(ref, ['id']) || 'server' }), chip(pick(item, ['kind']))),
+                h('div', { class: 'peer-top' }, h('h3', { title: pick(ref, ['id']), text: middleEllipsis(pick(ref, ['id']) || 'server', 18, 8) }), chip(pick(item, ['kind']))),
                 h('p', { class: 'mono break', text: pick(ref, ['owner']) }),
                 operations.length === 0 ? h('p', { class: 'lede', text: 'No operations.' }) : h('p', { class: 'mono', text: operations.join(' · ') }));
             }))),
@@ -809,7 +822,7 @@ function integrationsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: Desktop
 
 function configView(config: Record<string, unknown>): HTMLElement {
   const safe = redact(config);
-  const rows = h('div', { class: 'kv' });
+  const rows = h('div', { class: 'config-list' });
   for (const [key, value] of Object.entries(safe)) {
     const shown = Array.isArray(value) ? value.map(item => String(item)).join(', ') : typeof value === 'string' ? value : JSON.stringify(value);
     rows.append(h('div', { class: 'config-row' }, h('span', { class: 'config-key', text: key }), h('span', { text: shown })));
@@ -837,7 +850,7 @@ function section(title: string, content: HTMLElement): HTMLElement {
 
 function teamPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState) => HTMLElement {
   return () => {
-    const root = h('div', { class: 'desk-page' });
+    const root = h('div', { class: 'desk-page layout-grid' });
     const paint = (): void => {
       const state = api.state();
       const admin = state.teamAdminId;

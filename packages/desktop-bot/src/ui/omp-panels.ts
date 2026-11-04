@@ -40,7 +40,7 @@ const STYLE = {
   button: `font:12px/1.2 system-ui;padding:4px 8px;border-radius:6px;border:1px solid ${COLOR.border};background:${COLOR.subtle};color:inherit;cursor:pointer;`,
   primary: `font:12px/1.2 system-ui;padding:4px 8px;border-radius:6px;border:1px solid ${COLOR.accent};background:transparent;color:${COLOR.accent};font-weight:600;cursor:pointer;`,
   danger: `font:12px/1.2 system-ui;padding:4px 8px;border-radius:6px;border:1px solid ${COLOR.danger};background:transparent;color:${COLOR.danger};cursor:pointer;`,
-  input: `font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;padding:6px 8px;border-radius:6px;border:1px solid ${COLOR.border};background:${COLOR.subtle};color:inherit;width:100%;box-sizing:border-box;resize:vertical;`,
+  input: `font:12px/1.45 var(--mono),monospace;padding:6px 8px;border-radius:6px;border:1px solid ${COLOR.border};background:var(--field);color:var(--fg);width:100%;box-sizing:border-box;resize:vertical;`,
   grid: 'display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 10px;font-size:12px;align-items:baseline;',
   card: `display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid ${COLOR.border};border-radius:8px;background:${COLOR.subtle};`,
 } as const;
@@ -147,12 +147,24 @@ function createStatus(): StatusLine {
 function panelStatus(state: { busy?: string; error?: string; notice?: string; loading?: boolean }): {
   text: string | undefined;
   error: boolean;
+  missing: boolean;
 } {
-  if (state.error !== undefined) return { text: state.error, error: true };
-  if (state.busy !== undefined) return { text: state.busy, error: false };
-  if (state.loading === true) return { text: 'Loading…', error: false };
-  if (state.notice !== undefined) return { text: state.notice, error: false };
-  return { text: undefined, error: false };
+  if (state.error !== undefined) {
+    const missing = /executable not found|ENOENT|\bomp\b/i.test(state.error);
+    if (missing) return { text: 'No model runtime is available. Install OMP and put omp on PATH. These controls stay off until a runtime can start.', error: false, missing: true };
+    return { text: state.error, error: true, missing: false };
+  }
+  if (state.busy !== undefined) return { text: state.busy, error: false, missing: false };
+  if (state.loading === true) return { text: 'Loading…', error: false, missing: false };
+  if (state.notice !== undefined) return { text: state.notice, error: false, missing: false };
+  return { text: undefined, error: false, missing: false };
+}
+
+function lockRuntime(root: HTMLElement, missing: boolean): void {
+  if (!missing) return;
+  for (const control of root.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('button, input, textarea, select')) {
+    control.disabled = true;
+  }
 }
 
 function messageSummary(value: unknown): { role: string; text: string } {
@@ -316,6 +328,7 @@ interface HistoryState {
   busy: string | undefined;
   error: string | undefined;
   notice: string | undefined;
+  deskOnly?: boolean;
 }
 
 const HISTORY_REFRESH: Record<string, true> = {
@@ -470,7 +483,8 @@ function createHistoryPanel(api: DesktopUiApi): OmpPanel {
       const desk = api.state().messages.filter(item => item.conversationId === context.conversationId);
       if (desk.length > 0 && (runtimeMissing || errors.length > 0)) {
         state.messages = desk.map(item => ({ role: item.role, text: item.text }));
-        state.notice = 'Showing the desk transcript. An OMP session appears here after a runtime can start.';
+        state.deskOnly = true;
+        state.notice = 'Showing the desk transcript. A model session, with its tree, starts when OMP can run.';
         state.error = undefined;
         state.loading = false;
         state.loaded = true;
@@ -576,7 +590,8 @@ function createHistoryPanel(api: DesktopUiApi): OmpPanel {
 
       sessionBody.replaceChildren();
       const pairs = sessionPairs(state.session, state.stats, state.totalMessages);
-      sessionBody.append(pairs.length === 0 ? el('div', STYLE.muted, 'No session state yet.') : pairGrid(pairs));
+      if (state.deskOnly) sessionBody.append(el('div', STYLE.muted, 'This is the desk transcript. There is no model session yet, so there is no session tree.'));
+      else sessionBody.append(pairs.length === 0 ? el('div', STYLE.muted, 'The model session has not reported state yet.') : pairGrid(pairs));
 
       historyBody.replaceChildren();
       if (state.messages.length === 0) historyBody.append(el('div', STYLE.muted, 'No messages in this snapshot.'));
@@ -592,7 +607,8 @@ function createHistoryPanel(api: DesktopUiApi): OmpPanel {
       loadMoreButton.title = state.nextCursor === undefined ? 'No further pages' : 'Load the next page';
 
       treeBody.replaceChildren();
-      if (state.tree.length === 0) treeBody.append(el('div', STYLE.muted, 'No session tree yet.'));
+      if (state.deskOnly) treeBody.append(el('div', STYLE.muted, 'The model session has not started.'));
+      else if (state.tree.length === 0) treeBody.append(el('div', STYLE.muted, 'The model session has not started, so there is no tree.'));
       else {
         const path = activePath(state.entries, state.leafId);
         treeBody.append(...treeRows(state.tree, 1, path));
@@ -627,6 +643,8 @@ function createHistoryPanel(api: DesktopUiApi): OmpPanel {
 
       const line = panelStatus(state);
       status.show(line.text, line.error ? 'error' : 'muted');
+      const runtimeHost = status.node.parentElement;
+      if (runtimeHost) lockRuntime(runtimeHost, line.missing);
     }
 
     function treeRows(nodes: SessionTreeNode[], level: number, path: Set<string>): HTMLElement[] {
@@ -1053,6 +1071,8 @@ function createSubagentsPanel(api: DesktopUiApi): OmpPanel {
 
       const line = panelStatus(state);
       status.show(line.text, line.error ? 'error' : 'muted');
+      const runtimeHost = status.node.parentElement;
+      if (runtimeHost) lockRuntime(runtimeHost, line.missing);
     }
 
     async function stop(): Promise<void> {
@@ -1344,6 +1364,8 @@ function createGoalPanel(api: DesktopUiApi): OmpPanel {
 
       const line = panelStatus(state);
       status.show(line.text, line.error ? 'error' : 'muted');
+      const runtimeHost = status.node.parentElement;
+      if (runtimeHost) lockRuntime(runtimeHost, line.missing);
     }
 
     function onDrop(): void {
@@ -1555,6 +1577,8 @@ function createQueuePanel(api: DesktopUiApi): OmpPanel {
 
       const line = panelStatus(state);
       status.show(line.text, line.error ? 'error' : 'muted');
+      const runtimeHost = status.node.parentElement;
+      if (runtimeHost) lockRuntime(runtimeHost, line.missing);
     }
 
     function queueCard(text: string, queue: QueueName): HTMLElement {
@@ -2339,6 +2363,8 @@ function createConfigPanel(api: DesktopUiApi): OmpPanel {
 
       const line = panelStatus(state);
       status.show(line.text, line.error ? 'error' : 'muted');
+      const runtimeHost = status.node.parentElement;
+      if (runtimeHost) lockRuntime(runtimeHost, line.missing);
     }
 
     editor.addEventListener('input', () => {

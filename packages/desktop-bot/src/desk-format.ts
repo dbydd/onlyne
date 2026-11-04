@@ -27,6 +27,48 @@ export function middleEllipsis(value: string, head = 14, tail = 10): string {
   return `${value.slice(0, head)}…${value.slice(-tail)}`;
 }
 
+export interface DeskHash {
+  screen: string;
+  selection?: string;
+  dock?: string;
+}
+
+/** `#/trust/c-desk?dock=health` — screen, optional selection, optional dock. */
+export function formatDeskHash(route: DeskHash): string {
+  const screen = route.screen.length > 0 ? route.screen : 'chat';
+  const selection = route.selection ? `/${encodeURIComponent(route.selection)}` : '';
+  const dock = route.dock ? `?dock=${encodeURIComponent(route.dock)}` : '';
+  return `#/${encodeURIComponent(screen)}${selection}${dock}`;
+}
+
+export function parseDeskHash(hash: string): DeskHash {
+  const raw = hash.startsWith('#') ? hash.slice(1) : hash;
+  const [path = '', query = ''] = raw.split('?');
+  const parts = path.split('/').filter(part => part.length > 0).map(part => {
+    try { return decodeURIComponent(part); }
+    catch { return part; }
+  });
+  const dock = new URLSearchParams(query).get('dock') ?? undefined;
+  return {
+    screen: parts[0] && parts[0].length > 0 ? parts[0] : 'chat',
+    ...(parts[1] ? { selection: parts[1] } : {}),
+    ...(dock && dock.length > 0 ? { dock } : {}),
+  };
+}
+
+export function friendlyRuntimeError(message: string): string | undefined {
+  if (/executable not found|ENOENT|\bomp\b/i.test(message)) {
+    return 'No model runtime is available. Install OMP and put the omp command on PATH. These controls stay off until then. The conversation keeps its transcript.';
+  }
+  return undefined;
+}
+
+export function filterByQuery<T>(rows: T[], needle: string, text: (row: T) => string, pinned?: (row: T) => boolean): T[] {
+  const query = needle.trim().toLowerCase();
+  if (query.length === 0) return rows;
+  return rows.filter(row => (pinned !== undefined && pinned(row)) || text(row).toLowerCase().includes(query));
+}
+
 export function peerPhaseLabel(phase: string): string {
   switch (phase) {
     case 'exchanged': return 'Trusted';

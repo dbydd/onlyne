@@ -61,8 +61,8 @@
 	--line-strong: rgba(243, 236, 220, 0.16);
 	--fg: #f4efe6;
 	--fg-soft: #ddd4c4;
-	--muted: #a39888;
-	--dim: #756c60;
+	--muted: #ddd2c2;
+	--dim: #cbbfae;
 	--accent: #d08a4c;
 	--accent-2: #e4b07a;
 	--accent-fg: #1c140c;
@@ -1439,8 +1439,13 @@ details.block[open] > summary {
 }
 
 .composer:focus-within {
-	border-color: var(--accent);
-	box-shadow: var(--accent-glow), var(--shadow), var(--glass-specular);
+	border-color: var(--line-strong);
+	box-shadow: none;
+}
+
+.composer-input:focus {
+	outline: none;
+	box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 .composer.sending {
@@ -2320,8 +2325,9 @@ textarea:focus {
 
 .toasts {
 	position: fixed;
+	top: 60px;
 	right: 16px;
-	bottom: 44px;
+	bottom: auto;
 	z-index: 120;
 	display: flex;
 	flex-direction: column;
@@ -3573,7 +3579,7 @@ textarea:focus {
 
 .card-grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+	grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 	gap: 12px;
 }
 
@@ -3904,10 +3910,16 @@ textarea:focus {
 	max-width: 100%;
 }
 
-.dock .metric-grid,
-.dock .desk-split,
-.dock .card-grid {
+.dock .desk-split {
 	grid-template-columns: 1fr;
+}
+
+.dock .metric-grid {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dock .card-grid {
+	grid-template-columns: minmax(0, 1fr);
 }
 
 .dock .fingerprint {
@@ -4102,7 +4114,7 @@ textarea:focus {
 	font-size: 12px;
 }
 
-.field-hint {
+.field > .field-hint {
 	text-transform: none;
 	letter-spacing: normal;
 	font-size: 12px;
@@ -4121,6 +4133,85 @@ textarea:focus {
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	max-width: 100%;
+}
+
+.layout-single {
+	max-width: 760px;
+}
+
+.layout-split,
+.layout-grid {
+	max-width: none;
+}
+
+.inline-form {
+	max-width: 640px;
+}
+
+.desk-page-tools select {
+	width: 9.5rem;
+	min-width: 9.5rem;
+	max-width: 14rem;
+}
+
+.identifier,
+.identifier-text {
+	white-space: nowrap !important;
+	overflow-wrap: normal !important;
+	word-break: keep-all !important;
+}
+
+.row-actions {
+	min-height: 34px;
+}
+
+.peer-card.fresh {
+	border-color: var(--accent);
+}
+
+.filter-row {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	max-width: 640px;
+}
+
+.filter-row input {
+	width: auto;
+	flex: 1;
+}
+
+.filter-meta {
+	margin: 0;
+	color: var(--muted);
+	font-size: 12px;
+}
+
+.field-label,
+.field > span,
+.metric-label,
+.eyebrow {
+	font-size: 12px;
+}
+
+.status-item.docked {
+	flex: 0 0 auto;
+	color: var(--fg-soft);
+}
+
+.panel-body {
+	padding-bottom: 48px;
+}
+
+.config-row {
+	display: grid;
+	grid-template-columns: 8.5em minmax(0, 1fr);
+	gap: 8px;
+	align-items: start;
+}
+
+.config-row span:last-child {
+	overflow-wrap: anywhere;
 }
 
 .send-failed {

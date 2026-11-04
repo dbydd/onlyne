@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { createDesktopApp } from '../src/app.ts';
 import { createDemoOnlyne, demoFingerprint, ensureDemoTeam, resetDemoWorld } from '../src/demo.ts';
 import { fingerprintsMatch, formatFingerprint, moveInRail, normalizeLayout } from '../src/ui/layout.ts';
-import { commandKey, fingerprintHint, fingerprintMarks, formatWhen, middleEllipsis, parsePeerUrl, peerPhaseLabel } from '../src/desk-format.ts';
+import { commandKey, filterByQuery, fingerprintHint, fingerprintMarks, formatDeskHash, formatWhen, friendlyRuntimeError, middleEllipsis, parseDeskHash, parsePeerUrl, peerPhaseLabel } from '../src/desk-format.ts';
 import { openDesktopStore } from '../src/store.ts';
 import { startDesktopServer } from '../src/server.ts';
 import type { OnlyneBridgeOptions } from '../src/contracts.ts';
@@ -38,6 +38,22 @@ ok('times are relative when recent and absolute later', formatWhen(Date.now() - 
 ok('identifiers keep both ends', middleEllipsis('urn:onlyne:agent:desktop:mira', 8, 4).startsWith('urn:only') && middleEllipsis('urn:onlyne:agent:desktop:mira', 8, 4).endsWith('mira'));
 ok('command key follows the platform', commandKey('MacIntel', '') === '⌘' && commandKey('Linux', '') === 'Ctrl');
 ok('peer phases are human labels', peerPhaseLabel('no_exchange') === 'Not paired' && peerPhaseLabel('exchanged') === 'Trusted');
+ok('hash round trip keeps screen and dock apart', (() => {
+  const encoded = formatDeskHash({ screen: 'trust', selection: 'c-desk', dock: 'health' });
+  const parsed = parseDeskHash(encoded);
+  return encoded === '#/trust/c-desk?dock=health' && parsed.screen === 'trust' && parsed.selection === 'c-desk' && parsed.dock === 'health' && parsed.screen !== parsed.dock;
+})());
+ok('a filter keeps a newly pinned peer', filterByQuery(
+  [{ id: 'north' }, { id: 'mira' }],
+  'zzz',
+  row => row.id,
+  row => row.id === 'north',
+).some(row => row.id === 'north'));
+ok('old timestamps are not raw ISO', !formatWhen('2026-11-03T16:40:00.000Z', Date.parse('2026-11-04T12:00:00.000Z')).label.includes('T16:40'));
+ok('a missing runtime is explained without the raw spawn text', (() => {
+  const text = friendlyRuntimeError('Executable not found in $PATH: "omp"');
+  return text !== undefined && !text.includes('$PATH') && text.includes('OMP');
+})());
 
 const directory = await mkdtemp(join(tmpdir(), 'onlyne-desk-'));
 try {
@@ -75,6 +91,15 @@ try {
     const inbox = await app.command('desktop.read', { botId: 'mira', uri: 'onlyne://inbox' }) as { content?: string };
     const rows = JSON.parse(inbox.content ?? '[]') as unknown[];
     ok('inbox read returns mira rows', Array.isArray(rows) && rows.length >= 2);
+    const heard: string[] = [];
+    app.subscribe(event => { if (event.type === 'error' && typeof event.message === 'string') heard.push(event.message); });
+    await app.command('message.send', { conversationId: 'c-desk', text: '/fail' });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    ok('sending /fail reports a missing runtime and does not invent a reply', heard.some(item => item.includes('omp')) && !app.snapshot().messages.some(item => item.text.startsWith('Demo reply') && item.text.includes('/fail')));
+    await app.command('message.send', { conversationId: 'c-desk', text: 'Leave the north fingerprint on the trust screen.' });
+    await new Promise(resolve => setTimeout(resolve, 700));
+    const reply = app.snapshot().messages.find(item => item.role === 'assistant' && item.text.includes('north fingerprint'));
+    ok('a demo reply quotes the user, not the scene prompt', reply !== undefined && !reply.text.includes('Continue the scene'));
   } finally {
     await app.close();
   }
