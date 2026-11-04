@@ -3,16 +3,38 @@ import type { Locale } from '@onlyne/node-host/i18n';
 import { t } from './gateway-text.js';
 import { MOUNTS_RESOURCE_PREFIX } from './mounts.js';
 
-/** One configured MCP server: its resource name, URL and per-call settings. */
-export interface ServerConfig {
+/** Settings every configured MCP server shares. */
+interface ServerConfigBase {
   name: string;
-  url: string;
-  /** Extra request headers (an API key, a bank header); never logged. */
-  headers?: Record<string, string>;
   timeout_ms?: number;
   /** Who may call this server's tools. Empty means the node owner only. */
   controllers?: NodeId[];
+  /**
+   * The local tool policy (RFC 0015 §4). Absent allows every tool the server lists; an empty
+   * list allows none. It is checked before a request leaves the gateway.
+   */
+  allowed_tools?: string[];
 }
+
+/** An HTTP streamable MCP server; the transport is implicit when only `url` is given. */
+export interface HttpServerConfig extends ServerConfigBase {
+  transport?: 'http';
+  url: string;
+  /** Extra request headers (an API key, a bank header); never logged. */
+  headers?: Record<string, string>;
+}
+
+/** A locally spawned MCP server; `command` and `args` are spawned directly, never through a shell. */
+export interface StdioServerConfig extends ServerConfigBase {
+  transport: 'stdio';
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+/** One configured MCP server: exactly one of the HTTP and stdio transport contracts. */
+export type ServerConfig = HttpServerConfig | StdioServerConfig;
 
 /** One locally allowlisted executable a scheduled mount may run: the mount names this id only. */
 export interface MountCommandConfig {
@@ -67,7 +89,7 @@ const requireStrings = (value: Json | undefined, field: string): string[] => {
   return value as string[];
 };
 
-function parseMounts(raw: Json | undefined, owner: NodeId, serverNames: Set<string>): MountsConfig | undefined {
+function parseMounts(raw: Json | undefined, owner: NodeId, servers: ReadonlyMap<string, ServerConfig>): MountsConfig | undefined {
   if (raw === undefined) return undefined;
   const record = requireObject(raw, 'mounts');
   const controllers = [...new Set(requireStrings(record.controllers, 'mounts.controllers'))];
@@ -101,8 +123,15 @@ function parseMounts(raw: Json | undefined, owner: NodeId, serverNames: Set<stri
     const item = requireObject(entry, `mounts.tools[${index}]`);
     const server = requireString(item, 'server');
     const tool = requireString(item, 'tool');
-    if (!serverNames.has(server)) {
+    const configured = servers.get(server);
+    if (configured === undefined) {
       throw new OnlyneError('invalid_request', t('config.mountsToolServer', { server }));
+    }
+    // A scheduled call runs with the same local policy as a direct resource operation; refusing
+    // a tool the policy already denies at load time keeps the scheduler from starting a task
+    // that can only fail.
+    if (configured.allowed_tools !== undefined && !configured.allowed_tools.includes(tool)) {
+      throw new OnlyneError('invalid_request', `mounts.tools names ${server}/${tool}, which the server's allowed_tools policy denies.`);
     }
     const pair = `${server}\u0000${tool}`;
     if (toolIds.has(pair)) throw new OnlyneError('invalid_request', t('config.mountsDuplicate', { kind: 'tool', id: `${server}/${tool}` }));
@@ -123,6 +152,82 @@ const parseLanguage = (value: Json | undefined): Locale | undefined => {
   throw new OnlyneError('invalid_request', t('config.language', { value: JSON.stringify(value) }));
 };
 
+/** Environment entries are opaque strings; an empty value is legal, a non-string is not. */
+function parseEnvironment(value: Json | undefined, field: string): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  const record = requireObject(value, field);
+  const environment: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(record)) {
+    if (typeof entry !== 'string') {
+      throw new OnlyneError('invalid_request', t('config.string', { field: `${field}.${key}` }));
+    }
+    environment[key] = entry;
+  }
+  return Object.keys(environment).length === 0 ? undefined : environment;
+}
+
+/** One `servers[]` entry: the transport decides which fields are required and which are refused. */
+function parseServer(item: Record<string, Json>, index: number): ServerConfig {
+  const field = `servers[${index}]`;
+  const timeout = item.timeout_ms;
+  const rawAllowed = item.allowed_tools;
+  const allowed = rawAllowed === undefined
+    ? undefined
+    : [...new Set(requireStrings(rawAllowed, `${field}.allowed_tools`))];
+  const controllers = item.controllers;
+  const shared = {
+    name: requireString(item, 'name'),
+    ...(typeof timeout === 'number' ? { timeout_ms: timeout } : {}),
+    ...(allowed === undefined ? {} : { allowed_tools: allowed }),
+    ...(Array.isArray(controllers)
+      ? { controllers: controllers.filter((value): value is NodeId => typeof value === 'string' && value.length > 0) }
+      : {}),
+  };
+  const declared = item.transport;
+  if (declared !== undefined && declared !== 'http' && declared !== 'stdio') {
+    throw new OnlyneError('invalid_request', `${field}.transport is 'http' or 'stdio'.`);
+  }
+  // An existing configuration names only `url`; that stays the HTTP transport without a rewrite.
+  const transport = declared ?? (item.url !== undefined ? 'http' : undefined);
+  if (transport === 'http') {
+    for (const key of ['command', 'args', 'env', 'cwd'] as const) {
+      if (item[key] !== undefined) {
+        throw new OnlyneError('invalid_request', `${field} uses the http transport, so it cannot set ${key}.`);
+      }
+    }
+    const rawHeaders = item.headers === undefined ? undefined : requireObject(item.headers, `${field}.headers`);
+    const headers = rawHeaders === undefined
+      ? undefined
+      : Object.fromEntries(Object.entries(rawHeaders).filter((pair): pair is [string, string] => typeof pair[1] === 'string'));
+    return {
+      ...shared,
+      transport: 'http',
+      url: requireString(item, 'url'),
+      ...(headers === undefined || Object.keys(headers).length === 0 ? {} : { headers }),
+    };
+  }
+  if (transport === 'stdio') {
+    if (item.url !== undefined) {
+      throw new OnlyneError('invalid_request', `${field} uses the stdio transport, so it cannot set url.`);
+    }
+    if (item.headers !== undefined) {
+      throw new OnlyneError('invalid_request', `${field} uses the stdio transport, so it cannot set headers.`);
+    }
+    const args = item.args === undefined ? [] : requireStrings(item.args, `${field}.args`);
+    const env = parseEnvironment(item.env, `${field}.env`);
+    const cwd = item.cwd === undefined ? undefined : requireString(item, 'cwd');
+    return {
+      ...shared,
+      transport: 'stdio',
+      command: requireString(item, 'command'),
+      ...(args.length === 0 ? {} : { args }),
+      ...(env === undefined ? {} : { env }),
+      ...(cwd === undefined ? {} : { cwd }),
+    };
+  }
+  throw new OnlyneError('invalid_request', `${field} needs transport 'http' with url, or transport 'stdio' with command.`);
+}
+
 /** Loads the gateway configuration from one JSON file; environment retuning comes later. */
 export async function loadConfig(path: string): Promise<GatewayConfig> {
   let file: Json | undefined;
@@ -141,24 +246,7 @@ export async function loadConfig(path: string): Promise<GatewayConfig> {
   if (!Array.isArray(rawServers)) {
     throw new OnlyneError('invalid_request', t('config.servers'));
   }
-  const servers = rawServers.map((entry, index): ServerConfig => {
-    const item = requireObject(entry, `servers[${index}]`);
-    const rawHeaders = item.headers === undefined ? undefined : requireObject(item.headers, `servers[${index}].headers`);
-    const headers = rawHeaders === undefined
-      ? undefined
-      : Object.fromEntries(Object.entries(rawHeaders).filter((pair): pair is [string, string] => typeof pair[1] === 'string'));
-    const timeout = item.timeout_ms;
-    const controllers = item.controllers;
-    return {
-      name: requireString(item, 'name'),
-      url: requireString(item, 'url'),
-      ...(headers === undefined || Object.keys(headers).length === 0 ? {} : { headers }),
-      ...(typeof timeout === 'number' ? { timeout_ms: timeout } : {}),
-      ...(Array.isArray(controllers)
-        ? { controllers: controllers.filter((value): value is NodeId => typeof value === 'string' && value.length > 0) }
-        : {}),
-    };
-  });
+  const servers = rawServers.map((entry, index) => parseServer(requireObject(entry, `servers[${index}]`), index));
   const names = new Set<string>();
   for (const entry of servers) {
     if (names.has(entry.name)) throw new OnlyneError('invalid_request', t('config.duplicateName', { name: entry.name }));
@@ -167,7 +255,7 @@ export async function loadConfig(path: string): Promise<GatewayConfig> {
     }
     names.add(entry.name);
   }
-  const mounts = parseMounts(raw.mounts, owner, names);
+  const mounts = parseMounts(raw.mounts, owner, new Map(servers.map(entry => [entry.name, entry])));
   return {
     node: { id: owner },
     server: {

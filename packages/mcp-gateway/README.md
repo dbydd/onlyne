@@ -23,6 +23,7 @@ bunx onlyne-mcp-gateway ./gateway.json
     {
       "name": "hindsight",
       "url": "http://localhost:8888/mcp/example-bank/",
+      "allowed_tools": ["recall", "retain"],
       "timeout_ms": 60000,
       "controllers": ["urn:onlyne:agent:main"]
     }
@@ -30,7 +31,25 @@ bunx onlyne-mcp-gateway ./gateway.json
 }
 ```
 
-`headers` adds per-request headers such as an API key and is never logged. `controllers` lists
+`headers` adds per-request headers such as an API key and is never logged. `allowed_tools` limits
+which listed tools may be called; omit it for every listed tool, pass `[]` to deny all. A denied
+tool fails with `forbidden` before any connection or request. A local server uses stdio instead
+of a URL:
+
+```json
+{
+  "name": "filesystem",
+  "transport": "stdio",
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+  "cwd": "/tmp",
+  "allowed_tools": ["read_file", "list_directory"],
+  "controllers": ["urn:onlyne:agent:main"]
+}
+```
+
+`command`, `args`, `env` and `cwd` are passed to the child process as separate values; no shell
+string is built. `controllers` lists
 the nodes allowed to call a server's tools; an empty list leaves the node owner alone.
 `language` accepts `en` or `zh-CN` and otherwise follows `ONLYNE_LANG`, `LC_ALL`, or `LANG`.
 
@@ -120,6 +139,11 @@ import { createMcpGateway } from '@onlyne/mcp-gateway';
 ```
 
 The result carries the node, the connections, and a `fetch` handler.
+
+`McpGateway.bridge` exposes the read-only MCP resource primitives for hosts: `listResources`,
+`readResource`, `subscribe`, `unsubscribe`, `syncSubscriptions` and `close`. Reads return server
+data only; they never admit a message or write business state. The bridge reports subscription
+loss through its observation callbacks and withdraws every subscription on close.
 
 ## License
 

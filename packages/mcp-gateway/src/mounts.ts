@@ -91,6 +91,8 @@ export interface MountTransport {
 
 export interface MountConnection {
   readonly tools: ReadonlyArray<{ name: string; annotations?: { readOnlyHint?: boolean } }>;
+  /** Policy check, then one catalog refresh when the name is not yet pinned. */
+  resolveTool(name: string): Promise<{ name: string; annotations?: { readOnlyHint?: boolean } }>;
   call(name: string, arguments_: Json): Promise<McpOutcome>;
 }
 
@@ -456,10 +458,9 @@ export function createMountService(options: MountServiceOptions): MountService {
         if (connection === undefined) {
           throw new OnlyneError('unavailable', `No configured MCP server is named ${action.server}.`);
         }
-        const tool = connection.tools.find(candidate => candidate.name === action.tool);
-        if (tool === undefined) {
-          throw new OnlyneError('unsupported_delivery', `The tool ${action.tool} is not in ${action.server}'s tools/list.`);
-        }
+        // A scheduled run starts in a new process with an empty catalog, so resolve the tool the
+        // same way an operation does: policy first, then one tools/list refresh when needed.
+        const tool = await connection.resolveTool(action.tool);
         const outcome = await connection.call(action.tool, action.arguments ?? {});
         if (outcome.kind === 'result') {
           const text = JSON.stringify({
