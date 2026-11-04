@@ -133,7 +133,7 @@ export function compileScene(
 
   const opener = conversation.greeting !== undefined && conversation.greeted !== true ? options.greeting ?? conversation.greeting : undefined;
   const renderPrompt = (): string => [
-    'Continue the scene as the character described above. Stay in character, answer the latest user message, and keep continuity with the existing session transcript.',
+    'Answer the latest message in your own voice. Keep the scene continuous, and stay brief unless the scene needs more.',
     opener === undefined ? '' : `The scene opened with your greeting, already shown to the user:\n${opener}`,
     fixed.map(block => block.content).join('\n\n'),
     history.length === 0 ? '' : `Scene transcript (most recent last):\n${history.join('\n')}`,

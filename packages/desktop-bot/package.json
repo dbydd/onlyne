@@ -12,7 +12,7 @@
   "exports": { ".": "./src/index.ts", "./contracts": "./src/contracts.ts", "./ui": "./src/ui/api.ts" },
   "bin": { "onlyne-desktop": "src/launch.ts" },
   "files": ["src", "README.md", "LICENSE"],
-  "scripts": { "check": "tsc --noEmit", "start": "bun src/launch.ts", "serve": "bun src/main.ts --serve" },
+  "scripts": { "check": "tsc --noEmit", "test": "bun tests/verify.ts", "start": "bun src/launch.ts", "serve": "bun src/main.ts --serve", "demo": "bun src/main.ts --serve --demo --port 4173" },
   "dependencies": {
     "@onlyne/lib": "^3.1.0",
     "@onlyne/node-host": "^3.1.0",

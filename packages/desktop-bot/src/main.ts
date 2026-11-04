@@ -4,7 +4,9 @@ import { join, resolve } from 'node:path';
 import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { createDesktopApp } from './app.ts';
+import { createDemoOnlyne, ensureDemoTeam } from './demo.ts';
 import { startDesktopServer } from './server.ts';
+import { openDesktopStore } from './store.ts';
 import type { DesktopController, DesktopServer } from './contracts.ts';
 
 export function defaultDataDir(): string {
@@ -13,15 +15,20 @@ export function defaultDataDir(): string {
   return join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'onlyne', 'desktop');
 }
 
+/** Separate from a live desk so demo records never overwrite a real team. */
+export function demoDataDir(): string {
+  return join(defaultDataDir(), '..', 'desktop-demo');
+}
+
 if (import.meta.main) {
   const { values } = parseArgs({ args: process.argv.slice(2), options: {
-    serve: { type: 'boolean' }, 'data-dir': { type: 'string' }, port: { type: 'string' }, help: { type: 'boolean' },
+    serve: { type: 'boolean' }, demo: { type: 'boolean' }, 'data-dir': { type: 'string' }, port: { type: 'string' }, help: { type: 'boolean' },
   } });
   if (values.help) {
-    console.log('Usage: onlyne-desktop [--serve] [--data-dir <directory>] [--port <port>]');
+    console.log('Usage: onlyne-desktop [--serve] [--demo] [--data-dir <directory>] [--port <port>]');
     process.exit(0);
   }
-  const dataDir = resolve(values['data-dir'] ?? defaultDataDir());
+  const dataDir = resolve(values['data-dir'] ?? (values.demo ? demoDataDir() : defaultDataDir()));
   const port = values.port === undefined ? 0 : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('port must be an integer from 0 to 65535');
   await mkdir(dataDir, { recursive: true });
@@ -56,7 +63,15 @@ if (import.meta.main) {
   process.once('SIGINT', () => { void close().then(() => process.exit(0), error => { console.error(error); process.exit(1); }); });
   process.once('SIGTERM', () => { void close().then(() => process.exit(0), error => { console.error(error); process.exit(1); }); });
   try {
-    const controller = await createDesktopApp({ dataDir });
+    if (values.demo) {
+      const seeding = await openDesktopStore(dataDir);
+      try { await ensureDemoTeam(seeding, dataDir); }
+      finally { await seeding.close(); }
+    }
+    const controller = await createDesktopApp({
+      dataDir,
+      ...(values.demo ? { onlyne: createDemoOnlyne, demo: true } : {}),
+    });
     app = controller;
     const botRenderers = new Map(controller.snapshot().bots.map(bot => [
       bot.id,
@@ -69,7 +84,8 @@ if (import.meta.main) {
       return { path: resolve(dataDir, 'media', item.id), contentType: item.contentType };
     };
     server = await startDesktopServer({ controller, port, botRenderers, media });
-    console.log(JSON.stringify({ type: 'desktop.ready', url: server.url, port: server.port }));
+    console.log(JSON.stringify({ type: 'desktop.ready', url: server.url, port: server.port, demo: values.demo === true }));
+    console.error(`Open ${server.url}`);
   } catch (error) {
     await close();
     throw error;

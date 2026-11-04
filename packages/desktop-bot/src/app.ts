@@ -34,6 +34,13 @@ const identifier = (value: unknown): string => {
   return result;
 };
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
+function demoLine(bot: { id: string; name: string }, spoken: string): string {
+  const line = spoken.length > 0 ? spoken.slice(0, 80) : 'that';
+  if (bot.id === 'mira') return `“${line}” stays on Trust. I will not type a fingerprint for you.`;
+  if (bot.id === 'jun') return `“${line}” needs a source. I will not add a tool from this chat.`;
+  if (bot.id === 'lark') return `“${line}” is not a credential. I only report the gateway card.`;
+  return `${bot.name}: “${line}”. This is a short demo reply.`;
+}
 const contentText = (value: unknown): string => {
   if (!Array.isArray(value)) return '';
   const parts: string[] = [];
@@ -51,6 +58,8 @@ export interface DesktopAppOptions {
   drivers?: RuntimeDriver[];
   plugins?: DesktopPlugin[];
   onlyne?: (options: OnlyneBridgeOptions) => Promise<OnlyneBridge>;
+  /** When set, health reports a local demo node and no live cluster is required. */
+  demo?: boolean;
 }
 
 interface LiveRuntime {
@@ -106,6 +115,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       bots: state.bots.length, conversations: state.conversations.length, messages: state.messages.length,
       media: state.media.length, runtimes: runtimeEntries(), bridges: bridges.size,
       teamAdminId: state.teamAdminId ?? null,
+      demo: options.demo === true,
       errors: [...runtimes.values()].flatMap(runtime => runtime.lastError === undefined ? [] : [{ botId: runtime.bot.id, conversationId: runtime.conversation.id, message: runtime.lastError }]),
     };
   };
@@ -330,7 +340,22 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
     await connection.close();
   };
 
-  const prompt = async (bot: Bot, conversation: Conversation, message: string): Promise<void> => {
+  const prompt = async (bot: Bot, conversation: Conversation, message: string, userText?: string): Promise<void> => {
+    if (options.demo === true) {
+      const spoken = (userText ?? '').replace(/\s+/g, ' ').trim();
+      if (spoken === '/fail' || spoken.startsWith('/fail ')) {
+        emit({ type: 'error', botId: bot.id, conversationId: conversation.id, message: 'Executable not found in $PATH: "omp"' });
+        return;
+      }
+      emit({ type: 'typing', conversationId: conversation.id, botId: bot.id, demo: true });
+      await new Promise(resolve => setTimeout(resolve, 400));
+      const text = demoLine(bot, spoken);
+      await save(state => {
+        state.messages.push({ id: shortId('msg'), conversationId: conversation.id, role: 'assistant', botId: bot.id, text, createdAt: Date.now() });
+      });
+      emit({ type: 'typing', conversationId: conversation.id, botId: bot.id, demo: true, done: true });
+      return;
+    }
     try {
       const connection = await getRuntime(bot, conversation);
       await connection.request({ type: 'prompt', message, streamingBehavior: 'followUp' });
@@ -617,12 +642,23 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
               includeHistory: conversation.kind === 'group',
               members: conversation.botIds.map(botFor),
             });
-            void prompt(botFor(id), conversation, compiled.prompt);
+            void prompt(botFor(id), conversation, compiled.prompt, body);
           }
           if (conversation.greeting !== undefined && conversation.greeted !== true) {
             await save(state => { const target = state.conversations.find(item => item.id === conversation.id); if (target !== undefined) target.greeted = true; });
           }
           return message;
+        }
+        case 'message.retry': {
+          const conversation = conversationFor(payload.conversationId);
+          const last = [...snapshot().messages].reverse().find(item => item.conversationId === conversation.id && item.role === 'user');
+          if (last === undefined) throw new Error('There is no message to send again.');
+          const bot = botFor(payload.botId ?? conversation.adminBotId);
+          if (!conversation.botIds.includes(bot.id)) throw new Error('Bot is not a member of this conversation');
+          const transcript = snapshot().messages.filter(item => item.conversationId === conversation.id && item.id !== last.id);
+          const compiled = compileScene(bot, conversation, transcript, last.text, { includeHistory: conversation.kind === 'group', members: conversation.botIds.map(botFor) });
+          await prompt(bot, conversation, compiled.prompt, last.text);
+          return { retried: last.id };
         }
         case 'message.regenerate': {
           const conversation = conversationFor(payload.conversationId);
@@ -634,7 +670,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
           await save(current => { current.messages = current.messages.filter(item => item.id !== last.id); });
           const transcript = snapshot().messages.filter(item => item.conversationId === conversation.id);
           const compiled = compileScene(bot, conversation, transcript, 'Regenerate your previous reply with different wording and a different action. Do not repeat it.', { includeHistory: true });
-          await prompt(bot, conversation, compiled.prompt);
+          await prompt(bot, conversation, compiled.prompt, 'Please write that again, in different words.');
           return { removed: last.id, state: compiled.stats };
         }
         case 'harness.preview': {
