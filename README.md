@@ -18,6 +18,8 @@ The repository holds the draft protocol specifications, the runtime packages, an
 | [`packages/im-gateway`](packages/im-gateway/README.md) | `@onlyne/im-gateway`: one IM channel per node, with conversation resources and a trust terminal |
 | [`packages/mcp-core`](packages/mcp-core/README.md) | `@onlyne/mcp-core`: the MCP session and resource driver |
 | [`packages/mcp-gateway`](packages/mcp-gateway/README.md) | `@onlyne/mcp-gateway`: MCP resources, persistent scheduled tasks, and result delivery to controllers |
+| [`packages/grok-bot`](packages/grok-bot/README.md) | `@onlyne/grok-bot`: a communication node that POSTs inbound messages to a Grok Bot webhook |
+| [`packages/mcp-server`](packages/mcp-server/README.md) | `@onlyne/mcp-server`: stdio MCP server that exposes one Onlyne node as tools and resources |
 | [`packages/omp-onlyne`](packages/omp-onlyne/README.md) | OMP integration: one `msg` tool, judge-selected delivery, and inbound injection |
 
 `packages/` holds publishable runtime code only. Further packages sit beside `lib` as they land.
@@ -30,7 +32,7 @@ Scoped packages publish with `access: public`.
 The packages depend on each other, so publish in dependency order:
 
 ```sh
-for pkg in lib node-host im-core im-fake im-lark im-qq im-wechat im-gateway mcp-core mcp-gateway omp-onlyne; do
+for pkg in lib node-host im-core im-fake im-lark im-qq im-wechat im-gateway mcp-core mcp-gateway grok-bot mcp-server omp-onlyne; do
   npm publish "packages/$pkg"
 done
 ```

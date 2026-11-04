@@ -5,11 +5,27 @@
     "": {
       "name": "onlyne",
     },
+    "packages/grok-bot": {
+      "name": "@onlyne/grok-bot",
+      "version": "3.1.0",
+      "bin": {
+        "onlyne-grok-bot": "src/main.ts",
+      },
+      "dependencies": {
+        "@onlyne/im-gateway": "^3.1.0",
+        "@onlyne/lib": "^3.1.0",
+        "@onlyne/node-host": "^3.1.0",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.0",
+        "typescript": "^5.9.0",
+      },
+    },
     "packages/im-core": {
       "name": "@onlyne/im-core",
       "version": "3.1.0",
       "dependencies": {
-        "@onlyne/lib": "^3.0.0",
+        "@onlyne/lib": "^3.1.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -20,8 +36,8 @@
       "name": "@onlyne/im-fake",
       "version": "3.1.0",
       "dependencies": {
-        "@onlyne/im-core": "^3.0.0",
-        "@onlyne/lib": "^3.0.0",
+        "@onlyne/im-core": "^3.1.0",
+        "@onlyne/lib": "^3.1.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -36,22 +52,22 @@
         "onlyne-im-migrate": "src/migrate-main.ts",
       },
       "dependencies": {
-        "@onlyne/im-core": "^3.0.0",
-        "@onlyne/im-fake": "^3.0.0",
-        "@onlyne/lib": "^3.0.0",
-        "@onlyne/node-host": "^3.0.0",
+        "@onlyne/im-core": "^3.1.0",
+        "@onlyne/im-fake": "^3.1.0",
+        "@onlyne/lib": "^3.1.0",
+        "@onlyne/node-host": "^3.1.0",
       },
       "devDependencies": {
-        "@onlyne/im-lark": "^3.0.0",
-        "@onlyne/im-qq": "^3.0.0",
-        "@onlyne/im-wechat": "^3.0.0",
+        "@onlyne/im-lark": "^3.1.0",
+        "@onlyne/im-qq": "^3.1.0",
+        "@onlyne/im-wechat": "^3.1.0",
         "@types/bun": "^1.3.0",
         "typescript": "^5.9.0",
       },
       "peerDependencies": {
-        "@onlyne/im-lark": "^3.0.0",
-        "@onlyne/im-qq": "^3.0.0",
-        "@onlyne/im-wechat": "^3.0.0",
+        "@onlyne/im-lark": "^3.1.0",
+        "@onlyne/im-qq": "^3.1.0",
+        "@onlyne/im-wechat": "^3.1.0",
       },
       "optionalPeers": [
         "@onlyne/im-lark",
@@ -64,9 +80,9 @@
       "version": "3.1.0",
       "dependencies": {
         "@larksuiteoapi/node-sdk": "^1.76.0",
-        "@onlyne/im-core": "^3.0.0",
-        "@onlyne/lib": "^3.0.0",
-        "@onlyne/node-host": "^3.0.0",
+        "@onlyne/im-core": "^3.1.0",
+        "@onlyne/lib": "^3.1.0",
+        "@onlyne/node-host": "^3.1.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -77,8 +93,8 @@
       "name": "@onlyne/im-qq",
       "version": "3.1.0",
       "dependencies": {
-        "@onlyne/im-core": "^3.0.0",
-        "@onlyne/lib": "^3.0.0",
+        "@onlyne/im-core": "^3.1.0",
+        "@onlyne/lib": "^3.1.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -89,8 +105,8 @@
       "name": "@onlyne/im-wechat",
       "version": "3.1.0",
       "dependencies": {
-        "@onlyne/im-core": "^3.0.0",
-        "@onlyne/lib": "^3.0.0",
+        "@onlyne/im-core": "^3.1.0",
+        "@onlyne/lib": "^3.1.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -110,7 +126,7 @@
       "version": "3.1.0",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.32.2",
-        "@onlyne/lib": "workspace:*",
+        "@onlyne/lib": "^3.1.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -120,12 +136,31 @@
     "packages/mcp-gateway": {
       "name": "@onlyne/mcp-gateway",
       "version": "3.1.0",
-      "bin": "./src/main.ts",
+      "bin": {
+        "onlyne-mcp-gateway": "src/main.ts",
+      },
       "dependencies": {
-        "@onlyne/im-gateway": "workspace:*",
-        "@onlyne/lib": "workspace:*",
-        "@onlyne/mcp-core": "workspace:*",
-        "@onlyne/node-host": "workspace:*",
+        "@onlyne/im-gateway": "^3.1.0",
+        "@onlyne/lib": "^3.1.0",
+        "@onlyne/mcp-core": "^3.1.0",
+        "@onlyne/node-host": "^3.1.0",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.0",
+        "typescript": "^5.9.0",
+      },
+    },
+    "packages/mcp-server": {
+      "name": "@onlyne/mcp-server",
+      "version": "3.1.0",
+      "bin": {
+        "onlyne-mcp-server": "src/main.ts",
+      },
+      "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.32.2",
+        "@onlyne/im-gateway": "^3.1.0",
+        "@onlyne/lib": "^3.1.0",
+        "@onlyne/node-host": "^3.1.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -136,7 +171,7 @@
       "name": "@onlyne/node-host",
       "version": "3.1.0",
       "dependencies": {
-        "@onlyne/lib": "^3.0.0",
+        "@onlyne/lib": "^3.1.0",
         "bonjour-service": "^1.4.4",
       },
       "devDependencies": {
@@ -148,8 +183,8 @@
       "name": "omp-onlyne",
       "version": "0.2.0",
       "dependencies": {
-        "@onlyne/lib": "^3.0.0",
-        "@onlyne/node-host": "workspace:*",
+        "@onlyne/lib": "^3.1.0",
+        "@onlyne/node-host": "^3.1.0",
       },
       "devDependencies": {
         "@oh-my-pi/pi-agent-core": "18.12.6",
@@ -284,6 +319,8 @@
 
     "@oh-my-pi/snapcompact": ["@oh-my-pi/snapcompact@18.12.6", "", { "dependencies": { "@oh-my-pi/pi-ai": "18.12.6", "@oh-my-pi/pi-catalog": "18.12.6", "@oh-my-pi/pi-natives": "18.12.6", "@oh-my-pi/pi-utils": "18.12.6", "@oh-my-pi/pi-wire": "18.12.6" } }, "sha512-w34sYdM5vw6Pilqf5krZZgcFVpLnfaYsLT2yA/G30j+YNlg8oB6WxmShmY8LqNFlxbP373Fet8bLkuqRdHuBCQ=="],
 
+    "@onlyne/grok-bot": ["@onlyne/grok-bot@workspace:packages/grok-bot"],
+
     "@onlyne/im-core": ["@onlyne/im-core@workspace:packages/im-core"],
 
     "@onlyne/im-fake": ["@onlyne/im-fake@workspace:packages/im-fake"],
@@ -301,6 +338,8 @@
     "@onlyne/mcp-core": ["@onlyne/mcp-core@workspace:packages/mcp-core"],
 
     "@onlyne/mcp-gateway": ["@onlyne/mcp-gateway@workspace:packages/mcp-gateway"],
+
+    "@onlyne/mcp-server": ["@onlyne/mcp-server@workspace:packages/mcp-server"],
 
     "@onlyne/node-host": ["@onlyne/node-host@workspace:packages/node-host"],
 

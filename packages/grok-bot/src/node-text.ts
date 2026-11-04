@@ -1,0 +1,63 @@
+import { createTranslator } from '@onlyne/node-host/i18n';
+
+const en = {
+  'cli.usage': 'usage: onlyne-grok-bot <config.json>',
+  'startup.pending': 'The Grok Bot node is starting.',
+  'config.unreadable': 'The configuration file is unreadable: {path}',
+  'config.object': 'The configuration needs {field} as an object.',
+  'config.string': 'The configuration field {field} is a non-empty string.',
+  'config.language': 'The configuration language is en or zh-CN, not {value}.',
+  'config.webhookUrl': 'webhook.url is a non-empty http(s) URL, or a $VARIABLE reference.',
+  'config.webhookKey': 'webhook.key is a non-empty sender key, or a $VARIABLE reference. Do not commit the value.',
+  'config.webhookHeader': 'webhook.header is a non-empty HTTP header name.',
+  'config.webhookScheme': 'webhook.scheme is a header scheme such as Bearer, or an empty string for a raw key.',
+  'config.positiveInt': 'The configuration field {field} is a positive integer.',
+  'config.envMissing': 'The environment variable {name} is unset; it is required for {field}.',
+  'config.replyPath': 'reply_path is an absolute HTTP path, not {value}.',
+  'config.trustSeeds': '{field} is an array of { node_id, fingerprint } pins. A missing fingerprint is refused; there is no accept-all.',
+  'config.trustFingerprint': '{field} is the peer\'s 16-character hex fingerprint, compared exactly. Wildcards are refused.',
+  'config.trustDuplicate': 'trust_seeds lists {node} more than once.',
+  'error.claimIdentity': 'HTTP callers cannot claim the node identity.',
+  'error.decide': 'The Grok Bot node forwards inbound messages; it does not decide sends.',
+  'error.noContext': 'The Grok Bot node consumes no model context.',
+  'error.replyAuth': 'The reply endpoint requires the configured sender key.',
+  'error.replyBody': 'The reply body needs to, msg, and optional thread / in_reply_to fields. Bring back thread and in_reply_to from the webhook to continue the same conversation.',
+  'error.eventsAuth': 'The events endpoint requires the configured sender key.',
+  'error.ackBody': 'The ack body needs an ids array of delivery ids from GET /grok/events.',
+  'error.groupChatId': 'A Grok Bot group thread needs grokbot.chat_id (or grokbot.group_id) in message meta.',
+  'error.chatKind': 'grokbot.chat_kind is dm or group, not {kind}.',
+  'context.summary': 'Delivery into the Grok Bot node; a reply continues in the conversation thread.',
+} as const;
+
+const zh: Record<keyof typeof en, string> = {
+  'cli.usage': '用法：onlyne-grok-bot <config.json>',
+  'startup.pending': 'Grok Bot 节点正在启动。',
+  'config.unreadable': '配置文件无法读取：{path}',
+  'config.object': '配置项 {field} 需要是一个对象。',
+  'config.string': '配置项 {field} 需要是非空字符串。',
+  'config.language': '配置项 language 只能是 en 或 zh-CN，而不是 {value}。',
+  'config.webhookUrl': 'webhook.url 需要是非空 http(s) URL，或 $VARIABLE 引用。',
+  'config.webhookKey': 'webhook.key 需要是非空发送密钥，或 $VARIABLE 引用。不要把值提交进仓库。',
+  'config.webhookHeader': 'webhook.header 需要是非空 HTTP 头名称。',
+  'config.webhookScheme': 'webhook.scheme 是 Bearer 这类方案名，或空字符串表示直接放密钥。',
+  'config.positiveInt': '配置项 {field} 需要是正整数。',
+  'config.envMissing': '环境变量 {name} 未设置；{field} 需要它。',
+  'config.replyPath': 'reply_path 必须是绝对 HTTP 路径，而不是 {value}。',
+  'config.trustSeeds': '{field} 是 { node_id, fingerprint } 钉扎数组。缺指纹会拒绝；没有全接受。',
+  'config.trustFingerprint': '{field} 必须是对端 16 位十六进制指纹，精确比对。不接受通配符。',
+  'config.trustDuplicate': 'trust_seeds 里 {node} 出现了不止一次。',
+  'error.claimIdentity': 'HTTP 调用方不能冒用节点身份。',
+  'error.decide': 'Grok Bot 节点只转发入站消息，不做发送决策。',
+  'error.noContext': 'Grok Bot 节点不消费模型上下文。',
+  'error.replyAuth': '回复端点需要配置中的发送密钥。',
+  'error.replyBody': '回复正文需要 to、msg，以及可选的 thread / in_reply_to 字段。把 webhook 里的 thread 和 in_reply_to 带回来才能继续同一会话。',
+  'error.eventsAuth': '事件端点需要配置中的发送密钥。',
+  'error.ackBody': 'ack 正文需要 ids 数组，元素是 GET /grok/events 返回的投递 id。',
+  'error.groupChatId': 'Grok Bot 群会话需要在消息 meta 里提供 grokbot.chat_id（或 grokbot.group_id）。',
+  'error.chatKind': 'grokbot.chat_kind 只能是 dm 或 group，而不是 {kind}。',
+  'context.summary': '投递到 Grok Bot 节点；回复继续落在该会话 thread。',
+};
+
+export type NodeTextKey = keyof typeof en;
+
+export const t = createTranslator({ en, 'zh-CN': zh });

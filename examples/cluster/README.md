@@ -22,6 +22,8 @@ dpdp 与 lazuli 是 agent 节点，由 OMP 插件持有。在角色目录里跑 
 | `gateways/im-qq.json` | QQ 独立节点，webhook 路径 `/im/webhook` |
 | `gateways/im-wechat.json` | 微信 iLink 独立节点，长轮询接收消息 |
 | `gateways/mcp.json` | MCP 网关配置：Hindsight 服务、handler lazuli |
+| `gateways/grok-bot.json` | Grok Bot 通信节点，webhook URL/密钥用 `$GROK_BOT_WEBHOOK_*` 引用 |
+| `gateways/mcp-server.json` | 把本节点暴露为 MCP 工具的 stdio 服务器 |
 | `credentials/feishu` | 飞书凭据引用文件，内容是 `$FEISHU_CREDENTIAL` |
 | `.env.example` | 凭据变量模板，复制成 `.env` 后填值 |
 | `var/` | 运行时状态：存储、媒体文件、发现记录 |
@@ -54,7 +56,11 @@ examples/cluster/run-im.sh
 examples/cluster/run-im.sh qq
 examples/cluster/run-im.sh wechat
 examples/cluster/run-mcp.sh
+examples/cluster/run-grok-bot.sh
+examples/cluster/run-mcp-server.sh
 ```
+
+Grok Bot 节点把入站消息 POST 到 `GROK_BOT_WEBHOOK_URL`，发送密钥放在 `Authorization: Bearer` 头。这两个值只从环境变量读取，配置文件里写 `$GROK_BOT_WEBHOOK_URL` / `$GROK_BOT_WEBHOOK_KEY`。一个账户一把钥、一个 grok-bot 节点（`urn:onlyne:gateway:grok-bot`），每个 assistant 单聊是 `grokbot:dm:<agent_id>`，每个群是 `grokbot:group:<group_id>`，不要按 bot 再拆节点或密钥。`/grok/reply` 把 webhook 里的 `thread` 与 `in_reply_to` 带回来才能继续同一会话。`onlyne-mcp-server` 是给 MCP 客户端用的 stdio 服务器，和 `onlyne-mcp-gateway`（把远程 MCP server 接成 Onlyne 资源）方向相反；它读的是自己那份 store，看不到 grok-bot 的 thread，除非以后合并身份。
 
 网关还没有打包成独立 CLI，脚本直接用 bun 跑包入口。前台运行时 `Ctrl-C` 会走到 `im.gateway.stopped` 与 `mcp.gateway.stopped`，两端都会关掉监听。
 

@@ -1,0 +1,5 @@
+{
+  "node": { "id": "urn:onlyne:agent:mcp" },
+  "server": { "bind": "127.0.0.1", "port": 3996 },
+  "storage": { "path": "examples/cluster/var/mcp-server/store.json" }
+}

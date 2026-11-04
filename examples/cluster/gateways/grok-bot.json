@@ -1,0 +1,11 @@
+{
+  "node": { "id": "urn:onlyne:gateway:grok-bot" },
+  "server": { "bind": "127.0.0.1", "port": 3995 },
+  "storage": { "path": "examples/cluster/var/grok-bot/store.json" },
+  "webhook": {
+    "url": "$GROK_BOT_WEBHOOK_URL",
+    "key": "$GROK_BOT_WEBHOOK_KEY",
+    "header": "Authorization",
+    "scheme": "Bearer"
+  }
+}

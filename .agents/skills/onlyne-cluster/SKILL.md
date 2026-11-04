@@ -9,7 +9,7 @@ description: Deploy and verify an Onlyne v3 cluster. Covers agent nodes from the
 
 One process is one node. A node keeps its own records. There is no central Onlyne server.
 
-A cluster is a set of nodes that know each other by key exchange and address discovery. Three
+A cluster is a set of nodes that know each other by key exchange and address discovery. Five
 kinds exist.
 
 | Kind | Process | Serves |
@@ -17,6 +17,8 @@ kinds exist.
 | Agent node | an OMP session with the `omp-onlyne` plugin | messages, threads, and the `msg` tool |
 | IM gateway | `onlyne-im-gateway <config.json>` | platform conversations, one resource each |
 | MCP gateway | `onlyne-mcp-gateway <config.json>` | MCP servers, one resource each |
+| Grok Bot node | `onlyne-grok-bot <config.json>` | inbound messages POSTed to a Grok Bot webhook |
+| Onlyne MCP server | `onlyne-mcp-server <config.json>` | this Onlyne node as MCP tools over stdio |
 
 An agent reaches a gateway resource through the same `msg` path it uses for messages. No
 second protocol and no side channel.
@@ -28,13 +30,15 @@ Install Bun 1.4.3 or newer and OMP 18.12.6 or newer.
 Install the packages one of two ways.
 
 ```sh
-npm install -g @onlyne/lib @onlyne/node-host @onlyne/im-gateway @onlyne/mcp-gateway
+npm install -g @onlyne/lib @onlyne/node-host @onlyne/im-gateway @onlyne/mcp-gateway @onlyne/grok-bot @onlyne/mcp-server
 ```
 
 ```sh
 cd packages/omp-onlyne && bun link
 cd packages/im-gateway && bun link
 cd packages/mcp-gateway && bun link
+cd packages/grok-bot && bun link
+cd packages/mcp-server && bun link
 ```
 
 The plugin belongs to OMP, so link it through OMP.
@@ -47,11 +51,13 @@ omp plugin list --json
 `omp plugin list --json` must show `omp-onlyne` with `enabled: true` and
 `manifest.extensions: ["./index.ts"]`. Confirm both before you continue.
 
-Both gateway binaries must answer on PATH.
+The gateway and companion binaries must answer on PATH.
 
 ```sh
 onlyne-im-gateway    # prints usage and exits 2
 onlyne-mcp-gateway   # prints usage and exits 2
+onlyne-grok-bot      # prints usage and exits 2
+onlyne-mcp-server    # prints usage and exits 2
 ```
 
 ## Agent node
@@ -126,6 +132,52 @@ runtime and answers `unsupported_delivery` when the package is absent.
 The server's tool list becomes the resource's `operations`. `controllers` lists the nodes that
 may call those tools. An MCP resource has no handler binding, so it has no handover and no event
 log.
+
+## Grok Bot node
+
+```json
+{
+  "node": { "id": "urn:onlyne:gateway:grok-bot" },
+  "server": { "bind": "127.0.0.1", "port": 3995 },
+  "storage": { "path": "./var/grok-bot/store.json" },
+  "webhook": {
+    "url": "$GROK_BOT_WEBHOOK_URL",
+    "key": "$GROK_BOT_WEBHOOK_KEY"
+  }
+}
+```
+
+Each inbound message POSTs JSON to the webhook URL (Authorization: Bearer \<key\> by default).
+The URL and key come from the environment, never from a committed file. Grok Bot replies with
+`POST /grok/reply` using the same key. See `packages/grok-bot/README.md`.
+
+One account key, one grok-bot node (default `urn:onlyne:gateway:grok-bot`), many threads. Do
+not provision a keypair per assistant. Each Grok Bot DM is `grokbot:dm:<agent_id>` and each
+group is `grokbot:group:<group_id>` under that node. Echo `thread` and `in_reply_to` from the
+webhook on `/grok/reply` to continue the same conversation.
+
+A device behind NAT does not listen. It long-polls `GET /grok/events` with the same sender key,
+acks with `POST /grok/events/ack`, and replies on `/grok/reply`. Delivery is at-least-once:
+unacked leases are offered again after they expire. The cloud webhook POST stays available.
+This node's own replies are not re-queued as wakes. Headless pairing (`ONLYNE_NO_TUI=1`) uses
+`trust_seeds` / `ONLYNE_GROK_TRUST_SEEDS`: pin specific `node_id` + 16-hex fingerprint, never
+accept-all. A mismatched live key is refused.
+
+## Onlyne MCP server
+
+```json
+{
+  "node": { "id": "urn:onlyne:agent:mcp" },
+  "server": { "bind": "127.0.0.1", "port": 3996 },
+  "storage": { "path": "./var/mcp-server/store.json" }
+}
+```
+
+This process is an Onlyne node that an MCP client drives over stdio (`send_message`, inbox,
+threads, neighbors). Register it as `command: onlyne-mcp-server` with the config path as the
+argument. It is not a substitute for `onlyne-mcp-gateway`. It is also not the grok-bot node:
+MCP reads this node's store; grok-bot threads stay on the grok-bot node until identities are
+unified. See `packages/mcp-server/README.md`.
 
 ## Key exchange is per pair
 
