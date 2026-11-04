@@ -5,7 +5,8 @@
 
 import type { Bot, Capability, DesktopState } from '../contracts.ts';
 import type { DesktopUiApi } from './api.ts';
-import { fingerprintsMatch, formatFingerprint } from './layout.ts';
+import { fingerprintGroups, fingerprintHint, fingerprintMarks, formatWhen, middleEllipsis, parsePeerUrl, peerPhaseLabel } from '../desk-format.ts';
+import { formatFingerprint } from './layout.ts';
 
 export interface DeskHooks {
   notify(message: string, level?: string): void;
@@ -136,13 +137,38 @@ function page(eyebrow: string, title: string, lede: string, tools: Child[], body
     body);
 }
 
-function kv(rows: Array<[string, string]>): HTMLElement {
+function kv(rows: Array<[string, Child]>): HTMLElement {
   const list = h('dl', { class: 'kv' });
   for (const [key, value] of rows) {
-    if (value.length === 0) continue;
-    list.append(h('dt', { text: key }), h('dd', { text: value }));
+    if (value === false || value === null || value === undefined || value === '') continue;
+    const dd = h('dd');
+    if (typeof value === 'string' || typeof value === 'number') dd.textContent = String(value);
+    else dd.append(value);
+    list.append(h('dt', { text: key }), dd);
   }
   return list;
+}
+
+function copyValue(hooks: DeskHooks, value: string, label: string): void {
+  void navigator.clipboard?.writeText(value).then(
+    () => hooks.notify(label, 'ok'),
+    () => hooks.notify('The clipboard is unavailable. Select the value and copy it.', 'warn'),
+  );
+}
+
+function identifier(value: string, hooks: DeskHooks): HTMLElement {
+  if (value.length === 0) return h('span', { text: '—' });
+  const button = h('button', { class: 'id-copy', type: 'button', 'aria-label': `Copy ${value}` }, 'Copy');
+  button.addEventListener('click', () => copyValue(hooks, value, 'Copied.'));
+  return h('span', { class: 'identifier', title: value },
+    h('span', { class: 'identifier-text', text: middleEllipsis(value) }),
+    button);
+}
+
+function whenView(value: string): HTMLElement | string {
+  if (value.length === 0) return '';
+  const when = formatWhen(value);
+  return h('time', { datetime: value, title: when.title, text: when.label });
 }
 
 async function loadStatus(command: Command, state: DesktopState): Promise<Record<string, unknown>> {
@@ -266,56 +292,113 @@ function inboxPanel(api: DesktopUiApi): (state: DesktopState) => HTMLElement {
 function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState) => HTMLElement {
   return state => {
     const body = h('div', { class: 'desk-stack' });
-    const url = h('input', { type: 'url', placeholder: 'http://127.0.0.1:3992/onlyne/v3', 'aria-label': 'Peer URL' });
+    const url = h('input', { type: 'url', placeholder: 'Peer URL', 'aria-label': 'Peer URL', autocomplete: 'off', spellcheck: 'false' });
+    const errorLine = h('p', { class: 'field-error', hidden: true });
     const connect = h('button', { class: 'btn primary', type: 'button' }, 'Observe');
+    const query = h('input', { type: 'search', placeholder: 'Filter peers', 'aria-label': 'Filter peers' });
+    let rows: Record<string, unknown>[] = [];
     const tools = [botSelect(state, () => { void load(); })];
-    const root = page('Network', 'Neighbors', 'Peers this node has observed or exchanged keys with. Observing a URL does not approve it.', tools, body);
-    connect.addEventListener('click', () => {
-      const value = url.value.trim();
-      if (value.length === 0) {
-        hooks.notify('Enter the peer URL first.', 'warn');
+    const root = page('Network', 'Neighbors', 'Peers this node has seen. Observing records an address. It does not approve a fingerprint.', tools, body);
+    const runConnect = (): void => {
+      const parsed = parsePeerUrl(url.value);
+      if (!parsed.ok) {
+        errorLine.hidden = false;
+        errorLine.textContent = parsed.error;
+        url.setAttribute('aria-invalid', 'true');
         url.focus();
         return;
       }
+      errorLine.hidden = true;
+      url.removeAttribute('aria-invalid');
       connect.disabled = true;
-      void api.command('onlyne.action', { action: 'connect', args: { url: value }, ...scopePayload(api.state()) })
-        .then(() => { url.value = ''; hooks.notify('Peer observed. Trust is still a separate step.', 'ok'); return load(); })
-        .catch(error => hooks.notify(errorText(error), 'error'))
+      void api.command('onlyne.action', { action: 'connect', args: { url: parsed.url }, ...scopePayload(api.state()) })
+        .then(() => {
+          url.value = '';
+          hooks.notify('Peer observed. Pairing still happens on Trust.', 'ok');
+          return load();
+        })
+        .catch(error => {
+          errorLine.hidden = false;
+          errorLine.textContent = errorText(error);
+        })
         .finally(() => { connect.disabled = false; });
-    });
+    };
+    connect.addEventListener('click', runConnect);
+    url.addEventListener('input', () => { errorLine.hidden = true; url.removeAttribute('aria-invalid'); });
+    query.addEventListener('input', () => paint(rows));
     const load = async (): Promise<void> => {
       body.replaceChildren(skeleton());
       try {
         const status = await loadStatus(api.command, api.state());
         const demo = await knowDemo(api.command);
         if (demo && root.querySelector('.mode-note') === null) root.insertBefore(h('p', { class: 'mode-note', text: 'Demo node. Endpoints are records in the local trust table.' }), body);
-        const rows = asArray(status.neighbors);
-        if (rows.length === 0) {
-          body.replaceChildren(connectBar(), emptyBlock('No neighbors yet', 'Observe a peer URL. Approval happens on the trust screen after a fingerprint is displayed.'));
-          return;
-        }
-        const grid = h('div', { class: 'card-grid' });
-        for (const row of rows) {
-          const phase = pick(row, ['phase', 'state']) || 'observed';
-          grid.append(h('article', { class: 'peer-card' },
-            h('div', { class: 'peer-top' },
-              h('h2', { text: shortNode(pick(row, ['nodeId', 'node_id'])) }),
-              chip(phase, toneForPhase(phase))),
-            h('p', { class: 'mono break', text: pick(row, ['nodeId', 'node_id']) }),
-            kv([
-              ['Endpoint', pick(row, ['baseUrl', 'base_url'])],
-              ['Fingerprint', formatFingerprint(pick(row, ['fingerprint']))],
-              ['Last seen', pick(row, ['lastSeen', 'last_seen']) || 'not seen'],
-              ['Verified', row.verified === true ? 'yes' : 'no'],
-            ])));
-        }
-        body.replaceChildren(connectBar(), grid);
+        rows = asArray(status.neighbors);
+        paint(rows);
       } catch (error) {
         body.replaceChildren(errorBlock(errorText(error), () => { void load(); }));
       }
     };
-    const connectBar = (): HTMLElement => h('form', { class: 'inline-form', onsubmit: (event: Event) => { event.preventDefault(); connect.click(); } },
-      h('label', { class: 'field' }, h('span', { text: 'Observe a peer' }), url),
+    const paint = (all: Record<string, unknown>[]): void => {
+      const needle = query.value.trim().toLowerCase();
+      const visible = all.filter(row => {
+        if (needle.length === 0) return true;
+        const blob = [pick(row, ['nodeId', 'node_id']), pick(row, ['baseUrl', 'base_url']), peerPhaseLabel(pick(row, ['phase', 'state']))].join(' ').toLowerCase();
+        return blob.includes(needle);
+      });
+      const grid = h('div', { class: 'card-grid' });
+      for (const row of visible) grid.append(neighborCard(row));
+      const empty = visible.length === 0
+        ? emptyBlock(
+          all.length === 0 ? 'No neighbors yet' : 'No peers match',
+          all.length === 0 ? 'Observe a full http(s) URL. Approval is a separate step on Trust, after a fingerprint is on screen.' : 'Try a node name, host, or status such as Trusted.',
+          all.length === 0 ? h('button', { class: 'btn primary', type: 'button', onclick: () => url.focus() }, 'Observe a peer') : undefined,
+        )
+        : false;
+      body.replaceChildren(connectBar(), query, empty === false ? grid : empty);
+    };
+    const neighborCard = (row: Record<string, unknown>): HTMLElement => {
+      const nodeId = pick(row, ['nodeId', 'node_id']);
+      const endpoint = pick(row, ['baseUrl', 'base_url']);
+      const phase = pick(row, ['phase', 'state']) || 'no_exchange';
+      const label = peerPhaseLabel(phase);
+      const trust = h('button', { class: 'btn sm', type: 'button' }, phase === 'exchanged' ? 'Review' : 'Start trust');
+      trust.addEventListener('click', () => {
+        if (phase === 'exchanged') { hooks.open('trust'); return; }
+        void api.command('onlyne.action', { action: 'trust.request', args: { nodeId }, ...scopePayload(api.state()) })
+          .then(() => { hooks.notify(`A fingerprint for ${shortNode(nodeId)} is waiting on Trust.`, 'ok'); hooks.open('trust'); })
+          .catch(error => hooks.notify(errorText(error), 'error'));
+      });
+      const revoke = h('button', { class: 'btn sm', type: 'button' }, 'Revoke');
+      revoke.addEventListener('click', () => {
+        void api.command('onlyne.action', { action: 'trust.revoke', args: { nodeId }, ...scopePayload(api.state()) })
+          .then(() => { hooks.notify(`Revoked ${shortNode(nodeId)}.`, 'ok'); return load(); })
+          .catch(error => hooks.notify(errorText(error), 'error'));
+      });
+      const forget = h('button', { class: 'btn sm', type: 'button' }, 'Forget');
+      forget.addEventListener('click', () => {
+        void api.command('onlyne.action', { action: 'peer.forget', args: { nodeId }, ...scopePayload(api.state()) })
+          .then(() => { hooks.notify(`Forgot ${shortNode(nodeId)}.`, 'ok'); return load(); })
+          .catch(error => hooks.notify(errorText(error), 'error'));
+      });
+      const copy = h('button', { class: 'btn sm', type: 'button' }, 'Copy endpoint');
+      copy.addEventListener('click', () => copyValue(hooks, endpoint, 'Endpoint copied.'));
+      return h('article', { class: 'peer-card' },
+        h('div', { class: 'peer-top' }, h('h2', { text: shortNode(nodeId) }), chip(label, toneForPhase(phase))),
+        identifier(nodeId, hooks),
+        kv([
+          ['Endpoint', identifier(endpoint, hooks)],
+          ['Fingerprint', formatFingerprint(pick(row, ['fingerprint']))],
+          ['Last seen', whenView(pick(row, ['lastSeen', 'last_seen']))],
+          ['Verified', row.verified === true ? 'Yes' : 'No'],
+        ]),
+        h('div', { class: 'row-actions' }, trust, phase === 'exchanged' ? revoke : forget, endpoint.length > 0 ? copy : false));
+    };
+    const connectBar = (): HTMLElement => h('form', { class: 'inline-form', onsubmit: (event: Event) => { event.preventDefault(); runConnect(); } },
+      h('label', { class: 'field' },
+        h('span', { text: 'Observe a peer' }),
+        url,
+        h('span', { class: 'field-hint', text: 'Example: http://127.0.0.1:3992/onlyne/v3. A partial string is rejected and no card is created.' }),
+        errorLine),
       connect);
     void load();
     return root;
@@ -355,7 +438,7 @@ function trustPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState) 
         h('div', { class: 'trust-local-meta' }, h('span', { class: 'mono break', text: nodeId || 'Node id unavailable' }), fingerprint.length > 0 ? copy : false));
     };
     const pendingList = (rows: Record<string, unknown>[]): HTMLElement => {
-      if (rows.length === 0) return h('section', { class: 'desk-section' }, emptyBlock('No pairing is waiting', 'Request trust from Neighbors, or wait for a peer to begin an exchange. Nothing is approved from this empty state.'));
+      if (rows.length === 0) return h('section', { class: 'desk-section' }, emptyBlock('No pairing is waiting', 'Nothing is approved from an empty list. Start from a neighbor when you can read their fingerprint on their own screen.', h('button', { class: 'btn primary', type: 'button', onclick: () => hooks.open('neighbors') }, 'Open neighbors')));
       return h('section', { class: 'desk-section' },
         h('h2', { class: 'section-title', text: 'Waiting for you' }),
         ...rows.map(row => pendingCard(row)));
@@ -363,14 +446,21 @@ function trustPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState) 
     const pendingCard = (row: Record<string, unknown>): HTMLElement => {
       const nodeId = pick(row, ['nodeId', 'node_id']);
       const fingerprint = pick(row, ['fingerprint']);
-      const input = h('input', { type: 'text', spellcheck: 'false', autocomplete: 'off', 'aria-label': `Type the fingerprint for ${nodeId}`, placeholder: 'Type the fingerprint' });
+      const input = h('input', { type: 'text', spellcheck: 'false', autocomplete: 'off', 'aria-label': `Type the fingerprint for ${nodeId}`, placeholder: 'Type or paste the fingerprint' });
+      const groups = h('div', { class: 'fp-groups', 'aria-hidden': 'true' });
       const approve = h('button', { class: 'btn primary', type: 'button', disabled: true }, 'Approve fingerprint');
       const decline = h('button', { class: 'btn', type: 'button' }, 'Decline');
-      const hint = h('p', { class: 'field-hint', text: 'The button stays quiet until the typed value matches the fingerprint above.' });
-      const sync = (): void => { approve.disabled = !fingerprintsMatch(input.value, fingerprint); };
+      const hint = h('p', { class: 'field-hint' });
+      const sync = (): void => {
+        const marks = fingerprintMarks(input.value, fingerprint);
+        groups.replaceChildren(...marks.map((mark, index) => h('span', { class: `fp-group ${mark}`, text: fingerprintGroups(fingerprint)[index] ?? '' })));
+        hint.textContent = fingerprintHint(marks);
+        approve.disabled = !marks.every(mark => mark === 'match');
+      };
       input.addEventListener('input', sync);
+      sync();
       approve.addEventListener('click', () => {
-        if (!fingerprintsMatch(input.value, fingerprint)) return;
+        if (!fingerprintMarks(input.value, fingerprint).every(mark => mark === 'match')) return;
         approve.disabled = true;
         void api.command('onlyne.action', { action: 'trust.approve', args: { nodeId, fingerprint: input.value.trim() }, ...scopePayload(api.state()) })
           .then(() => { hooks.notify(`Trusted ${shortNode(nodeId)}.`, 'ok'); return load(); })
@@ -384,11 +474,11 @@ function trustPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState) 
       });
       return h('article', { class: 'trust-card' },
         h('div', { class: 'peer-top' }, h('h3', { text: shortNode(nodeId) }), chip('pending', 'warn')),
-        h('p', { class: 'mono break', text: nodeId }),
+        identifier(nodeId, hooks),
         h('p', { class: 'field-label', text: 'Displayed fingerprint' }),
         h('p', { class: 'fingerprint', text: formatFingerprint(fingerprint) }),
-        kv([['Endpoint', pick(row, ['baseUrl', 'base_url'])], ['Shown at', pick(row, ['at'])]]),
-        h('label', { class: 'field' }, h('span', { text: 'Read it back' }), input),
+        kv([['Endpoint', identifier(pick(row, ['baseUrl', 'base_url']), hooks)], ['Shown at', whenView(pick(row, ['at']))]]),
+        h('label', { class: 'field' }, h('span', { text: 'Read it back' }), input, groups),
         hint,
         h('div', { class: 'row-actions' }, approve, decline));
     };
@@ -443,16 +533,20 @@ function collectThreads(status: Record<string, unknown>): ThreadRow[] {
 
 function threadsPanel(api: DesktopUiApi): (state: DesktopState) => HTMLElement {
   return state => {
-    const body = h('div', { class: 'desk-split' });
+    const split = h('div', { class: 'desk-split' });
+    const query = h('input', { type: 'search', placeholder: 'Filter threads', 'aria-label': 'Filter threads' });
+    const body = h('div', { class: 'desk-stack' }, query, split);
     const tools = [botSelect(state, () => { void load(); })];
     const root = page('Network', 'Threads', 'Threads this node owns, and threads it was invited into. A joined thread stays read-only here.', tools, body);
+    query.addEventListener('input', () => { void load(); });
     const load = async (): Promise<void> => {
-      body.replaceChildren(skeleton());
+      split.replaceChildren(skeleton());
       try {
         const status = await loadStatus(api.command, api.state());
-        const rows = collectThreads(status);
+        const needle = query.value.trim().toLowerCase();
+        const rows = collectThreads(status).filter(row => needle.length === 0 || `${row.title} ${row.id} ${row.owner}`.toLowerCase().includes(needle));
         if (rows.length === 0) {
-          body.replaceChildren(emptyBlock('No threads', 'Owned and joined threads appear here after the node admits a message or receives an invitation.'));
+          split.replaceChildren(emptyBlock(needle.length === 0 ? 'No threads' : 'No threads match', needle.length === 0 ? 'Owned and joined threads appear here after the node admits a message or receives an invitation.' : 'Try a title, owner, or thread id.'));
           return;
         }
         const list = h('div', { class: 'desk-list', role: 'list' });
@@ -474,9 +568,9 @@ function threadsPanel(api: DesktopUiApi): (state: DesktopState) => HTMLElement {
           list.append(button);
           if (index === 0) { button.classList.add('on'); show(row); }
         });
-        body.replaceChildren(list, detail);
+        split.replaceChildren(list, detail);
       } catch (error) {
-        body.replaceChildren(errorBlock(errorText(error), () => { void load(); }));
+        split.replaceChildren(errorBlock(errorText(error), () => { void load(); }));
       }
     };
     void load();
@@ -529,17 +623,25 @@ function resourceOwners(value: unknown): Array<{ owner: string; items: Record<st
 
 function resourcesPanel(api: DesktopUiApi): (state: DesktopState) => HTMLElement {
   return state => {
-    const body = h('div', { class: 'desk-split' });
+    const split = h('div', { class: 'desk-split' });
+    const query = h('input', { type: 'search', placeholder: 'Filter resources', 'aria-label': 'Filter resources' });
+    const body = h('div', { class: 'desk-stack' }, query, split);
     const tools = [botSelect(state, () => { void load(); })];
     const root = page('Network', 'Resources', 'Resources this desk can see, grouped by owner. Operations are the calls a controller is allowed to make.', tools, body);
+    query.addEventListener('input', () => { void load(); });
     const load = async (): Promise<void> => {
-      body.replaceChildren(skeleton());
+      split.replaceChildren(skeleton());
       try {
         const value = await api.command('onlyne.action', { action: 'resource.list', args: {}, ...scopePayload(api.state()) });
         const groups = resourceOwners(value);
-        const items = groups.flatMap(group => group.items.map(item => ({ owner: group.owner, item })));
+        const needle = query.value.trim().toLowerCase();
+        const items = groups.flatMap(group => group.items.map(item => ({ owner: group.owner, item }))).filter(entry => {
+          if (needle.length === 0) return true;
+          const ref = isRecord(entry.item.resource_ref) ? entry.item.resource_ref : null;
+          return `${pick(ref, ['id'])} ${entry.owner} ${pick(entry.item, ['kind'])}`.toLowerCase().includes(needle);
+        });
         if (items.length === 0) {
-          body.replaceChildren(emptyBlock('No resources', 'MCP servers, mounts and other capabilities show up here once a node publishes them.'));
+          split.replaceChildren(emptyBlock(needle.length === 0 ? 'No resources' : 'No resources match', needle.length === 0 ? 'MCP servers, mounts and other capabilities show up here once a node publishes them.' : 'Try an owner, id, or kind.'));
           return;
         }
         const list = h('div', { class: 'desk-list', role: 'list' });
@@ -572,9 +674,9 @@ function resourcesPanel(api: DesktopUiApi): (state: DesktopState) => HTMLElement
           list.append(button);
           if (index === 0) { button.classList.add('on'); show(entry.owner, entry.item); }
         });
-        body.replaceChildren(list, detail);
+        split.replaceChildren(list, detail);
       } catch (error) {
-        body.replaceChildren(errorBlock(errorText(error), () => { void load(); }));
+        split.replaceChildren(errorBlock(errorText(error), () => { void load(); }));
       }
     };
     void load();
@@ -626,7 +728,7 @@ function healthPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState)
             h('button', { class: 'btn', type: 'button', onclick: () => hooks.open('neighbors') }, 'Neighbors')),
           h('h2', { class: 'section-title', text: 'Runtimes' }),
           runtimeError.length > 0 ? h('p', { class: 'lede', text: runtimeError }) : runtimes.length === 0
-            ? emptyBlock('No runtime is running', 'A runtime starts when a conversation sends a message. Until then the desk is only the host and the node.')
+            ? emptyBlock('No runtime is running', 'A runtime starts when a conversation sends a message. Until OMP is on PATH, the demo answers locally and labels the reply.', h('button', { class: 'btn primary', type: 'button', onclick: () => hooks.open('chat') }, 'Back to the conversation'))
             : h('div', { class: 'table-wrap' }, h('table', { class: 'desk-table' },
               h('thead', {}, h('tr', {}, ...['Bot', 'Conversation', 'Settled', 'Pending', 'Last error'].map(label => h('th', { text: label })))),
               h('tbody', {}, ...runtimes.map(row => h('tr', {},
@@ -680,7 +782,7 @@ function integrationsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: Desktop
             ? emptyBlock('No MCP capability is attached', 'Add one from Team. A capability selects a server for a bot; the gateway resource is what other nodes call.')
             : h('div', { class: 'card-grid' }, ...capabilities.map(item => h('article', { class: 'peer-card' },
               h('div', { class: 'peer-top' }, h('h3', { text: item.name }), chip('mcp')),
-              h('pre', { class: 'desk-pre', text: JSON.stringify(redact(item.config), null, 2) }))))),
+              configView(item.config as Record<string, unknown>))))),
           section('MCP resources', mcp.length === 0
             ? emptyBlock('No MCP resource is published', 'An MCP gateway registers each server as a resource whose operations are that server’s tools.')
             : h('div', { class: 'card-grid' }, ...mcp.map(({ item }) => {
@@ -703,6 +805,22 @@ function integrationsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: Desktop
     void load();
     return root;
   };
+}
+
+function configView(config: Record<string, unknown>): HTMLElement {
+  const safe = redact(config);
+  const rows = h('div', { class: 'kv' });
+  for (const [key, value] of Object.entries(safe)) {
+    const shown = Array.isArray(value) ? value.map(item => String(item)).join(', ') : typeof value === 'string' ? value : JSON.stringify(value);
+    rows.append(h('div', { class: 'config-row' }, h('span', { class: 'config-key', text: key }), h('span', { text: shown })));
+  }
+  const raw = h('pre', { class: 'desk-pre', hidden: true, text: JSON.stringify(safe, null, 2) });
+  const toggle = h('button', { class: 'btn sm', type: 'button' }, 'Show JSON');
+  toggle.addEventListener('click', () => {
+    raw.hidden = !raw.hidden;
+    toggle.textContent = raw.hidden ? 'Show JSON' : 'Hide JSON';
+  });
+  return h('div', { class: 'config-view' }, rows, toggle, raw);
 }
 
 function redact(config: Record<string, unknown>): Record<string, unknown> {
@@ -742,7 +860,7 @@ function teamPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState) =
             h('div', { class: 'peer-top' }, h('h2', { text: bot.name }), bot.id === admin ? chip('admin', 'ok') : chip('member')),
             h('p', { class: 'lede', text: bot.description || 'No description.' }),
             kv([
-              ['Node', bot.onlyne?.nodeId ?? 'not provisioned'],
+              ['Node', identifier(bot.onlyne?.nodeId ?? '', hooks)],
               ['Thinking', bot.thinking],
               ['Model', bot.model ? `${bot.model.provider}/${bot.model.id}` : 'OMP default'],
               ['Capabilities', bot.capabilities.length === 0 ? 'none' : bot.capabilities.join(', ')],
@@ -753,7 +871,7 @@ function teamPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState) =
           ? emptyBlock('No capabilities in the library', 'MCP servers, skills and extensions are chosen per bot. The library is shared by the team.')
           : h('div', { class: 'card-grid' }, ...state.capabilities.map(item => h('article', { class: 'peer-card' },
             h('div', { class: 'peer-top' }, h('h3', { text: item.name }), chip(item.kind)),
-            h('p', { class: 'mono break', text: item.kind === 'mcp' ? JSON.stringify(redact(item.config)) : item.path }))))),
+            item.kind === 'mcp' ? configView(item.config as Record<string, unknown>) : identifier(item.path, hooks))))),
         h('div', { class: 'row-actions' }, h('button', { class: 'btn', type: 'button', onclick: () => hooks.open('capabilities') }, 'Edit the library')));
     };
     paint();

@@ -39,6 +39,9 @@ import {
 	type WorkspaceSpec,
 } from "./layout.ts";
 import type { WorkspaceContribution } from "./api.ts";
+import { chord, commandKey, formatWhen, middleEllipsis } from "../desk-format.ts";
+
+const MOD = commandKey(navigator.platform, navigator.userAgent);
 
 /* ------------------------------------------------------------------ */
 /* small DOM helpers                                                   */
@@ -396,10 +399,17 @@ function persistLayout(): void {
 	}
 }
 
-function setDock(id: string | null): void {
+function setDock(id: string | null, options?: { quiet?: boolean }): void {
+	const previous = layout.dock;
 	dockKey = "";
 	layout = { ...layout, dock: id };
 	persistLayout();
+	if (options?.quiet === true || previous === id) return;
+	const name = id === null ? "the stage" : panels.get(id)?.title ?? id;
+	notify(id === null ? "Dock closed." : `${name} is docked beside the conversation.`, "info", {
+		label: "Undo",
+		run: () => setDock(previous, { quiet: true }),
+	});
 }
 
 function toggleDock(): void {
@@ -1132,12 +1142,42 @@ function handleEvent(event: DesktopEvent): void {
 		}
 		return;
 	}
+	if (type === "typing") {
+		const conversationId = typeof event.conversationId === "string" ? event.conversationId : "";
+		const botId = typeof event.botId === "string" ? event.botId : "";
+		if (!conversationId) return;
+		if (event["done"] === true) typingBots.delete(conversationId);
+		else typingBots.set(conversationId, { botId, demo: event["demo"] === true });
+		if (selectedConversationId === conversationId) {
+			messageSignature = "";
+			renderMessages();
+		}
+		return;
+	}
 	if (type === "error") {
-		const message = typeof event["message"] === "string" ? event["message"] : typeof event["error"] === "string" ? event["error"] : "The host reported an unknown error.";
+		const raw = typeof event["message"] === "string" ? event["message"] : typeof event["error"] === "string" ? event["error"] : "The host reported an unknown error.";
+		const message = humanRuntimeError(raw);
+		const conversationId = typeof event.conversationId === "string" ? event.conversationId : "";
+		if (conversationId) {
+			const last = [...messagesOf(conversationId)].reverse().find(item => item.role === "user");
+			if (last) failedDelivery.set(last.id, message);
+			messageSignature = "";
+			if (selectedConversationId === conversationId) renderMessages();
+		}
 		notify(message, "error");
 		return;
 	}
-	notify(`Unhandled host event: ${type || "(empty)"}`, "warn");
+	if (type.startsWith("onlyne.") || type === "context") return;
+}
+
+const failedDelivery = new Map<string, string>();
+const typingBots = new Map<string, { botId: string; demo: boolean }>();
+
+function humanRuntimeError(message: string): string {
+	if (/executable not found|enoent|spawn omp|omp/i.test(message)) {
+		return "No model runtime is available. Install OMP and put the omp command on PATH. The demo desk simulates a reply instead, and labels it Demo.";
+	}
+	return message;
 }
 
 function setRuntime(conversationId: string, botId: string, status: string, message?: string): void {
@@ -1256,19 +1296,18 @@ function buildShell(): void {
 	app.classList.toggle("members-hidden", !membersOpen);
 	app.classList.toggle("has-dock", layout.dock !== null);
 
-	const mac = navigator.userAgent.includes("Mac");
 	const demoChip = h("span", { class: "demo-chip", hidden: true, text: "Demo" });
 	const themeButton = h("button", {
-		class: "btn ghost icon",
+		class: "theme-toggle",
 		type: "button",
 		"aria-label": "Toggle color theme",
 		title: "Toggle theme",
 		onclick: () => void toggleTheme(),
-	}, icon("sun", 16));
+	}, icon("sun", 16), h("span", { class: "theme-label", text: "Light" }));
 	const commandButton = h("button", { class: "command-trigger", type: "button", onclick: openPalette },
 		icon("search", 15),
 		h("span", { class: "command-label", text: "Search or jump" }),
-		h("kbd", { text: mac ? "⌘K" : "Ctrl K" }),
+		h("kbd", { text: chord(MOD, "K") }),
 	);
 	const mast = h("header", { class: "mast" },
 		h("div", { class: "mast-brand" }, h("span", { class: "wordmark", text: "Onlyne" }), demoChip),
@@ -1651,8 +1690,8 @@ function renderAll(): void {
 
 function renderMast(): void {
 	const light = document.documentElement.dataset["theme"] === "light";
-	refs.themeButton.replaceChildren(icon(light ? "moon" : "sun", 16));
-	refs.themeButton.title = light ? "Use the dark theme" : "Use the light theme";
+	refs.themeButton.replaceChildren(icon(light ? "moon" : "sun", 16), h("span", { class: "theme-label", text: light ? "Dark" : "Light" }));
+	refs.themeButton.title = light ? "Switch to dark" : "Switch to light";
 	refs.themeButton.setAttribute("aria-label", refs.themeButton.title);
 }
 
@@ -1727,30 +1766,54 @@ function renderRail(): void {
 				title: `${spec.title}. ${spec.hint}. Drag to reorder. Right-click to dock.`,
 				"aria-label": spec.title,
 				"aria-current": active ? "page" : undefined,
-				draggable: "true",
-				onclick: () => openWorkspace(spec),
+				"data-workspace": spec.id,
+				onclick: () => { if (!suppressRailClick) openWorkspace(spec); },
 			},
 			icon(glyph, 18),
 		);
-		button.addEventListener("dragstart", (event) => {
-			event.dataTransfer?.setData("text/plain", spec.id);
-			if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-			button.classList.add("dragging");
+		button.addEventListener("pointerdown", (event) => {
+			if (event.button !== 0) return;
+			const pointerId = event.pointerId;
+			const startY = event.clientY;
+			let dragging = false;
+			let targetId = "";
+			const onMove = (ev: PointerEvent): void => {
+				if (ev.pointerId !== pointerId) return;
+				if (!dragging && Math.abs(ev.clientY - startY) < 8) return;
+				dragging = true;
+				suppressRailClick = true;
+				targetId = "";
+				for (const item of refs.railBots.querySelectorAll<HTMLElement>(".rail-link")) {
+					const box = item.getBoundingClientRect();
+					const hit = ev.clientY >= box.top && ev.clientY <= box.bottom;
+					item.classList.toggle("drop", hit && item.dataset["workspace"] !== spec.id);
+					if (hit) targetId = item.dataset["workspace"] ?? "";
+				}
+			};
+			const onUp = (ev: PointerEvent): void => {
+				if (ev.pointerId !== pointerId) return;
+				window.removeEventListener("pointermove", onMove);
+				window.removeEventListener("pointerup", onUp);
+				for (const item of refs.railBots.querySelectorAll(".rail-link")) item.classList.remove("drop");
+				if (dragging && targetId.length > 0 && targetId !== spec.id) {
+					layout = moveInRail(layout, spec.id, layout.rail.indexOf(targetId));
+					persistLayout();
+					refs.railBots.querySelector<HTMLButtonElement>(`[data-workspace="${spec.id}"]`)?.focus();
+				}
+				window.setTimeout(() => { suppressRailClick = false; }, 0);
+			};
+			window.addEventListener("pointermove", onMove);
+			window.addEventListener("pointerup", onUp);
 		});
-		button.addEventListener("dragend", () => button.classList.remove("dragging"));
-		button.addEventListener("dragover", (event) => {
+		button.addEventListener("keydown", (event) => {
+			if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
 			event.preventDefault();
-			button.classList.add("drop");
-		});
-		button.addEventListener("dragleave", () => button.classList.remove("drop"));
-		button.addEventListener("drop", (event) => {
-			event.preventDefault();
-			button.classList.remove("drop");
-			const id = event.dataTransfer?.getData("text/plain") ?? "";
-			if (id.length === 0 || id === spec.id) return;
-			const to = layout.rail.indexOf(spec.id);
-			layout = moveInRail(layout, id, to);
+			const index = layout.rail.indexOf(spec.id);
+			const to = event.key === "ArrowUp" ? Math.max(0, index - 1) : Math.min(layout.rail.length - 1, index + 1);
+			if (to === index) return;
+			layout = moveInRail(layout, spec.id, to);
 			persistLayout();
+			refs.railBots.querySelector<HTMLButtonElement>(`[data-workspace="${spec.id}"]`)?.focus();
 		});
 		button.addEventListener("contextmenu", (event) => {
 			if (spec.panel === null) return;
@@ -1809,27 +1872,8 @@ function renderBotSwitch(): void {
 
 function renderNav(): void {
 	renderBotSwitch();
-	const place = activePanel === null ? workspaceById("chat") : [...BUILTIN_WORKSPACES, ...extraWorkspaces].find((item) => item.panel === activePanel);
-	if (activePanel !== null && place) {
-		refs.navTitle.textContent = place.title;
-		refs.navSub.textContent = place.hint;
-		refs.navSections.replaceChildren();
-		const siblings = [...BUILTIN_WORKSPACES, ...extraWorkspaces].filter((item) => item.group === place.group);
-		if (siblings.length > 1) {
-			refs.navSections.append(h("div", { class: "section" }, h("span", { text: "In this group" })));
-			for (const spec of siblings) {
-				const active = spec.panel === activePanel || (spec.panel === null && activePanel === null);
-				refs.navSections.append(h("button", {
-					class: `view-link${active ? " on" : ""}`,
-					type: "button",
-					"aria-current": active ? "page" : undefined,
-					onclick: () => openWorkspace(spec),
-				}, spec.title));
-			}
-		}
-		renderNavViews();
-		syncChrome();
-		return;
+	if (document.activeElement instanceof HTMLElement && refs.navViews.contains(document.activeElement) && activePanel !== document.activeElement.dataset["panel"]) {
+		document.activeElement.blur();
 	}
 	refs.navTitle.textContent = selectedBotId ? botName(selectedBotId) : "All bots";
 	const nodeId = currentSettings().nodeId;
@@ -1907,35 +1951,47 @@ function renderNav(): void {
 
 const DESK_PANELS = new Set(["inbox", "neighbors", "trust", "threads", "resources", "health", "integrations", "team"]);
 
+let libraryOpen = false;
+let suppressRailClick = false;
+
+function developerMode(): boolean {
+	return localStorage.getItem("onlyne.desk.developer") === "1";
+}
+
 function syncChrome(): void {
 	const docked = layout.dock !== null;
 	refs.app.classList.toggle("members-hidden", docked || activePanel !== null || !membersOpen);
-	const search = refs.navSearch.closest(".nav-search");
-	if (search instanceof HTMLElement) search.hidden = activePanel !== null;
 }
 
 function renderNavViews(): void {
+	refs.navSections.querySelectorAll(".library").forEach(node => node.remove());
 	refs.navViews.replaceChildren();
 	const railPanels = new Set(visibleRail().flatMap((item) => item.panel === null ? [] : [item.panel]));
 	const activeBots = uiActiveBotIds();
 	const entries = [...panels.values()].filter((panel) => !railPanels.has(panel.id) && (!panel.botId || activeBots.has(panel.botId)));
 	if (entries.length === 0) return;
-	refs.navViews.append(h("div", { class: "section" }, h("span", { text: "Library" })));
+	const details = h("details", { class: "library", open: libraryOpen });
+	const summary = h("summary", { text: "Library" });
+	details.append(summary);
 	for (const entry of entries) {
 		const active = activePanel === entry.id;
-		refs.navViews.append(h("button", {
+		const button = h("button", {
 			class: `view-link${active ? " on" : ""}`,
 			type: "button",
+			"data-panel": entry.id,
 			"aria-current": active ? "page" : undefined,
 			onclick: () => openPanel(entry.id),
-		}, entry.title));
+		}, entry.title);
+		details.append(button);
 	}
+	details.addEventListener("toggle", () => { libraryOpen = details.open; });
+	refs.navSections.append(details);
 }
 
 function renderTopbar(): void {
 	const panel = activePanel ? panels.get(activePanel) : null;
 	const bar = refs.topTitle.closest(".topbar");
-	bar?.classList.toggle("quiet", panel !== null && DESK_PANELS.has(activePanel ?? ""));
+	bar?.classList.toggle("quiet", panel !== null);
 	renderCover(panel ? undefined : selectedConversation());
 	if (panel) {
 		const place = [...BUILTIN_WORKSPACES, ...extraWorkspaces].find((item) => item.panel === activePanel);
@@ -1993,7 +2049,7 @@ function renderTopbar(): void {
 			),
 			h(
 				"button",
-				{ class: "btn ghost icon", type: "button", "aria-label": "Command palette (⌘K)", title: "Command palette (⌘K)", onclick: openPalette },
+				{ class: "btn ghost icon", type: "button", "aria-label": `Command palette (${chord(MOD, "K")})`, title: `Command palette (${chord(MOD, "K")})`, onclick: openPalette },
 				icon("command"),
 			),
 		);
@@ -2098,11 +2154,15 @@ function renderStatusbar(): void {
 		items.push(
 			h(
 				"button",
-				{ class: "status-item node", type: "button", title: `${nodeId} — open node and peers`, onclick: () => openPanel("node") },
+				{ class: "status-item node", type: "button", title: nodeId, onclick: () => openPanel("node") },
 				h("span", { class: `dot ${connection === "online" ? "ok" : "none"}` }),
-				nodeId,
+				middleEllipsis(nodeId, 10, 8),
 			),
 		);
+	}
+	if (layout.dock) {
+		const docked = panels.get(layout.dock);
+		items.push(h("button", { class: "status-item", type: "button", title: "Close the dock", onclick: () => setDock(null) }, `Dock ${docked?.title ?? layout.dock}`));
 	}
 	const frames = framesByConversation.get(selectedConversationId ?? "")?.length ?? 0;
 	items.push(h("span", { class: "status-item", title: "Runtime frames received in this conversation", text: `${frames} frame${frames === 1 ? "" : "s"}` }));
@@ -2240,7 +2300,16 @@ function renderMessages(): void {
 	if (!messages.length) {
 		refs.messageList.append(emptyTranscript());
 	} else {
+		for (const id of [...failedDelivery.keys()]) {
+			const message = messages.find(item => item.id === id);
+			if (message === undefined) failedDelivery.delete(id);
+			else if (messages.some(item => item.conversationId === message.conversationId && item.role === "assistant" && item.createdAt >= message.createdAt)) failedDelivery.delete(id);
+		}
 		for (const message of messages) refs.messageList.append(renderMessage(message));
+		const typing = selectedConversationId ? typingBots.get(selectedConversationId) : undefined;
+		if (typing) {
+			refs.messageList.append(h("div", { class: "typing", role: "status" }, `${botName(typing.botId) || "The bot"} is typing${typing.demo ? " · demo" : ""}`));
+		}
 	}
 	if (stickToBottom) scrollToBottom();
 }
@@ -2262,7 +2331,10 @@ function renderMessage(message: ChatMessage): HTMLElement {
 			: avatarNode(author, botAvatarOf(botOf(message.botId))),
 		h("span", { class: "msg-author", text: author }),
 		h("span", { class: "msg-role", text: role }),
-		h("time", { class: "msg-time", datetime: new Date(message.createdAt).toISOString(), text: `${clockTime(message.createdAt)} · ${relativeTime(message.createdAt)}` }),
+		(() => {
+			const when = formatWhen(message.createdAt);
+			return h("time", { class: "msg-time", datetime: new Date(message.createdAt).toISOString(), title: when.title, text: when.label });
+		})(),
 		message.usage ? usageChips(message.usage) : null,
 	);
 
@@ -2298,6 +2370,14 @@ function renderMessage(message: ChatMessage): HTMLElement {
 
 	const media = Array.isArray(message.media) ? message.media : [];
 	if (media.length) body.append(mediaGallery(media));
+	if (message.role === "assistant" && message.text.startsWith("Demo reply")) body.prepend(h("span", { class: "chip warn", text: "Demo" }));
+	const failure = failedDelivery.get(message.id);
+	if (failure) {
+		body.append(h("div", { class: "send-failed" },
+			h("p", { text: failure }),
+			h("button", { class: "btn sm", type: "button", onclick: () => void retrySend(message.conversationId) }, "Retry"),
+		));
+	}
 	const lastAssistant = message.role === "assistant" && currentMessages().filter((item) => item.role === "assistant").at(-1)?.id === message.id;
 
 	const actions = h(
@@ -2826,8 +2906,8 @@ function updateComposerState(): void {
 	if (!conversation) hint = "Select or create a conversation.";
 	else if (!recipientsOk) hint = "Choose at least one recipient.";
 	else if (busyUpload) hint = `Uploading ${list.length} attachment${list.length === 1 ? "" : "s"}…`;
-	else if (groupMany) hint = `${chosen.size} of ${conversation.botIds.length} recipients · ⌘↵ to send`;
-	else hint = `${conversation.title} · ⌘↵ to send`;
+	else if (groupMany) hint = `${chosen.size} of ${conversation.botIds.length} recipients · ${chord(MOD, "Enter")} to send`;
+	else hint = `${conversation.title} · ${chord(MOD, "Enter")} to send`;
 	const auto = conversation ? autoStatus.get(conversation.id) : undefined;
 	if (auto?.active) hint += ` · auto ${auto.turns}/${auto.max}`;
 	else if (conversation?.scene?.group?.auto === true && auto?.reason === "limit") hint += " · auto paused";
@@ -2877,10 +2957,23 @@ async function sendMessage(): Promise<void> {
 	} catch (error) {
 		refs.composerInput.value = text;
 		drafts.set(conversation.id, text);
-		notify(errText(error), "error");
+		notify(humanRuntimeError(errText(error)), "error");
 	} finally {
 		sending.delete(conversation.id);
 		updateComposerState();
+	}
+}
+
+async function retrySend(conversationId: string): Promise<void> {
+	const conversation = conversationOf(conversationId);
+	try {
+		await command("message.retry", { conversationId, botId: conversation?.adminBotId });
+		const last = [...messagesOf(conversationId)].reverse().find(item => item.role === "user");
+		if (last) failedDelivery.delete(last.id);
+		messageSignature = "";
+		await refresh().catch(() => undefined);
+	} catch (error) {
+		notify(humanRuntimeError(errText(error)), "error");
 	}
 }
 
@@ -3496,7 +3589,20 @@ function buildMembersTab(): void {
 }
 
 function definitionList(pairs: Array<[string, string]>): HTMLElement {
-	return h("dl", { class: "kv" }, ...pairs.flatMap(([key, value]) => [h("dt", { text: key }), h("dd", { text: value })]));
+	const list = h("dl", { class: "kv" });
+	for (const [key, value] of pairs) {
+		const dd = h("dd");
+		if (value.length > 28 || value.includes("urn:onlyne:") || value.includes("/") || value.startsWith("http")) {
+			dd.append(identifierNode(value));
+		} else dd.textContent = value;
+		list.append(h("dt", { text: key }), dd);
+	}
+	return list;
+}
+
+function identifierNode(value: string): HTMLElement {
+	const button = h("button", { class: "id-copy", type: "button", "aria-label": `Copy ${value}`, onclick: () => void copyText(value, "Copied.") }, "Copy");
+	return h("span", { class: "identifier", title: value }, h("span", { class: "identifier-text", text: middleEllipsis(value) }), button);
 }
 
 function renderBotDetail(conversation: Conversation, bot: Bot): HTMLElement {
@@ -4052,7 +4158,7 @@ function closeModal(): void {
 	close();
 }
 
-function openModal(options: { title: string; body: HTMLElement; wide?: boolean; narrow?: boolean; onClose?: () => void }): ModalHandle {
+function openModal(options: { title: string; body: HTMLElement; wide?: boolean; narrow?: boolean; anchor?: boolean; onClose?: () => void }): ModalHandle {
 	closeModal();
 	modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 	const titleId = `modal-title-${++fieldSequence}`;
@@ -4060,7 +4166,7 @@ function openModal(options: { title: string; body: HTMLElement; wide?: boolean; 
 	const footer = h("div", { class: "modal-foot" });
 	const root = h(
 		"div",
-		{ class: `modal${options.wide ? " wide" : options.narrow ? " narrow" : ""}`, role: "dialog", "aria-modal": "true", "aria-labelledby": titleId },
+		{ class: `modal${options.wide ? " wide" : options.narrow ? " narrow" : ""}${options.anchor ? " stable" : ""}`, role: "dialog", "aria-modal": "true", "aria-labelledby": titleId },
 		h(
 			"div",
 			{ class: "modal-head" },
@@ -4071,6 +4177,7 @@ function openModal(options: { title: string; body: HTMLElement; wide?: boolean; 
 		footer,
 	);
 	const layer = refs.modals;
+	layer.classList.toggle("pinned", options.anchor === true);
 	layer.replaceChildren(root);
 	layer.hidden = false;
 
@@ -4079,6 +4186,7 @@ function openModal(options: { title: string; body: HTMLElement; wide?: boolean; 
 		activeModalClose = null;
 		layer.replaceChildren();
 		layer.hidden = true;
+		layer.classList.remove("pinned");
 		if (modalReturnFocus) {
 			const target = modalReturnFocus;
 			modalReturnFocus = null;
@@ -4802,6 +4910,21 @@ function showChat(): void {
 	refs.composerInput.focus();
 }
 
+function withPageHeader(id: string, title: string, content: HTMLElement): HTMLElement {
+	if (content.classList.contains("desk-page") || content.querySelector(".desk-page") !== null) return content;
+	const place = [...BUILTIN_WORKSPACES, ...extraWorkspaces].find(item => item.panel === id);
+	return h("div", { class: "desk-page" },
+		h("header", { class: "desk-page-head" },
+			h("div", { class: "desk-page-copy" },
+				h("p", { class: "eyebrow", text: "Desk" }),
+				h("h1", { text: title }),
+				h("p", { class: "lede", text: place?.hint || "Panel" }),
+			),
+		),
+		content,
+	);
+}
+
 function renderPanel(): void {
 	const id = activePanel;
 	if (!id) return;
@@ -4811,7 +4934,8 @@ function renderPanel(): void {
 		return;
 	}
 	try {
-		const content = panel.render(state);
+		const rendered = panel.render(state);
+		const content = withPageHeader(id, panel.title, rendered);
 		refs.panelView.replaceChildren(h("div", { class: "panel" }, h("div", { class: "panel-body" }, content)));
 	} catch (error) {
 		refs.panelView.replaceChildren(
@@ -4888,7 +5012,13 @@ function layoutCard(): HTMLElement {
 	return h("div", { class: "card" },
 		h("div", { class: "card-head", text: "Layout" }),
 		h("div", { class: "card-body" },
-			h("p", { class: "field-hint", text: "Drag a rail icon to reorder it. Right-click a rail icon to dock that panel. Hidden places stay in the command palette." }),
+			h("p", { class: "field-hint", text: "Drag a rail icon, or focus it and press Alt+Up or Alt+Down. Right-click docks that panel. Hidden places stay in Jump." }),
+			h("label", { class: "check" }, (() => {
+				const input = h("input", { type: "checkbox" }) as HTMLInputElement;
+				input.checked = developerMode();
+				input.addEventListener("change", () => localStorage.setItem("onlyne.desk.developer", input.checked ? "1" : "0"));
+				return input;
+			})(), " Developer mode (raw commands in Jump)"),
 			box,
 			field("Dock", dock, "Pins a second panel beside the stage."),
 			h("button", { class: "btn", type: "button", onclick: () => { resetLayout(); renderPanel(); } }, "Reset layout")));
@@ -5660,14 +5790,13 @@ const RESPONSE_PRESETS: Array<{ label: string; frame: RpcFrame }> = [
 ];
 
 function openShortcuts(): void {
-	const mac = navigator.userAgent.includes("Mac");
 	const rows: Array<[string, string]> = [
-		["⌘K", "Command palette"],
-		["⌘\\", "Dock the current panel, or close the dock"],
+		[chord(MOD, "K"), "Command palette"],
+		[chord(MOD, "\\"), "Dock the current panel, or close the dock"],
 		["?", "Shortcut list"],
-		["⌘⇧N", "New conversation"],
-		["⌘⇧C", "Character and scene"],
-		["⌘ Enter", "Send the draft"],
+		[chord(MOD, "Shift+N"), "New conversation"],
+		[chord(MOD, "Shift+C"), "Character and scene"],
+		[chord(MOD, "Enter"), "Send the draft"],
 		["G then C", "Conversations"],
 		["G then I", "Inbox"],
 		["G then P", "Neighbors"],
@@ -5680,7 +5809,7 @@ function openShortcuts(): void {
 		["G then S", "Settings"],
 	];
 	const body = h("div", { class: "shortcut-list" }, ...rows.map(([keys, label]) => h("div", { class: "shortcut-row" },
-		h("kbd", { text: mac ? keys : keys.replaceAll("⌘", "Ctrl+") }),
+		h("kbd", { text: keys }),
 		h("span", { text: label }))));
 	const modal = openModal({ title: "Keyboard", body });
 	modal.footer.append(h("button", { class: "btn", type: "button", onclick: () => modal.close() }, "Close"));
@@ -5774,10 +5903,11 @@ function openPalette(): void {
 		}));
 		jumps.push(
 			{ kind: "jump", title: "Toggle theme", description: "Switch the dark and light themes", run: () => { void toggleTheme(); closePalette(); } },
-			{ kind: "jump", title: layout.dock ? "Close dock" : "Dock this panel", description: "Pin a panel beside the stage", kbd: "⌘\\", run: () => { toggleDock(); closePalette(); } },
+			{ kind: "jump", title: layout.dock ? "Close dock" : "Dock this panel", description: "Pin a panel beside the stage. Undo is offered.", kbd: chord(MOD, "\\"), run: () => { toggleDock(); closePalette(); } },
 			{ kind: "jump", title: "Keyboard shortcuts", description: "Show the shortcut list", kbd: "?", run: () => { closePalette(); openShortcuts(); } },
 		);
-		return [...jumps, ...actions.map((action) => ({ kind: "action" as const, action }))];
+		const commands = developerMode() ? actions.map((action) => ({ kind: "action" as const, action })) : [];
+		return [...jumps, ...commands];
 	};
 	const matches = (row: PaletteRow, needle: string): boolean => {
 		if (!needle) return true;
@@ -5848,12 +5978,15 @@ function openPalette(): void {
 
 	const modal = openModal({
 		title: "Jump",
-		wide: true,
+		anchor: true,
+		wide: developerMode(),
 		body: h(
 			"div",
 			{ class: "palette-grid" },
 			h("div", { class: "palette-left" }, h("div", { class: "palette-search" }, search), list),
-			h("div", { class: "palette-right" }, h("div", { class: "palette-tabs" }, actionTab, rpcTab, respondTab), actionPane, rpcPane, respondPane),
+			developerMode()
+				? h("div", { class: "palette-right" }, h("div", { class: "palette-tabs" }, actionTab, rpcTab, respondTab), actionPane, rpcPane, respondPane)
+				: h("p", { class: "palette-dev-note", text: "Raw commands stay in Settings → Developer mode." }),
 		),
 	});
 	closePalette = () => modal.close();
@@ -5917,7 +6050,7 @@ async function runPaletteRespond(conversationId: string, botId: string, frameInp
 /* notifications                                                       */
 /* ------------------------------------------------------------------ */
 
-function notify(message: string, level: Level = "info"): void {
+function notify(message: string, level: Level = "info", action?: { label: string; run: () => void }): void {
 	const text = message.trim() || "(empty message)";
 	if (level === "error") {
 		errors.push({ message: text, at: Date.now() });
@@ -5925,15 +6058,39 @@ function notify(message: string, level: Level = "info"): void {
 		renderStatusbar();
 		if (activePanel === "activity") renderPanel();
 	}
+	const existing = [...refs.toasts.querySelectorAll<HTMLElement>(".toast")].find(item => item.dataset["text"] === text && item.dataset["level"] === level);
+	if (existing && action === undefined) {
+		const count = Number(existing.dataset["count"] ?? "1") + 1;
+		existing.dataset["count"] = String(count);
+		const label = existing.querySelector(".toast-text");
+		if (label) label.textContent = `${text} (${count})`;
+		return;
+	}
+	const bar = h("span", { class: "toast-progress" });
 	const toast = h(
 		"div",
-		{ class: `toast ${level}`, role: level === "error" ? "alert" : "status" },
+		{ class: `toast ${level}`, role: level === "error" ? "alert" : "status", "data-text": text, "data-level": level, "data-count": "1" },
 		h("span", { class: "toast-text", text }),
-		h("button", { class: "toast-close", type: "button", "aria-label": "Dismiss notification", onclick: () => toast.remove() }, "×"),
+		action === undefined ? false : h("button", { class: "btn sm", type: "button", onclick: () => { action.run(); toast.remove(); } }, action.label),
+		h("button", { class: "toast-close", type: "button", "aria-label": "Dismiss notification", onclick: () => toast.remove() }, "Close"),
+		bar,
 	);
+	let paused = false;
+	let started = Date.now();
+	const life = level === "error" ? 12_000 : 6_000;
+	let remaining = life;
+	const tick = (): void => {
+		if (!toast.isConnected || paused) return;
+		const left = remaining - (Date.now() - started);
+		bar.style.transform = `scaleX(${Math.max(0, left / life)})`;
+		if (left <= 0) toast.remove();
+		else window.setTimeout(tick, 80);
+	};
+	toast.addEventListener("mouseenter", () => { paused = true; remaining -= Date.now() - started; });
+	toast.addEventListener("mouseleave", () => { paused = false; started = Date.now(); tick(); });
 	refs.toasts.append(toast);
-	while (refs.toasts.children.length > 5) refs.toasts.firstElementChild?.remove();
-	window.setTimeout(() => toast.remove(), level === "error" ? 12_000 : 6_000);
+	while (refs.toasts.children.length > 4) refs.toasts.firstElementChild?.remove();
+	tick();
 }
 
 async function copyText(text: string, label: string): Promise<void> {
@@ -6294,7 +6451,7 @@ function boot(): void {
 	const disposeCharacterPanel = registerCharacterPanel(window.onlyne);
 	const disposeSurfaces = registerDeskSurfaces(window.onlyne, {
 		notify: (message, level) => notify(message, level === "error" || level === "warn" || level === "ok" ? level : "info"),
-		open: (id) => openPanel(id),
+		open: (id) => { if (id === "chat") showChat(); else openPanel(id); },
 		createBot: () => openBotEditor(),
 	});
 	window.addEventListener("pagehide", () => { disposeOmpPanels(); disposeCharacterPanel(); disposeSurfaces(); }, { once: true });

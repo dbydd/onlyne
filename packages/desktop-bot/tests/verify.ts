@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createDesktopApp } from '../src/app.ts';
 import { createDemoOnlyne, demoFingerprint, ensureDemoTeam, resetDemoWorld } from '../src/demo.ts';
 import { fingerprintsMatch, formatFingerprint, moveInRail, normalizeLayout } from '../src/ui/layout.ts';
+import { commandKey, fingerprintHint, fingerprintMarks, formatWhen, middleEllipsis, parsePeerUrl, peerPhaseLabel } from '../src/desk-format.ts';
 import { openDesktopStore } from '../src/store.ts';
 import { startDesktopServer } from '../src/server.ts';
 import type { OnlyneBridgeOptions } from '../src/contracts.ts';
@@ -31,6 +32,12 @@ ok('moveInRail inserts at the requested index', (() => {
 })());
 
 ok('fingerprint grouping and match ignore spaces', formatFingerprint('abcd1234') === 'abcd 1234' && fingerprintsMatch('ABCD 1234', 'abcd1234') && !fingerprintsMatch('abcd', 'abcd1234'));
+ok('peer url rejects a fragment and accepts a service url', !parsePeerUrl('htt').ok && !parsePeerUrl('peer').ok && parsePeerUrl('http://127.0.0.1:3992/onlyne/v3').ok);
+ok('fingerprint groups report a mismatch', fingerprintMarks('3603 b38b 722f', '3603b38b722f2052').includes('miss') === false && fingerprintHint(fingerprintMarks('3603 b38b ffff', '3603b38b722f2052848a6909fdaf51f0')).includes('does not match'));
+ok('times are relative when recent and absolute later', formatWhen(Date.now() - 30_000, Date.now()).label === 'Just now' && formatWhen('2026-11-01T00:00:00.000Z', Date.parse('2026-11-04T00:00:00.000Z')).label.includes('2026'));
+ok('identifiers keep both ends', middleEllipsis('urn:onlyne:agent:desktop:mira', 8, 4).startsWith('urn:only') && middleEllipsis('urn:onlyne:agent:desktop:mira', 8, 4).endsWith('mira'));
+ok('command key follows the platform', commandKey('MacIntel', '') === '⌘' && commandKey('Linux', '') === 'Ctrl');
+ok('peer phases are human labels', peerPhaseLabel('no_exchange') === 'Not paired' && peerPhaseLabel('exchanged') === 'Trusted');
 
 const directory = await mkdtemp(join(tmpdir(), 'onlyne-desk-'));
 try {

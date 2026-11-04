@@ -465,6 +465,20 @@ function createHistoryPanel(api: DesktopUiApi): OmpPanel {
         state.nextCursor = stringField(data, 'nextCursor');
       }
     }
+    const runtimeMissing = errors.some(line => /executable not found|ENOENT|omp/i.test(line));
+    if (state.messages.length === 0) {
+      const desk = api.state().messages.filter(item => item.conversationId === context.conversationId);
+      if (desk.length > 0 && (runtimeMissing || errors.length > 0)) {
+        state.messages = desk.map(item => ({ role: item.role, text: item.text }));
+        state.notice = 'Showing the desk transcript. An OMP session appears here after a runtime can start.';
+        state.error = undefined;
+        state.loading = false;
+        state.loaded = true;
+        state.loadedAt = Date.now();
+        paintFor(key);
+        return;
+      }
+    }
     state.error = errors.length > 0 ? errors.join('\n') : undefined;
     state.loading = false;
     state.loaded = true;

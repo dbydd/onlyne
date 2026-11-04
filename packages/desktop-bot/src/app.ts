@@ -334,6 +334,17 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   };
 
   const prompt = async (bot: Bot, conversation: Conversation, message: string): Promise<void> => {
+    if (options.demo === true) {
+      emit({ type: 'typing', conversationId: conversation.id, botId: bot.id, demo: true });
+      await new Promise(resolve => setTimeout(resolve, 650));
+      const excerpt = message.replace(/\s+/g, ' ').trim().slice(0, 160);
+      const text = `Demo reply from ${bot.name}. No model is running; this answer is simulated so the desk can be tried. I read: “${excerpt || 'your message'}”.`;
+      await save(state => {
+        state.messages.push({ id: shortId('msg'), conversationId: conversation.id, role: 'assistant', botId: bot.id, text, createdAt: Date.now() });
+      });
+      emit({ type: 'typing', conversationId: conversation.id, botId: bot.id, demo: true, done: true });
+      return;
+    }
     try {
       const connection = await getRuntime(bot, conversation);
       await connection.request({ type: 'prompt', message, streamingBehavior: 'followUp' });
@@ -626,6 +637,17 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
             await save(state => { const target = state.conversations.find(item => item.id === conversation.id); if (target !== undefined) target.greeted = true; });
           }
           return message;
+        }
+        case 'message.retry': {
+          const conversation = conversationFor(payload.conversationId);
+          const last = [...snapshot().messages].reverse().find(item => item.conversationId === conversation.id && item.role === 'user');
+          if (last === undefined) throw new Error('There is no message to send again.');
+          const bot = botFor(payload.botId ?? conversation.adminBotId);
+          if (!conversation.botIds.includes(bot.id)) throw new Error('Bot is not a member of this conversation');
+          const transcript = snapshot().messages.filter(item => item.conversationId === conversation.id && item.id !== last.id);
+          const compiled = compileScene(bot, conversation, transcript, last.text, { includeHistory: conversation.kind === 'group', members: conversation.botIds.map(botFor) });
+          await prompt(bot, conversation, compiled.prompt);
+          return { retried: last.id };
         }
         case 'message.regenerate': {
           const conversation = conversationFor(payload.conversationId);

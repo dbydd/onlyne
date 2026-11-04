@@ -15,6 +15,7 @@ import type {
 } from './contracts.ts';
 import type { OnlyneBridge, OnlyneBridgeOptions } from './contracts.ts';
 import type { DesktopOnlyneStatus, PeerRow, PendingExchangeRow } from './onlyne.ts';
+import { parsePeerUrl } from './desk-format.ts';
 
 const MIRA = 'urn:onlyne:agent:desktop:mira';
 const JUN = 'urn:onlyne:agent:desktop:jun';
@@ -316,8 +317,10 @@ export function createDemoOnlyne(options: OnlyneBridgeOptions): Promise<OnlyneBr
     async action(name, args) {
       const current = liveWorld();
       if (name === 'connect') {
-        const url = requireText(args.url, 'connect.url');
-        const host = (() => { try { return new URL(url).host.replace(/[^\w.-]/g, '-') || 'peer'; } catch { return 'peer'; } })();
+        const parsed = parsePeerUrl(typeof args.url === 'string' ? args.url : '');
+        if (!parsed.ok) throw new Error(parsed.error);
+        const url = parsed.url;
+        const host = new URL(url).host.replace(/[^\w.-]/g, '-');
         const id = `urn:onlyne:agent:${host}`;
         if (!current.peers.some(item => item.nodeId === id)) {
           current.peers.push(peer(id, { phase: 'no_exchange', baseUrl: url, fingerprint: null, state: null, source: 'discovery', verified: false, lastSeen: new Date().toISOString() }));
@@ -325,6 +328,15 @@ export function createDemoOnlyne(options: OnlyneBridgeOptions): Promise<OnlyneBr
         const observed = current.peers.find(item => item.nodeId === id)!;
         options.emit({ type: 'onlyne.observed', nodeId: id });
         return { action: name, peer: observed, trust: null };
+      }
+      if (name === 'peer.forget') {
+        const id = requireText(args.nodeId, 'peer.forget.nodeId');
+        const existing = current.peers.find(item => item.nodeId === id);
+        if (existing === undefined) throw new Error(`No peer named ${id}.`);
+        if (existing.phase === 'exchanged') throw new Error('Revoke trust before forgetting a paired peer.');
+        current.peers = current.peers.filter(item => item.nodeId !== id);
+        current.pending = current.pending.filter(item => item.nodeId !== id);
+        return { action: name, nodeId: id };
       }
       if (name === 'trust.request') {
         const id = requireText(args.nodeId, 'trust.request.nodeId');
