@@ -20,7 +20,12 @@
     ".": "./src/index.ts",
     "./keys": "./src/keys.ts",
     "./network": "./src/network.ts",
-    "./i18n": "./src/i18n.ts"
+    "./i18n": "./src/i18n.ts",
+    "./node": "./src/node.ts",
+    "./store": "./src/store.ts",
+    "./types": "./src/types.ts",
+    "./acquire": "./src/acquire.ts",
+    "./host-text": "./src/host-text.ts"
   },
   "files": ["src", "README.md", "LICENSE"],
   "scripts": { "check": "tsc --noEmit" },

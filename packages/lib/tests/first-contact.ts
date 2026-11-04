@@ -161,7 +161,7 @@ async function phasePermitted(): Promise<void> {
 }
 
 // =============================================================================
-// 2. a refusal is recorded, grants nothing, and leaves no orphan records
+// 2. a policy refusal grants nothing and leaves no orphan records
 // =============================================================================
 
 async function phaseRefused(): Promise<void> {
@@ -194,14 +194,21 @@ async function phaseRefused(): Promise<void> {
         ? '' : `threads ${threads.items.length}, notices ${notices.items.length}, inbox ${inbox.items.length}`);
   }
 
-  // The recorded refusal outlives a later policy change: same identity, same answer,
-  // and the policy is not consulted a second time.
+  // A policy refusal names the store's configuration, not a decision about the message
+  // itself: the identity is re-decided on the next attempt, so a policy that now permits
+  // admits the same message instead of replaying the old answer (issue: a transient
+  // `not_found` tombstone locked a gateway's pushes out permanently).
   permit = true;
-  check('first-contact.refusal_recorded', await refusal('not_found', () => denied.messages.admit(guestAuth, refused('deny-01'))));
-  check('first-contact.refusal_no_reauth', calls.length === 1 ? '' : `the policy ran ${calls.length} times for a recorded refusal`);
+  const healed = await denied.messages.admit(guestAuth, refused('deny-01'));
+  check('first-contact.refusal_redecided', healed.seq === '1' && calls.length === 2
+    ? '' : `a healed policy got ${describeProblem(healed)} after ${calls.length} policy calls`);
+
+  // A terminal refusal is still the receiver's record: the second attempt answers from it.
+  check('first-contact.forbidden_replayed',
+    await refusal('forbidden', () => gated.messages.admit(guestAuth, refused('gate-01'))));
 
   const fresh = await denied.messages.admit(guestAuth, refused('deny-02'));
-  check('first-contact.policy_applies_fresh', fresh.seq === '1' && calls.length === 2
+  check('first-contact.policy_applies_fresh', fresh.seq === '1' && calls.length === 3
     ? '' : `a fresh identity got ${describeProblem(fresh)} after ${calls.length} policy calls`);
 }
 

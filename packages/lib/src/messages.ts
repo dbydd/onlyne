@@ -6,12 +6,26 @@ type Remembered = { digest: string; receipt?: Receipt; error?: Failure; retry_un
 type Binding = { digest: string; identity: string };
 type Outcome = { receipt: Receipt } | { error: Failure };
 
-/** Refusals this receiver records durably; retryable, internal and capacity failures roll back instead. */
+/**
+ * Refusals this receiver records durably. A refusal belongs here only when re-deciding it
+ * could never change the answer; retryable, internal and capacity failures roll back instead,
+ * and a refusal that names a store state (see `TRANSIENT_REFUSALS`) is thrown without a record.
+ */
 const RECORDED_REFUSALS: Record<string, true> = {
-  invalid_request: true, forbidden: true, not_a_member: true, not_found: true,
-  id_conflict: true, revision_conflict: true, conflict: true, thread_closed: true, context_lost: true,
-  retry_window_expired: true, payload_too_large: true, unsupported_media_type: true,
+  invalid_request: true, forbidden: true, not_a_member: true,
+  id_conflict: true, revision_conflict: true, thread_closed: true, context_lost: true,
+  payload_too_large: true, unsupported_media_type: true,
   unsupported_delivery: true, ambiguous_target: true, ambiguous_resource: true,
+};
+
+/**
+ * Refusals that record the store's condition at one attempt, not a decision about the message:
+ * a missing thread row, an unresolvable landing or a transient conflict. A record written by
+ * an older revision is replayed only while it is not one of these, so a store that heals (the
+ * thread row restored) admits the same identity again instead of replaying the old answer.
+ */
+const TRANSIENT_REFUSALS: Record<string, true> = {
+  not_found: true, unavailable: true, conflict: true, retry_window_expired: true,
 };
 
 /** Cursors and positions in this service are decimal strings; compare them as numbers, never as text. */
@@ -51,10 +65,16 @@ export class MessageService {
         this.#ctx.options.plugins.runtime?.trace?.({ event: 'inbound.duplicate', sender: message.sender, message: message.id });
         // A different body never replaces the identity already recorded, accepted or refused.
         if (old.digest !== digest) return { error: new OnlyneError('id_conflict', 'This message identity has different content.').error };
-        if (old.error) return { error: old.error };
-        if (old.receipt === undefined) return { error: new OnlyneError('retry_window_expired', 'Only the message tombstone remains.').error };
-        if (bound === undefined) await tx.put(operationKey, { digest: requestDigest, identity });
-        return { receipt: old.receipt };
+        if (old.error !== undefined && TRANSIENT_REFUSALS[old.error.code] !== true) return { error: old.error };
+        if (old.error === undefined) {
+          if (old.receipt === undefined) return { error: new OnlyneError('retry_window_expired', 'Only the message tombstone remains.').error };
+          if (bound === undefined) await tx.put(operationKey, { digest: requestDigest, identity });
+          return { receipt: old.receipt };
+        }
+        // The recorded refusal named a condition that may have healed since (a thread row
+        // restored, an owner reachable again). It is not a decision about this identity, so
+        // the record is dropped and the request is admitted on what the store holds now.
+        await tx.delete(identity);
       }
       try {
         if (!supported) {
@@ -70,7 +90,7 @@ export class MessageService {
         this.#ctx.deadline(request.retry_until);
         return await this.append(tx, auth, request, digest, requestDigest, identity, operationKey);
       } catch (error) {
-        if (error instanceof OnlyneError && RECORDED_REFUSALS[error.error.code] === true) return this.refuse(tx, identity, digest, request, error);
+        if (error instanceof OnlyneError) return this.refuse(tx, identity, digest, request, error);
         throw error;
       }
     });
@@ -243,10 +263,16 @@ export class MessageService {
     return undefined;
   }
 
-  /** Terminal refusals are the receiver's record too: written through the admission transaction. */
+  /**
+   * Terminal refusals are the receiver's record too: written through the admission transaction.
+   * A refusal that depends on the store's condition is not one (a restored thread row changes
+   * the answer), so it is returned to the caller and leaves no tombstone behind it.
+   */
   private async refuse(tx: Transaction, identity: string, digest: string, request: SendRequest, error: OnlyneError): Promise<Outcome> {
     const outcome = error.error;
-    await tx.put<Remembered>(identity, { digest, error: outcome, retry_until: request.retry_until });
+    if (RECORDED_REFUSALS[outcome.code] === true) {
+      await tx.put<Remembered>(identity, { digest, error: outcome, retry_until: request.retry_until });
+    }
     return { error: outcome };
   }
 

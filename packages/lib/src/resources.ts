@@ -1,6 +1,7 @@
 import type {
   AckReceipt, Auth, Failure, HandoverProbe, Json, LogQuery, Mutation, OperationRecord, OperationRequest,
-  OperationResult, Page, PageOptions, ProbeAnswer, Resource, ResourceEvent, ResourceRef, Transaction, Transport,
+  OperationResult, Page, PageOptions, ProbeAnswer, Resource, ResourceDriver, ResourceEvent, ResourceRef, Transaction,
+  Transport,
 } from './types.ts';
 import type { Context } from './core.ts';
 import { OnlyneError, decimal, fail, key, page, requireValue, same, utc } from './core.ts';
@@ -134,6 +135,14 @@ export function createResourceService(ctx: Context, transport: Transport): Resou
   const drivers = ctx.options.plugins.resources;
 
   /**
+   * A driver that mirrors event ids in an index of its own — the IM bridge keeps the platform
+   * reply handles that way — is told exactly which events left retention. Handing over the ids
+   * keeps the driver's own clock out of it: a retained event keeps its handle, and only the rows
+   * whose event is gone are dropped.
+   */
+  const retireDriver = drivers as (ResourceDriver & { retire?(events: ResourceEvent[]): Promise<void> }) | undefined;
+
+  /**
    * Every request for one operation ID must be identical, actor included: the same caller retries, nobody takes over
    * the slot. The retry envelope stays out of it, so a retry may refresh its window without becoming another request.
    */
@@ -227,14 +236,42 @@ export function createResourceService(ctx: Context, transport: Transport): Resou
   /**
    * Retention gives every event a terminal disposition. Expiry is written onto the event row
    * itself; the log keeps the content and the id is never reused (RFC 0006 §2).
+   *
+   * The source row is an index over that log, not the log: while the event is retained it is the
+   * deduplication point, and once the event expires it can never deduplicate again, so keeping it
+   * would grow the store for nothing. The row doubles as the marker for the announcement — it is
+   * deleted only after the driver acknowledged the retirement, so a failed pass leaves it in
+   * place and the next one repeats the announcement instead of losing it.
    */
   async function expireEvents(): Promise<void> {
     const now = ctx.now();
+    const retiring = await ctx.storage.transaction(async tx => {
+      // One scan answers both questions: which events are due, and whether a dedup row still
+      // names one of them. A per-event read would turn a sweep into one query per expired event.
+      const rows = await tx.scan<unknown>(key('resource'));
+      const sources = new Map<string, unknown>();
+      const events: ResourceEvent[] = [];
+      for (const entry of rows) {
+        const row = parseRow(entry.key);
+        if (row?.kind === 'event') events.push(entry.value as ResourceEvent);
+        else if (row?.kind === 'source') sources.set(entry.key, entry.value);
+      }
+      const pending: ResourceEvent[] = [];
+      for (const value of events) {
+        if (utc(value.expires_at) > now) continue;
+        if (!value.expired) {
+          await tx.put(eventKey(value.resource_ref, value.event_id), { ...value, expired: true } satisfies ResourceEvent);
+        }
+        if (sources.get(sourceKey(value.resource_ref, value.source_id)) === value.event_id) pending.push(value);
+      }
+      return pending;
+    });
+    if (retiring.length === 0) return;
+    await retireDriver?.retire?.(retiring);
     await ctx.storage.transaction(async tx => {
-      const events = rowsOf(await tx.scan<ResourceEvent>(key('resource')), 'event');
-      for (const { value } of events) {
-        if (value.expired || utc(value.expires_at) > now) continue;
-        await tx.put(eventKey(value.resource_ref, value.event_id), { ...value, expired: true } satisfies ResourceEvent);
+      for (const event of retiring) {
+        const source = sourceKey(event.resource_ref, event.source_id);
+        if (await tx.get<string>(source) === event.event_id) await tx.delete(source);
       }
     });
   }

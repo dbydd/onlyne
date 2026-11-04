@@ -2,6 +2,9 @@ import { fail, key, OnlyneError, page, requireValue, type Context } from './core
 import { serviceBase } from './transport.ts';
 import type { Auth, DomainDiscovery, DomainMembership, DomainMutation, Mutation, PageOptions, Transaction } from './types.ts';
 
+/** A first description probe may hydrate the cache for this long; later probes do not touch storage. */
+const DECLARE_HYDRATE_MS = 1_000;
+
 export function validateDomainId(value: unknown): string {
   if (typeof value !== 'string' || !/^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$/.test(value)) {
     fail('invalid_request', 'A domain_id must be an absolute URI.');
@@ -58,10 +61,39 @@ async function activeMembership(tx: Transaction, node: string): Promise<DomainMe
 export class DomainService {
   readonly #ctx: Context;
   readonly #fetcher: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+  #declared: DomainMembership | null | undefined;
 
   constructor(ctx: Context, fetcher: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = fetch) {
     this.#ctx = ctx;
     this.#fetcher = fetcher;
+  }
+
+  /**
+   * The node's one declared membership, kept in memory for the public description probe. Once
+   * it is known, this answers without entering the transaction queue; the first read hydrates
+   * it under a tight bound, and an unhydratable read fails instead of inventing a membership.
+   */
+  async declared(auth: Auth): Promise<DomainMembership | null> {
+    this.authenticate(auth);
+    if (this.#declared !== undefined) return this.#declared;
+    const read = this.#ctx.storage.transaction(tx => activeMembership(tx, this.#ctx.node));
+    read.then(current => { this.#declared = current ?? null; }).catch(() => undefined);
+    const current = await Promise.race([
+      read,
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new OnlyneError('unavailable', 'The declared membership is unavailable.')), DECLARE_HYDRATE_MS);
+      }),
+    ]);
+    this.#declared = current ?? null;
+    return this.#declared;
+  }
+
+  async #rememberDeclared(): Promise<void> {
+    try {
+      this.#declared = (await this.#ctx.storage.transaction(tx => activeMembership(tx, this.#ctx.node))) ?? null;
+    } catch {
+      this.#declared = undefined;
+    }
   }
 
   private authenticate(auth: Auth): void {
@@ -75,7 +107,7 @@ export class DomainService {
 
   async create(auth: Auth, mutation: Mutation): Promise<DomainMembership> {
     this.self(auth);
-    return this.#ctx.mutate(auth, 'domain.create', mutation, {}, async tx => {
+    const record = await this.#ctx.mutate(auth, 'domain.create', mutation, {}, async tx => {
       if (await activeMembership(tx, this.#ctx.node)) {
         fail('conflict', 'This node already belongs to a domain; leave it before creating another.');
       }
@@ -86,6 +118,8 @@ export class DomainService {
       await tx.put(slot, record);
       return record;
     });
+    await this.#rememberDeclared();
+    return record;
   }
 
   async join(auth: Auth, id: string, mutation: DomainMutation): Promise<DomainMembership> {
@@ -99,7 +133,7 @@ export class DomainService {
   private async change(auth: Auth, id: string, state: DomainMembership['state'], mutation: DomainMutation): Promise<DomainMembership> {
     this.self(auth);
     validateDomainId(id);
-    return this.#ctx.mutate(auth, `domain.${state}/${id}`, mutation, { expected_revision: mutation.expected_revision ?? null }, async tx => {
+    const record = await this.#ctx.mutate(auth, `domain.${state}/${id}`, mutation, { expected_revision: mutation.expected_revision ?? null }, async tx => {
       const slot = key('domain', id);
       const current = await tx.get<DomainMembership>(slot);
       if (!current && state === 'left') fail('not_found', 'No membership is recorded for this domain.');
@@ -118,6 +152,8 @@ export class DomainService {
       await tx.put(slot, record);
       return record;
     });
+    await this.#rememberDeclared();
+    return record;
   }
 
   async list(auth: Auth, options: PageOptions = {}) {

@@ -1,75 +1,29 @@
-import type { Context } from './core.ts';
-import { canonical, decimal, fail, key, page, requireValue, utc } from './core.ts';
+import type { Context } from "./core.ts";
+import { canonical, decimal, fail, key, page, requireValue, utc } from "./core.ts";
+import { trustPhase } from "./types.ts";
 import type {
   Action, Attention, Auth, DeliveryPlan, DomainMembership, DomainMutation, Entry, ErrorCode, Failure, Grant, Json, LocalAttention,
-  InjectOutcome, JoinedThread, Member, Message, MessageQuery, MessageRef, MsgInput, Mutation, NodeId, Outbound, Page, PageOptions, SendRequest,
-  TraceEvent, Thread, ThreadDescription, ThreadRef, Transaction, Transport, MaintenanceClock, PreparedSend,
-  ResourceReadQuery, ResourceReadResult, ResourceInventory, Resource, AttentionSettlement,
-} from './types.ts';
-import type { MessageService } from './messages.ts';
-import type { ResourceService } from './resources.ts';
-import type { ThreadService } from './threads.ts';
-import type { DomainService } from './domains.ts';
-import type { TrustService } from './keys.ts';
+  InjectOutcome, JoinedThread, Member, Message, MessageQuery, MessageRef, MsgInput, Mutation, NodeId, Outbound, Page, PageOptions,
+  TraceEvent, Thread, ThreadDescription, ThreadRef, Transaction, Transport, MaintenanceClock, PreparedSend, SendRequest,
+  ResourceReadQuery, ResourceReadResult, ResourceInventory, Resource, AttentionSettlement, TrustEntry,
+} from "./types.ts";
+import type { MessageService } from "./messages.ts";
+import type { ResourceService } from "./resources.ts";
+import type { ThreadService } from "./threads.ts";
+import type { DomainService } from "./domains.ts";
+import type { TrustService } from "./keys.ts";
+import {
+  FAILURE_WINDOW_MS, GRANT_RESYNC_MS, MAX_ATTEMPTS, MAX_CURSOR_PAGES, RESOURCE_CHECK_MS,
+  admissionOf, attentionOf, backoffMs, consumptionKey, failureOf, grantResyncKey, inboxKey, isReply,
+  messageDigest, outboundKey, reconcileBackoffKey, replayOrder, todoKey,
+} from "./delivery.ts";
+import type {
+  ConsumptionRecord, GrantResyncMark, MsgOptions, PendingTodo, ReconcileBackoff, SendOptions, SendOutcome, StoredOutbound,
+} from "./delivery.ts";
+import { AwaitedReplies } from "./awaited.ts";
+import type { Waiter } from "./awaited.ts";
 
-/** Result of one delivery: `admission` is what the peer recorded, `wait` is what this caller observed. */
-export interface SendOutcome {
-  receipt?: Outbound['receipt'];
-  admission: Outbound['state'];
-  reply?: Entry;
-  /** The target as the caller spelled it, present only with `resolved` when the two differ. */
-  requested?: string;
-  /**
-   * The node `requested` resolved to. Present whenever the addressee differs from the
-   * endpoint that stores the entry — which is this node whenever it started the
-   * conversation — so an initiator's receipt never reads as a message the node sent itself.
-   */
-  resolved?: NodeId;
-  /**
-   * Whether the reply body is safe to render. `withheld` means the same body is already
-   * confirmed consumed in this context through another path (RFC 0008 §5), so the caller
-   * renders the arrival facts and the original message reference only.
-   */
-  reply_body?: 'included' | 'withheld';
-  wait?: 'answered' | 'timed_out' | 'cancelled';
-  error?: Failure;
-}
-
-export interface SendOptions {
-  signal?: AbortSignal;
-  retry_until?: string;
-  idempotency_key?: string;
-  expected_author?: string;
-  /**
-   * The caller's own spelling of the addressee. Recorded on the outbound record beside the
-   * resolved node id when the two differ, so the record shows both what was asked and what
-   * was resolved (RFC 0005 §4: the receipt reports the landing, not the request).
-   */
-  requested?: string;
-  /**
-   * The sender's own consumption identity for the awaited reply (RFC 0008 §5). It stays
-   * local and never stands in for the wire plan's receiver-side context.
-   */
-  context?: string;
-}
-
-export interface MsgOptions {
-  signal?: AbortSignal;
-  /** The sender's own consumption identity for an awaited reply; `msg` passes it to `send`. */
-  context?: string;
-}
-
-interface Waiter {
-  original: Message;
-  expected_author: string;
-  /** The sender-local context this await consumes its reply in; absent for a generic caller. */
-  local_context?: string;
-  outcome: Promise<Entry>;
-  settle(entry: Entry): void;
-}
-
-/** An outbound record plus the digest that fixes its message identity and the sender's own consumption identity. */
-interface StoredOutbound extends Outbound { digest?: string; local_context?: string }
+export type { MsgOptions, SendOptions, SendOutcome } from "./delivery.ts";
 
 /** The library-owned maintenance loop's live state (RFC 0017 §6). */
 interface MaintenanceLoop {
@@ -78,104 +32,6 @@ interface MaintenanceLoop {
   handle: unknown;
   lastPending: boolean;
   running: boolean;
-}
-
-/** Codes the peer records as a terminal refusal before acceptance (RFC 0003 §5). */
-const TERMINAL: Record<string, true> = {
-  invalid_request: true, forbidden: true, not_a_member: true, not_found: true,
-  id_conflict: true, revision_conflict: true, conflict: true, thread_closed: true,
-  retry_window_expired: true, payload_too_large: true, unsupported_media_type: true,
-  unsupported_delivery: true, ambiguous_target: true, ambiguous_resource: true,
-};
-const MAX_CURSOR_PAGES = 10_000;
-/** A binding check must not hold the maintenance pass behind an unreachable resource owner. */
-const RESOURCE_CHECK_MS = 5_000;
-/** One reconcile failure line per (owner, thread, code) per window; a dead owner stays observable. */
-const RECONCILE_FAILURE_WINDOW_MS = 300_000;
-
-/** Anything that is not a recorded refusal leaves the admission unknown, never "undelivered". */
-function admissionOf(failure: Failure): Outbound['state'] {
-  return failure.retryable === false && TERMINAL[failure.code] === true ? 'refused' : 'unknown';
-}
-
-function failureOf(error: unknown): Failure {
-  const reported = (error as { error?: Partial<Failure> }).error;
-  if (reported !== undefined && typeof reported.code === 'string' && typeof reported.message === 'string') {
-    return reported as Failure;
-  }
-  return {
-    code: 'unavailable',
-    message: error instanceof Error ? error.message : 'The transport failed without a response.',
-    retryable: true,
-  };
-}
-
-/**
- * Request identity for one delivery (RFC 0003 §3 step 3). The plan, the local
- * idempotency key and `retry_until` describe delivery, not the message.
- */
-function messageDigest(request: SendRequest): string {
-  const meta = request.message.meta;
-  return canonical({
-    sender: request.message.sender,
-    target_endpoint: request.target_endpoint,
-    thread_ref: meta?.thread ?? null,
-    in_reply_to: meta?.in_reply_to ?? null,
-    relation: meta?.relation ?? null,
-    mentions: meta?.mentions ?? null,
-    delivery_kind: request.message.delivery_kind,
-    msg: request.message.msg,
-    parts: meta?.parts ?? null,
-    data: meta?.data ?? null,
-  });
-}
-
-/** A legitimate reply to `original`: same reference, reply relation, a different authenticated author. */
-function isReply(original: Pick<Message, 'sender' | 'id'>, entry: Entry): boolean {
-  const meta = entry.message.meta;
-  const related = meta?.in_reply_to;
-  if (related === undefined || related.sender !== original.sender || related.id !== original.id) return false;
-  if (meta?.relation !== undefined && meta.relation !== 'reply') return false;
-  return entry.authenticated_author !== original.sender;
-}
-
-/** Replay order is the thread's own: `(owner, id)` then `seq` as a number, never a UUID sort. */
-function replayOrder(a: Entry | undefined, b: Entry | undefined): number {
-  if (a === undefined) return b === undefined ? 0 : -1;
-  if (b === undefined) return 1;
-  if (a.thread_ref.owner !== b.thread_ref.owner) return a.thread_ref.owner < b.thread_ref.owner ? -1 : 1;
-  if (a.thread_ref.id !== b.thread_ref.id) return a.thread_ref.id < b.thread_ref.id ? -1 : 1;
-  const left = decimal(a.seq);
-  const right = decimal(b.seq);
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-const outboundKey = (sender: string, id: string) => key('outbound', sender, id);
-const inboxKey = (obligation_id: string) => key('inbox', obligation_id);
-const replyKey = (original: Pick<Message, 'sender' | 'id'>) => key('reply', original.sender, original.id);
-/** One consumption slot per `(context, ThreadRef, seq)`, shared by every delivery path (RFC 0004 §5). */
-const consumptionKey = (context: string, thread_ref: ThreadRef, seq: string) => key('consumed', context, thread_ref.owner, thread_ref.id, seq);
-/** The todo one consumed entry owes the host, until its hook succeeds. */
-const todoKey = (context: string, thread_ref: ThreadRef, seq: string) => key('todo', context, thread_ref.owner, thread_ref.id, seq);
-/** In-process identity of one thread entry: its `ThreadRef` and sequence. */
-const entryKey = (thread_ref: ThreadRef, seq: string) => key(thread_ref.owner, thread_ref.id, seq);
-
-/** Confirmed consumption for one slot, written by whichever path the host confirmed. */
-interface ConsumptionRecord {
-  context: string; thread_ref: ThreadRef; seq: string;
-  confirmed: boolean; via: 'tool_result' | 'fragment'; at: string;
-}
-
-/** A todo the host still owes for one consumed entry; `done` is written after its hook succeeds. */
-interface PendingTodo { entry: Entry; context: string; done: boolean }
-
-/** The durable part of an obligation: identity and owner-attested facts, body optional. */
-function attentionOf(entry: Entry, obligation_id: string, recipient: string): Attention {
-  return {
-    obligation_id, recipient, thread_ref: entry.thread_ref, seq: entry.seq,
-    message_ref: { sender: entry.message.sender, id: entry.message.id },
-    authenticated_author: entry.authenticated_author, acked: false, entry,
-  };
 }
 
 export class OnlyneClient {
@@ -191,12 +47,10 @@ export class OnlyneClient {
   static readonly ACTIVE_INTERVAL_MS = 2_000;
   /** The floor the loop drops to once the durable ledger holds no pending work. */
   static readonly IDLE_INTERVAL_MS = 30_000;
-  /** Live waiters, keyed by the original message; an entry lives only while its `send` runs. */
-  readonly #waiters = new Map<string, Waiter>();
-  /** Replies already returned as tool results, per context, held until consumption confirms them. */
-  readonly #held = new Map<string, Set<string>>();
-  /** Last `reconcile.failed` line per (owner, thread, code), and what the window suppressed. */
-  readonly #reconcileFailures = new Map<string, { at: number; suppressed: number }>();
+  /** Live awaits and the tool-result holds they place. */
+  readonly #awaiting = new AwaitedReplies();
+  /** Last failure line per scope, and what its window suppressed; one map for every repeated line. */
+  readonly #failureWindows = new Map<string, { at: number; suppressed: number }>();
 
   constructor(
     ctx: Context, transport: Transport, messages: MessageService, threads: ThreadService,
@@ -264,7 +118,7 @@ export class OnlyneClient {
     loop.running = true;
     try {
       await this.maintain(loop.controller.signal);
-      await this.recover(loop.controller.signal);
+      await this.#recover(loop.controller.signal, true);
     } catch {
       // A failed pass keeps its owed records; the next pass retries them.
     } finally {
@@ -387,8 +241,17 @@ export class OnlyneClient {
         // A re-drive of the same message keeps the first request identity, which the peer
         // dedupes on; the consumption identity belongs to the caller waiting now, not to
         // the delivery, so a caller that names another one replaces the stale slot.
-        if (options.context === undefined || stored.local_context === options.context) return stored;
-        const updated: StoredOutbound = { ...stored, local_context: options.context };
+        // Acceptance is final; anything else is a case the caller is asking again, which is
+        // the one signal that starts a fresh attempt series after a dead letter or a backoff.
+        const recontexted = options.context === undefined || stored.local_context === options.context
+          ? {} : { local_context: options.context };
+        if (stored.state === 'accepted') {
+          if (Object.keys(recontexted).length === 0) return stored;
+          const updated: StoredOutbound = { ...stored, ...recontexted };
+          await tx.put(slot, updated);
+          return updated;
+        }
+        const updated: StoredOutbound = { ...stored, ...recontexted, state: 'pending', attempt: undefined, next_attempt: undefined };
         await tx.put(slot, updated);
         return updated;
       }
@@ -404,11 +267,11 @@ export class OnlyneClient {
 
     if (plan.response !== 'await') return this.#transmit(record, options.signal);
 
-    const waiter = this.#register(record);
+    const waiter = this.#awaiting.register(record);
     try {
       return await this.#await(record, waiter, options.signal);
     } finally {
-      if (this.#waiters.get(replyKey(message)) === waiter) this.#waiters.delete(replyKey(message));
+      this.#awaiting.release(waiter);
     }
   }
 
@@ -416,13 +279,24 @@ export class OnlyneClient {
    * Re-drives outbound records still open inside their window (RFC 0003 §3). `unknown`
    * is terminal in meaning but the window still owns another attempt, so the window
    * decides when to stop, not the last recorded state. A record whose window closed is
-   * settled as `unknown`, never left looking pending.
+   * settled as `unknown`, never left looking pending. Each record's own attempt series
+   * bounds the re-drive: a scheduled next attempt is respected instead of retried every
+   * pass, and a series that reached its limit stays a dead letter until an explicit
+   * re-send starts a new one. A caller invoking this directly is asking for a retry now,
+   * so it ignores the schedule; the maintenance loop's own pass respects it.
    */
   async recover(signal?: AbortSignal): Promise<void> {
+    return this.#recover(signal, false);
+  }
+
+  async #recover(signal: AbortSignal | undefined, scheduled: boolean): Promise<void> {
+    const now = this.#ctx.now();
     const rows = await this.#ctx.storage.transaction(async tx =>
       (await tx.scan<StoredOutbound>(key('outbound') + '/'))
         .map(row => row.value)
-        .filter(row => row.digest !== undefined && (row.state === 'pending' || row.state === 'unknown')));
+        .filter(row => row.digest !== undefined && (row.state === 'pending' || row.state === 'unknown'))
+        // `pending` is a request that never left; only a failed one carries a schedule.
+        .filter(row => !scheduled || row.state === 'pending' || row.next_attempt === undefined || utc(row.next_attempt) <= now));
     for (const row of rows) {
       if (signal?.aborted) return;
       if (utc(row.request.retry_until) <= this.#ctx.now()) {
@@ -586,15 +460,29 @@ export class OnlyneClient {
    * list is the evidence; the ack goes out only after the entry is durable locally.
    * An owner this node cannot reach is reported as a trace record, never thrown: one dead
    * owner must not starve the rest, and a silent skip is the failure nobody can diagnose.
+   * Each (owner, thread) carries its own attempt series: a call from the maintenance pass
+   * respects the scheduled next attempt, and an exhausted series stays a dead letter so an
+   * unreachable owner costs one probe per window instead of one storm per pass. A caller
+   * invoking this directly is asking for a retry now, so it ignores the schedule — and still
+   * counts the attempt, so a caller that retries in a loop reaches the same dead letter.
    */
   async reconcile(signal?: AbortSignal): Promise<Page<LocalAttention>> {
+    return this.#reconcile(signal, false);
+  }
+
+  async #reconcile(signal: AbortSignal | undefined, scheduled: boolean): Promise<Page<LocalAttention>> {
+    const now = this.#ctx.now();
     for (const ref of await this.#knownRefs()) {
       if (signal?.aborted) break;
+      const backoff = await this.#ctx.storage.transaction(tx => tx.get<ReconcileBackoff>(reconcileBackoffKey(ref)));
+      if (backoff?.dead === true) continue;
+      if (scheduled && backoff !== undefined && utc(backoff.next_attempt) > now) continue;
       try {
         await this.#reconcileThread(ref, signal);
+        if (backoff !== undefined) await this.#ctx.storage.transaction(tx => tx.delete(reconcileBackoffKey(ref)));
       } catch (error) {
         if (ref.owner === this.#ctx.options.node_id) throw error;
-        this.#reportReconcileFailure(ref, error);
+        await this.#reportReconcileFailure(ref, error);
         continue;
       }
     }
@@ -602,39 +490,68 @@ export class OnlyneClient {
   }
 
   /**
-   * Writes at most one `reconcile.failed` line per (owner, thread, code) per window. A failed
-   * pull drops nothing, so the next pass retries the same ref; deduplicating here keeps a
-   * permanently dead owner from writing the same line every pass while still accounting for
-   * every attempt it folded into the line it did write.
+   * Records one failed attempt in the thread's series and writes at most one line per window.
+   * A failed pull drops nothing, so the series owns the retry; an attempt that reaches the
+   * limit parks the thread as unreachable and writes one terminal line instead of the
+   * per-window one.
    */
-  #reportReconcileFailure(ref: ThreadRef, error: unknown): void {
+  async #reportReconcileFailure(ref: ThreadRef, error: unknown): Promise<void> {
     const failure = failureOf(error);
-    const slot = key(ref.owner, ref.id, failure.code);
+    const attempt = await this.#ctx.storage.transaction(async tx => {
+      const slot = reconcileBackoffKey(ref);
+      const previous = await tx.get<ReconcileBackoff>(slot);
+      const attempt = (previous?.attempt ?? 0) + 1;
+      const next: ReconcileBackoff = {
+        owner: ref.owner, thread: ref.id, attempt,
+        next_attempt: new Date(this.#ctx.now() + backoffMs(attempt)).toISOString(),
+        code: failure.code, message: failure.message,
+        ...(attempt >= MAX_ATTEMPTS ? { dead: true } : {}),
+      };
+      await tx.put(slot, next);
+      return attempt;
+    });
+    if (attempt >= MAX_ATTEMPTS) {
+      this.#trace({ event: 'reconcile.unreachable', owner: ref.owner, thread: ref.id, code: failure.code, attempts: attempt });
+      return;
+    }
+    this.#windowedFailure(key(ref.owner, ref.id, failure.code), attempts => ({
+      event: 'reconcile.failed', owner: ref.owner, thread: ref.id,
+      code: failure.code, message: failure.message, attempts,
+    }));
+  }
+
+  /**
+   * Writes at most one failure line per scope per window: a permanently dead peer stays
+   * observable without writing the same line every pass, and the line reports how many
+   * suppressed attempts it accounts for.
+   */
+  #windowedFailure(slot: string, line: (attempts: number) => TraceEvent): void {
     const now = this.#ctx.now();
-    const held = this.#reconcileFailures.get(slot);
-    if (held !== undefined && now - held.at < RECONCILE_FAILURE_WINDOW_MS) {
+    const held = this.#failureWindows.get(slot);
+    if (held !== undefined && now - held.at < FAILURE_WINDOW_MS) {
       held.suppressed += 1;
       return;
     }
-    this.#reconcileFailures.set(slot, { at: now, suppressed: 0 });
-    this.#trace({
-      event: 'reconcile.failed', owner: ref.owner, thread: ref.id,
-      code: failure.code, message: failure.message, attempts: (held?.suppressed ?? 0) + 1,
-    });
+    this.#failureWindows.set(slot, { at: now, suppressed: 0 });
+    this.#trace(line((held?.suppressed ?? 0) + 1));
   }
 
   /**
    * Delivers outstanding owner grant notices, replays owed todos and entries whose durable
-   * record never reached the model, re-drives owed trust statements, then reconciles. Replay
-   * follows each thread's own order: `owner`, `id`, then `seq` as a number. One record that
-   * fails never starves the rest, and the failures are thrown after the pass with their
-   * records still owed for the next one. Caller-scheduled, and the only entry a host without
-   * a maintenance clock needs besides `recover`.
+   * record never reached the model, re-asks trusted owners for the memberships they hold for
+   * this node, re-drives owed trust statements, then reconciles. Replay follows each thread's
+   * own order: `owner`, `id`, then `seq` as a number. One record that fails never starves the
+   * rest, and the failures are thrown after the pass with their records still owed for the
+   * next one. Caller-scheduled, and the only entry a host without a maintenance clock needs
+   * besides `recover`.
    */
   async maintain(signal?: AbortSignal): Promise<void> {
     await this.#deliverGrants(signal);
     if (signal?.aborted) return;
     await this.#confirmGrants(signal);
+    if (signal?.aborted) return;
+    // Before reconciliation, so rows this repairs are pulled in the same pass.
+    await this.#resyncGrants(signal);
     if (signal?.aborted) return;
     const failures: unknown[] = [];
     // Owed todos replay before the inbox pass, so a hook that fails now waits for the next
@@ -644,7 +561,7 @@ export class OnlyneClient {
     await this.#replayInbox(signal, failures);
     if (signal?.aborted) return;
     try {
-      await this.reconcile(signal);
+      await this.#reconcile(signal, true);
     } catch (error) {
       failures.push(error);
     }
@@ -661,18 +578,22 @@ export class OnlyneClient {
 
   /**
    * Whether any durable record still needs a local pass: an unacked grant notice, an
-   * owed todo, an uninjected inbox row, or an outbound stuck pending/unknown. A scheduler
+   * owed todo, an uninjected inbox row, or an outbound still owed an attempt. A scheduler
    * consults this before running `maintain`, so an idle node costs no rounds; anything
    * that flips this on (an admission, an ack, a failed delivery) also wakes the host.
+   * A dead-lettered send is terminal, and a scheduled retry counts only once it is due, so
+   * neither holds the active cadence for a peer that is simply away.
    */
   async hasPendingWork(): Promise<boolean> {
     return this.#ctx.storage.transaction(async tx => {
+      const now = this.#ctx.now();
       const inbox = await tx.scan<LocalAttention>(key('inbox') + '/');
       if (inbox.some(row => !row.value.attention.acked || !row.value.injected && row.value.attention.entry !== undefined && row.value.attention.disposition !== 'expired')) return true;
       const todos = await tx.scan<PendingTodo>(key('todo') + '/');
       if (todos.some(row => !row.value.done)) return true;
       const outbound = await tx.scan<StoredOutbound>(key('outbound') + '/');
-      if (outbound.some(row => row.value.digest !== undefined && (row.value.state === 'pending' || row.value.state === 'unknown'))) return true;
+      if (outbound.some(row => row.value.digest !== undefined && (row.value.state === 'pending'
+        || (row.value.state === 'unknown' && (row.value.next_attempt === undefined || utc(row.value.next_attempt) <= now))))) return true;
       // A grant notice is how a participant learns the thread it must reconcile, so an
       // unacked notice is work: skipping it leaves the thread undiscoverable.
       const notices = await tx.scan<{ acked?: boolean }>(key('notice') + '/');
@@ -683,7 +604,6 @@ export class OnlyneClient {
       // re-drives it once the retry window opens (RFC 0017 §3.5).
       // A backed-off obligation still counts once its delay has passed; until then the idle
       // cadence is enough to notice it, so it does not force the active one.
-      const now = this.#ctx.now();
       const exchanges = await tx.scan<{ blocked?: number }>(key('trust-outbound') + '/');
       if (exchanges.some(row => row.value.blocked === undefined || row.value.blocked <= now)) return true;
       return false;
@@ -936,15 +856,32 @@ export class OnlyneClient {
     } catch (error) {
       if (signal?.aborted) throw error;
       const failure = failureOf(error);
-      await this.#commit(record, { state: admissionOf(failure), error: failure });
+      const state = admissionOf(failure);
+      // A retryable failure is one attempt of a bounded series: the next attempt is scheduled,
+      // and an exhausted series becomes a dead letter instead of being re-driven on every pass.
+      // A recorded refusal is final and carries no series at all.
+      const previous = await this.#ctx.storage.transaction(
+        tx => tx.get<StoredOutbound>(outboundKey(request.message.sender, request.message.id)));
+      const attempt: number | undefined = state === 'refused' ? undefined : (previous?.attempt ?? 0) + 1;
+      const terminal = attempt !== undefined && attempt >= MAX_ATTEMPTS;
+      await this.#commit(record, {
+        state: terminal ? 'unreachable' : state,
+        error: failure,
+        ...(attempt === undefined ? {} : { attempt }),
+        ...(attempt === undefined || terminal ? {} : { next_attempt: new Date(this.#ctx.now() + backoffMs(attempt)).toISOString() }),
+      });
       this.#trace({
         event: 'outbound.admitted', sender: request.message.sender, message: request.message.id,
         target: request.target_endpoint, ...(record.addressee === undefined ? {} : { resolved: record.addressee }),
-        state: admissionOf(failure), code: failure.code,
+        state: terminal ? 'unreachable' : state, code: failure.code,
+      });
+      if (terminal) this.#trace({
+        event: 'outbound.unreachable', sender: request.message.sender, message: request.message.id,
+        target: request.target_endpoint, attempts: attempt, code: failure.code,
       });
       const stored = await this.#ctx.storage.transaction(tx => tx.get<StoredOutbound>(outboundKey(request.message.sender, request.message.id)));
       return {
-        admission: stored?.state ?? admissionOf(failure),
+        admission: stored?.state ?? (terminal ? 'unreachable' : state),
         ...(stored?.state === 'accepted' ? {} : { error: failure }),
         ...(stored?.receipt === undefined ? (record.receipt === undefined ? {} : { receipt: record.receipt }) : { receipt: stored.receipt }),
       };
@@ -969,9 +906,7 @@ export class OnlyneClient {
     // consumption, so no automatic fragment presents the same body in that context again. A
     // wait that is cancelled or times out returns no reply, so it never places a hold.
     if (!consumed) {
-      const identity = entryKey(reply.reply.thread_ref, reply.reply.seq);
-      const held = this.#held.get(identity) ?? new Set<string>();
-      this.#held.set(identity, held.add(context));
+      this.#awaiting.hold(reply.reply, context);
     }
     // Returning the body does not by itself write the record: RFC 0008 §5 forbids advancing
     // consumption on a submitted tool result. The host calls `confirmConsumption` once it has
@@ -1024,15 +959,10 @@ export class OnlyneClient {
       return where;
     });
     if (consumedIn === undefined) {
-      this.#held.delete(entryKey(entry.thread_ref, entry.seq));
+      this.#awaiting.forget(entry);
       return;
     }
-    const identity = entryKey(entry.thread_ref, entry.seq);
-    const held = this.#held.get(identity);
-    if (held !== undefined) {
-      held.delete(consumedIn);
-      if (held.size === 0) this.#held.delete(identity);
-    }
+    this.#awaiting.releaseContext(entry, consumedIn);
     this.#trace({ event: 'consumption.confirmed', thread: entry.thread_ref, seq: entry.seq, context: consumedIn, via });
     this.#ctx.options.plugins.runtime?.notify({ event: 'inbound', thread: entry.thread_ref, seq: entry.seq, sender: entry.message.sender });
     await this.#deliverTodo(entry, consumedIn);
@@ -1053,13 +983,7 @@ export class OnlyneClient {
    * cancelled wait returns no reply, so it holds nothing.
    */
   isWaitingReply(entry: Entry, context?: string): boolean {
-    for (const waiter of this.#waiters.values()) {
-      if (waiter.expected_author !== entry.authenticated_author || !isReply(waiter.original, entry)) continue;
-      if (context !== undefined && waiter.local_context !== context) continue;
-      return true;
-    }
-    const held = this.#held.get(entryKey(entry.thread_ref, entry.seq));
-    return held !== undefined && (context === undefined || held.has(context));
+    return this.#awaiting.waiting(entry, context);
   }
 
   async #awaitOutcome(record: StoredOutbound, waiter: Waiter, signal: AbortSignal | undefined): Promise<SendOutcome> {
@@ -1141,7 +1065,7 @@ export class OnlyneClient {
    * Acceptance is final. The digest is written with every state change, so recovery and
    * replay keep recognising the message identity instead of losing it to a bare record.
    */
-  async #commit(record: StoredOutbound, change: Pick<Outbound, 'state' | 'receipt' | 'error'>): Promise<void> {
+  async #commit(record: StoredOutbound, change: Pick<Outbound, 'state' | 'receipt' | 'error'> & { attempt?: number; next_attempt?: string }): Promise<void> {
     const request = record.request;
     const digest = record.digest ?? messageDigest(request);
     await this.#ctx.storage.transaction(async tx => {
@@ -1150,6 +1074,12 @@ export class OnlyneClient {
       if (current?.state === 'accepted') return;
       const next: StoredOutbound = { ...record, ...change, digest };
       if (next.state === 'accepted') delete next.error;
+      // A settled record owes no further attempt, and a dead letter must not carry a schedule
+      // a later pass would read as permission to try again.
+      if (next.state === 'accepted' || next.state === 'refused' || next.state === 'unreachable') {
+        delete next.next_attempt;
+        if (next.state !== 'unreachable') delete next.attempt;
+      }
       await tx.put(slot, next);
     });
   }
@@ -1164,35 +1094,9 @@ export class OnlyneClient {
     return found.sort((a, b) => (decimal(a.seq) < decimal(b.seq) ? -1 : decimal(a.seq) > decimal(b.seq) ? 1 : 0))[0];
   }
 
-  /** Registered before the network call, so a reply that lands first still finds its waiter. */
-  #register(record: StoredOutbound): Waiter {
-    const original = record.request.message;
-    const pending = Promise.withResolvers<Entry>();
-    const slot = replyKey(original);
-    const previous = this.#waiters.get(slot);
-    const waiter: Waiter = {
-      original,
-      expected_author: record.expected_author,
-      ...(record.local_context === undefined ? {} : { local_context: record.local_context }),
-      outcome: pending.promise,
-      settle(entry) {
-        previous?.settle(entry);
-        pending.resolve(entry);
-      },
-    };
-    this.#waiters.set(slot, waiter);
-    return waiter;
-  }
-
   /** Releases every live await whose original this entry answers, in this process. */
   #settle(entry: Entry): void {
-    let settled = 0;
-    for (const waiter of this.#waiters.values()) {
-      if (waiter.expected_author === entry.authenticated_author && isReply(waiter.original, entry)) {
-        waiter.settle(entry);
-        settled++;
-      }
-    }
+    const settled = this.#awaiting.settle(entry);
     if (settled > 0) this.#trace({ event: 'await.settled', thread: entry.thread_ref, seq: entry.seq, waiters: settled });
   }
 
@@ -1317,7 +1221,7 @@ export class OnlyneClient {
       return true;
     });
     if (changed) {
-      this.#held.delete(entryKey(entry.thread_ref, entry.seq));
+      this.#awaiting.forget(entry);
       this.#trace({ event: 'inbound.settled', thread: entry.thread_ref, seq: entry.seq, settlement });
       this.#ctx.options.plugins.runtime?.notify({ event: 'inbound', thread: entry.thread_ref, seq: entry.seq, sender: entry.message.sender });
     }
@@ -1557,6 +1461,85 @@ export class OnlyneClient {
         // Idempotent; the next pass sends the confirmation again.
       }
     }
+  }
+
+  /**
+   * Asks every trusted owner, at most once per window, for the memberships it still holds for
+   * this node, and re-records the grants this store no longer has. An owner's notice stays
+   * acknowledged forever, so a participant whose own store was rebuilt never learns those
+   * threads again from a push; the owner's signed answer is the evidence that repairs them.
+   * Only a missing `known` or `grant` row is written, so a healthy thread costs no traffic and
+   * a repeated pass is idempotent. An owner older than this route answers not_found once, and
+   * that answer is the watermark: asking it again inside the window teaches nothing.
+   */
+  async #resyncGrants(signal?: AbortSignal): Promise<void> {
+    const peers = await this.#ctx.storage.transaction(async tx => {
+      const exchanges = (await tx.scan<TrustEntry>(key('trust') + '/'))
+        .map(row => row.value)
+        .filter(entry => entry.node_id !== this.#ctx.node && trustPhase(entry) === 'exchanged');
+      const rows: Array<{ node_id: NodeId; at: number | undefined }> = [];
+      for (const entry of exchanges) {
+        rows.push({ node_id: entry.node_id, at: (await tx.get<GrantResyncMark>(grantResyncKey(entry.node_id)))?.at });
+      }
+      return rows;
+    });
+    const now = this.#ctx.now();
+    // One probe per peer costs the same budget as a resource binding check, never the full
+    // delivery wait: a slow owner must not hold the pass behind it.
+    const budget = Math.min(this.#ctx.options.wait_ms ?? 60_000, RESOURCE_CHECK_MS);
+    for (const peer of peers) {
+      if (signal?.aborted) return;
+      if (peer.at !== undefined && now - peer.at < GRANT_RESYNC_MS) continue;
+      try {
+        const issued = await this.#allPages(cursor => {
+          const search = new URLSearchParams({ page_size: '100' });
+          if (cursor !== undefined) search.set('cursor', cursor);
+          return this.#remote<Page<Grant>>(peer.node_id, 'GET', `/grants/issued?${search}`, undefined, signal, budget);
+        });
+        // Only a membership this node is the named recipient of, on an owner thread, is the
+        // owner's answer about this node; anything else is not evidence for a local repair.
+        const offered = issued.filter(grant =>
+          grant.thread_ref.owner === peer.node_id && grant.recipient === this.#ctx.node);
+        const repair = await this.#ctx.storage.transaction(async tx => {
+          const missing = new Set<string>();
+          for (const grant of offered) {
+            const known = await tx.get(key('known', grant.thread_ref.owner, grant.thread_ref.id));
+            const held = await tx.get(key('grant', grant.thread_ref.owner, grant.id));
+            if (known === undefined || held === undefined) missing.add(grant.id);
+          }
+          return missing;
+        });
+        for (const grant of offered) {
+          if (!repair.has(grant.id)) continue;
+          const restored = await this.#threads.acceptGrant({ actor: peer.node_id }, grant);
+          this.#trace({ event: 'grant.restored', owner: peer.node_id, thread: restored.thread_ref, grant: restored.id });
+        }
+        await this.#peerAnswered(peer.node_id);
+      } catch (error) {
+        if (signal?.aborted) return;
+        const failure = failureOf(error);
+        if (failure.code === 'not_found') {
+          await this.#peerAnswered(peer.node_id);
+          continue;
+        }
+        this.#windowedFailure(key('grant-resync', peer.node_id, failure.code), attempts => ({
+          event: 'grant.resync.failed', owner: peer.node_id, code: failure.code, message: failure.message, attempts,
+        }));
+      }
+    }
+  }
+
+  /**
+   * Records that one trusted owner answered. That answer is the new peer signal a parked
+   * thread waits for, so its dead-lettered retry series starts over.
+   */
+  async #peerAnswered(peer: NodeId): Promise<void> {
+    await this.#ctx.storage.transaction(async tx => {
+      await tx.put<GrantResyncMark>(grantResyncKey(peer), { peer, at: this.#ctx.now() });
+      for (const row of await tx.scan<ReconcileBackoff>(key('reconcile-backoff') + '/')) {
+        if (row.value.owner === peer) await tx.delete(row.key);
+      }
+    });
   }
 
   async #dispatch(action: Action, options: MsgOptions): Promise<unknown> {

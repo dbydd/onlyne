@@ -165,12 +165,19 @@ export interface OperationRecord {
   resource_ref: ResourceRef; accepted_at: string; authorized_revision: string;
 }
 export interface Outbound {
-  request: SendRequest; expected_author: NodeId; state: 'pending' | 'accepted' | 'refused' | 'unknown';
+  /**
+   * `unreachable` is the terminal dead letter of a bounded retry series: the peer never
+   * answered inside the window, so a later pass stops re-driving it until an explicit
+   * re-send starts a new series.
+   */
+  request: SendRequest; expected_author: NodeId; state: 'pending' | 'accepted' | 'refused' | 'unknown' | 'unreachable';
   receipt?: Receipt; error?: Failure; created_at?: string;
   /** The peer this send addresses when it differs from the endpoint that stores the entry. */
   addressee?: NodeId;
   /** The caller's own spelling of the addressee, when it differs from the resolved node id. */
   requested?: string;
+  /** Failed attempts in the current retry series, and when the next one is due. */
+  attempt?: number; next_attempt?: string;
 }
 export interface HistoryMessage {
   message_ref: MessageRef; message: Message; direction: 'in' | 'out';
@@ -240,7 +247,21 @@ export type TraceEvent =
    * per window. `attempts` is how many failed passes that one line accounts for, the suppressed
    * duplicates included; the local rows a failed pull never reached are still owed, not dropped.
    */
-  | { event: 'reconcile.failed'; owner: NodeId; thread: string; code: ErrorCode; message: string; attempts: number };
+  | { event: 'reconcile.failed'; owner: NodeId; thread: string; code: ErrorCode; message: string; attempts: number }
+  /**
+   * A known thread whose retry series is exhausted: the owner stayed unreachable through every
+   * attempt, so reconciliation stops asking until the owner answers on another path.
+   */
+  | { event: 'reconcile.unreachable'; owner: NodeId; thread: string; code: ErrorCode; attempts: number }
+  /** A grant the owner still holds for this node was missing here and has been re-recorded. */
+  | { event: 'grant.restored'; owner: NodeId; thread: ThreadRef; grant: string }
+  /**
+   * Asking a trusted owner for the memberships it holds for this node failed. Deduplicated per
+   * (owner, code) per window, like every other repeated failure line.
+   */
+  | { event: 'grant.resync.failed'; owner: NodeId; code: ErrorCode; message: string; attempts: number }
+  /** A delivery series exhausted its attempts; the record is a dead letter, not a pending send. */
+  | { event: 'outbound.unreachable'; sender: NodeId; message: string; target: string; attempts: number; code: ErrorCode };
 /** What the host did with one inbound entry, reported back with the injection result. */
 export type InjectOutcome = 'delivered' | 'queued' | 'waiting' | 'skipped' | 'consumed';
 export interface Runtime {
@@ -271,6 +292,12 @@ export interface ResourceDriver {
   validate(resource: Resource, operation: string, data: Json | undefined): Promise<void>;
   execute(resource: Resource, request: OperationRequest, signal?: AbortSignal): Promise<Omit<OperationResult, 'operation_id'>>;
   query?(resource: Resource, operation_id: string): Promise<Omit<OperationResult, 'operation_id'>>;
+  /**
+   * RFC 0006 §2: retention has just given these events a terminal disposition. A driver that
+   * keeps state per event source drops what it still holds for them here; the log rows
+   * themselves stay readable with `expired: true`, so this never deletes history.
+   */
+  retire?(events: ResourceEvent[]): Promise<void>;
 }
 /** RFC 0017 key material the host hands the library: the signing key and the public key it proves. */
 export interface KeyMaterial {

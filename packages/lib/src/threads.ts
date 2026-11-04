@@ -313,6 +313,33 @@ export class ThreadService {
     });
   }
 
+  /**
+   * Owner-side evidence for a recipient repairing its own lost grant and known rows: every
+   * membership of this node that is still active for the caller, with its notice. An acked
+   * notice is included, because the caller's rebuilding store cannot distinguish it from a
+   * notice that was never sent; a revoked membership and a superseded revision are not,
+   * because their notice id is the member revision they replaced.
+   */
+  async issued(auth: Auth, options: PageOptions = {}): Promise<Page<Grant>> {
+    if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
+    // The caller is the participant repairing its own store, not this node's owner: the scan is
+    // already restricted to memberships of this node, and every returned notice must name the
+    // caller as recipient, so no owner check applies here.
+    return this.#ctx.storage.transaction(async tx => {
+      const current = (await tx.scan<Member>(key('member', this.#ctx.node) + '/'))
+        .map(row => row.value)
+        .filter(member => member.peer === auth.actor && member.state === 'active');
+      const held: Grant[] = [];
+      for (const member of current) {
+        const notice = await tx.get<Grant>(key('notice', member.revision));
+        if (notice !== undefined && notice.recipient === auth.actor && notice.thread_ref.owner === this.#ctx.node) {
+          held.push(notice);
+        }
+      }
+      return page(sortedBy(held, grant => grant.id), options, { kind: 'issued', recipient: auth.actor }, grant => grant.id);
+    });
+  }
+
   /** Recipient side: records that the owner confirmed this grant, so it is not confirmed twice. */
   async ackGrantLocally(auth: Auth, ref: ThreadRef, id: string): Promise<void> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
@@ -363,7 +390,9 @@ export class ThreadService {
         }
       }
       if (stored !== undefined) return stored;
-      const next: Grant = { id: grant.id, recipient: this.#ctx.node, thread_ref: ref, revision: grant.revision, acked: false };
+      // A replayed notice may already have been acknowledged; carrying that fact with the
+      // repair avoids an empty confirmation round trip to an owner that already learned it.
+      const next: Grant = { id: grant.id, recipient: this.#ctx.node, thread_ref: ref, revision: grant.revision, acked: grant.acked === true };
       await tx.put(slot, next);
       return next;
     });

@@ -37,7 +37,7 @@ import {
 	type Questions,
 	type ReceiverContext,
 } from "../packages/omp-onlyne/src/decider.ts";
-import type { ContextRecord, OnlyneConfig } from "../packages/omp-onlyne/src/types.ts";
+import type { ContextRecord, OnlyneConfig } from "../packages/node-host/src/types.ts";
 import type { Action, DeliveryPlan, Entry, MsgInput, NodeId, Page, Thread, ThreadRef } from "../packages/lib/src/types.ts";
 
 const ENDPOINT = process.env.ONLYNE_JUDGE_ENDPOINT ?? "http://127.0.0.1:3425/v1/systemone";
