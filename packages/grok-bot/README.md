@@ -45,7 +45,10 @@ bunx onlyne-grok-bot ./grok-bot.json
     "key": "$GROK_BOT_WEBHOOK_KEY",
     "header": "Authorization",
     "scheme": "Bearer"
-  }
+  },
+  "trust_seeds": [
+    { "node_id": "urn:onlyne:agent:alice", "fingerprint": "0123456789abcdef" }
+  ]
 }
 ```
 
@@ -68,6 +71,7 @@ fails startup instead of posting with an empty secret.
 | `ONLYNE_NODE_ID` | Overrides `node.id` |
 | `ONLYNE_BIND` / `ONLYNE_PORT` | Overrides the listener |
 | `ONLYNE_NO_TUI=1` | JSON log on stdout instead of the trust terminal |
+| `ONLYNE_GROK_TRUST_SEEDS` | JSON array of `{ "node_id", "fingerprint" }` pins (overrides file `trust_seeds`) |
 
 The default header is `Authorization: Bearer <key>`. Set `webhook.scheme` to `""` to send the
 key as the header value with no prefix. Set `webhook.header` to any HTTP field Grok Bot expects.
@@ -187,8 +191,40 @@ for (const item of items) {
 }
 ```
 
-`wait_ms=0` is a single poll. Default long-poll is 25s. Thread ids and `/grok/reply`
+`wait_ms=0` is a single poll. Default long-poll is 25s (max 30s). The HTTP listener sets
+Bun.serve `idleTimeout` above that wait: the default Bun idle timeout is 10s and would
+otherwise reset a quiet long-poll before it returned. Thread ids and `/grok/reply`
 `thread` / `in_reply_to` rules are unchanged.
+
+Messages this grok-bot node authors (`/grok/reply`) are **not** enqueued on the webhook or
+the pull inbox. A consumer that answers every wake would otherwise loop on itself. Peer
+inbound still wakes both paths.
+
+The first message that lands on a new `grokbot:dm:` / `grokbot:group:` thread reports
+`thread_created: true` even though the node stages that thread before `admit` (the library
+would otherwise say `false` because the record already existed). `seq: "1"` is the first
+entry either way.
+
+## Headless pairing (`ONLYNE_NO_TUI`)
+
+Without a TTY the trust terminal cannot run, so a server grok-bot cannot press `[a]` to
+approve a peer. Pin **specific** peers in `trust_seeds` (or `ONLYNE_GROK_TRUST_SEEDS`):
+
+```json
+"trust_seeds": [
+  { "node_id": "urn:onlyne:agent:alice", "fingerprint": "0123456789abcdef" }
+]
+```
+
+Each pin is a node id plus the 16-hex fingerprint of **that peer's current key**. The library
+treats a matching inbound statement as already locally approved. `approvePinned()` (called at
+startup after seed discovery) also calls `trust.accept` for each pin; inspect refuses a live
+key that does not match. Peers **not** in the list stay at `invited` until a human confirms
+them on a TTY.
+
+This is not auto-accept-all. A missing fingerprint, `*`, or an empty pin is refused at
+config load. A wrong fingerprint is `unauthenticated`. Compare fingerprints out of band
+before pinning — a pin is as strong as the channel you used to copy it. Revoke still works.
 
 ## Outbound replies
 

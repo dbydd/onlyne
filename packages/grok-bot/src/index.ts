@@ -16,12 +16,13 @@ export type { GrokBotConfig, WebhookConfig } from './config.ts';
 export {
   DEFAULT_ACK_PATH, DEFAULT_EVENTS_PATH, DEFAULT_HEADER, DEFAULT_MAX_ATTEMPTS, DEFAULT_NODE_ID,
   DEFAULT_REPLY_PATH, DEFAULT_RETRY_BASE_MS, DEFAULT_SCHEME, DEFAULT_STATUS_PATH, DEFAULT_TIMEOUT_MS,
-  expandEnv, loadConfig, redactWebhook, webhookHeaderValue,
+  expandEnv, loadConfig, redactWebhook, webhookHeaderValue, parseTrustSeeds,
 } from './config.ts';
 export { deliveryId, urlForLog, webhookPayload, WebhookDispatcher, type FetchLike } from './webhook.ts';
 export {
   GrokBotPullClient, PullInbox, clampLeaseMs, clampLimit, clampWaitMs,
-  DEFAULT_PULL_LEASE_MS, DEFAULT_PULL_LIMIT, DEFAULT_PULL_WAIT_MS,
+  DEFAULT_PULL_LEASE_MS, DEFAULT_PULL_LIMIT, DEFAULT_PULL_WAIT_MS, MAX_PULL_WAIT_MS,
+  SERVE_IDLE_TIMEOUT_SEC,
   type GrokBotPullClientOptions, type GrokBotReplyBody, type PullItem, type PullRow, type PullStats,
 } from './pull.ts';
 export {
@@ -61,6 +62,11 @@ export interface GrokBotNode {
   statusLines(): Promise<string[]>;
   /** One retry pass over owed webhook rows. */
   maintain(): Promise<void>;
+  /**
+   * Approve configured `trust_seeds` whose live `/keys` fingerprint matches the pin.
+   * A mismatch is refused; peers not in the list are untouched.
+   */
+  approvePinned(): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -119,6 +125,9 @@ export async function createGrokBotNode(config: GrokBotConfig, options: GrokBotO
     storage, nodeId: owner, ...(options.now === undefined ? {} : { now: options.now }),
   });
   const wake = (entry: Entry): void => {
+    // Replies this node authors must not re-enter the webhook or pull inbox; a consumer
+    // that answers every wake would otherwise loop on itself.
+    if (entry.message.sender === owner) return;
     dispatcher.enqueue(entry);
     void pull.enqueue(entry);
   };
@@ -142,6 +151,9 @@ export async function createGrokBotNode(config: GrokBotConfig, options: GrokBotO
       alias, summary: t('context.summary'), state: 'idle',
     })) as Json,
     ...(options.keys === undefined ? {} : { keys: options.keys }),
+    ...(config.trust_seeds === undefined || config.trust_seeds.length === 0
+      ? {}
+      : { trust_seeds: config.trust_seeds }),
     decide: () => { throw new OnlyneError('decision_unavailable', t('error.decide')); },
     // Do not invent a random first-contact thread. Inbound admissions are bound to
     // grokbot:dm:<agent_id> / grokbot:group:<group_id> before admit (installGrokBotAdmit).
@@ -297,6 +309,18 @@ export async function createGrokBotNode(config: GrokBotConfig, options: GrokBotO
       ];
     },
     maintain: () => dispatcher.retryOwed(),
+    async approvePinned(): Promise<void> {
+      for (const seed of config.trust_seeds ?? []) {
+        try {
+          await node.trust.accept(node.auth, seed.node_id, seed.fingerprint);
+          out.log('grok.trust.pinned', { node: seed.node_id, fingerprint: seed.fingerprint });
+        } catch (error) {
+          out.warn('grok.trust.pin_failed', {
+            node: seed.node_id, fingerprint: seed.fingerprint, error: String(error),
+          });
+        }
+      }
+    },
     async stop(): Promise<void> {
       node.client.stopMaintenance();
     },

@@ -4,7 +4,10 @@
  */
 import { generateKeyMaterial, MemoryStorage, OnlyneError, OnlyneNode, trustPhase, type Auth, type KeyMaterial, type Plugins } from '@onlyne/lib';
 import { createLogger, startNodeHost } from '@onlyne/node-host';
-import { createGrokBotNode, grokBotThreadId, GrokBotPullClient, nodeClock, type FetchLike, type GrokBotConfig } from '../src/index.ts';
+import {
+  createGrokBotNode, grokBotThreadId, GrokBotPullClient, nodeClock, SERVE_IDLE_TIMEOUT_SEC,
+  type FetchLike, type GrokBotConfig,
+} from '../src/index.ts';
 
 let failures = 0;
 const ok = (label: string, condition: boolean): void => {
@@ -47,6 +50,7 @@ function serve(fetch: (request: Request) => Promise<Response>): {
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
+    idleTimeout: SERVE_IDLE_TIMEOUT_SEC,
     fetch: request => handler(request),
   });
   servers.push(server);
@@ -161,7 +165,7 @@ const sent = rec(await aliceNode.transport.request(GROK, 'POST', '/messages', {
   plan: { response: 'none', execution: 'existing' },
 }));
 ok('a signed POST /messages is admitted on grok-bot',
-  rec(sent?.thread_ref)?.id === aliceDm && sent?.seq === '1');
+  rec(sent?.thread_ref)?.id === aliceDm && sent?.seq === '1' && sent?.thread_created === true);
 ok('the signed message lands on grokbot:dm:<alice>',
   rec(sent?.thread_ref)?.id === aliceDm && rec(sent?.thread_ref)?.owner === GROK);
 
@@ -280,6 +284,184 @@ else process.env.ONLYNE_NO_TUI = previousNoTui;
 
 ok('this environment is non-TTY so a live TUI session is not exercised',
   process.stdin.isTTY !== true || process.stdout.isTTY !== true);
+
+// --- real-socket long-poll past Bun's 10s default idleTimeout ----------------
+
+const longBind = serve(async () => new Response('starting', { status: 503 }));
+const longGrok = await createGrokBotNode({
+  ...grokConfig,
+  server: { bind: '127.0.0.1', port: longBind.port },
+  storage_path: '/tmp/grok-bot-http-long.json',
+}, { storage: 'memory', keys: keysHook(), fetch: mockFetch });
+longBind.set(request => longGrok.fetch(request));
+closers.push(async () => { longGrok.node.client.stopMaintenance(); await longGrok.stop(); });
+const waitMs = 12_000;
+const longStarted = Date.now();
+let longOk = false;
+let longElapsed = 0;
+let longStatus = 0;
+let longItems: unknown[] = [];
+const longUrl = `http://127.0.0.1:${longBind.port}/grok/events?wait_ms=${waitMs}`;
+const curlPath = Bun.which('curl');
+try {
+  if (curlPath !== null) {
+    // curl is the production reproduction (code 000 / no body when idleTimeout cuts the socket).
+    const bodyFile = `/tmp/grok-bot-long-poll-${crypto.randomUUID()}.json`;
+    const proc = Bun.spawn([
+      curlPath, '-sS', '-o', bodyFile, '-w', '%{http_code} %{time_total}',
+      '--max-time', '20', '-H', `Authorization: Bearer ${KEY}`, longUrl,
+    ], { stdout: 'pipe', stderr: 'pipe' });
+    const [out, err, exit] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    longElapsed = Date.now() - longStarted;
+    const parts = out.trim().split(/\s+/);
+    longStatus = Number(parts[0] ?? 0);
+    if (exit === 0 && longStatus === 200) {
+      const raw = await Bun.file(bodyFile).text();
+      const longBody = rec(JSON.parse(raw.length === 0 ? '{}' : raw));
+      longItems = Array.isArray(longBody?.items) ? longBody.items : [];
+      longOk = true;
+    } else {
+      console.error(`long-poll curl exit ${exit} status ${longStatus} after ${longElapsed}ms stderr=${err} stdout=${out}`);
+    }
+  } else {
+    const longRes = await fetch(longUrl, { headers: { Authorization: `Bearer ${KEY}` } });
+    longElapsed = Date.now() - longStarted;
+    longStatus = longRes.status;
+    const longBody = rec(JSON.parse(await longRes.text()));
+    longItems = Array.isArray(longBody?.items) ? longBody.items : [];
+    longOk = true;
+  }
+} catch (error) {
+  longElapsed = Date.now() - longStarted;
+  console.error(`long-poll socket error after ${longElapsed}ms: ${error instanceof Error ? error.message : String(error)}`);
+}
+ok('an empty GET /grok/events wait_ms=12000 completes over a real socket',
+  longOk && longStatus === 200 && Array.isArray(longItems) && longItems.length === 0);
+ok('the empty long-poll waits past Bun.serve\'s default 10s idleTimeout',
+  longOk && longElapsed >= 11_000 && longElapsed < waitMs + 5_000);
+
+// --- pinned fingerprint pairing without the TUI ------------------------------
+
+const pinPeerBind = serve(async () => new Response('starting', { status: 503 }));
+const pinGrokBind = serve(async () => new Response('starting', { status: 503 }));
+const pinPeerStorage = new MemoryStorage();
+let pinPeer!: OnlyneNode;
+const pinPeerPlugins: Omit<Plugins, 'storage'> = {
+  authenticate: async request => {
+    const actor = request.headers.get('Onlyne-Actor');
+    return actor === null || actor.length === 0 ? null : { actor };
+  },
+  maintenanceClock: nodeClock(),
+  resolve: async id => {
+    const target = id === ALICE ? { node_id: id, base_url: pinPeerBind.url } : await pinPeer.discovery.resolve(id);
+    return { ...target, headers: { 'Onlyne-Actor': ALICE } };
+  },
+  keys: keysHook(),
+  decide: async () => { throw new OnlyneError('decision_unavailable', 'no decide'); },
+  inboundThread: async () => true,
+  runtime: { supports: async () => true, notify: () => {}, inject: async () => ({ context: ALICE, consumed: true, outcome: 'delivered' as const }) },
+};
+pinPeer = new OnlyneNode({
+  node_id: ALICE,
+  base_url: pinPeerBind.url,
+  authentication: ['signature'],
+  plugins: { ...pinPeerPlugins, storage: pinPeerStorage },
+  now: () => Date.now(),
+  id: () => crypto.randomUUID(),
+});
+pinPeerBind.set(request => pinPeer.fetch(request));
+pinPeer.client.runMaintenance();
+closers.push(async () => { pinPeer.client.stopMaintenance(); });
+const pinPeerId = (await pinPeer.keys.describe())!;
+const pinGrok = await createGrokBotNode({
+  ...grokConfig,
+  server: { bind: '127.0.0.1', port: pinGrokBind.port },
+  storage_path: '/tmp/grok-bot-http-pin.json',
+  trust_seeds: [{ node_id: ALICE, fingerprint: pinPeerId.fingerprint }],
+}, { storage: 'memory', keys: keysHook(), fetch: mockFetch });
+pinGrokBind.set(request => pinGrok.fetch(request));
+pinGrok.node.client.runMaintenance();
+closers.push(async () => { pinGrok.node.client.stopMaintenance(); await pinGrok.stop(); });
+await pinPeer.discovery.observe(pinGrokBind.url, 'bootstrap');
+await pinGrok.node.discovery.observe(pinPeerBind.url, 'bootstrap');
+const pinGrokId = (await pinGrok.node.keys.describe())!;
+await pinPeer.trust.request({ actor: ALICE }, GROK, pinGrokId.fingerprint);
+ok('a pinned fingerprint auto-approves an inbound exchange without the TUI',
+  trustPhase((await pinPeer.trust.entry(GROK))!) === 'exchanged'
+  && trustPhase((await pinGrok.node.trust.entry(ALICE))!) === 'exchanged');
+
+const WRONG = 'urn:onlyne:gateway:grok-wrong';
+const wrongGrokBind = serve(async () => new Response('starting', { status: 503 }));
+const wrongGrok = await createGrokBotNode({
+  ...grokConfig,
+  node: { id: WRONG },
+  server: { bind: '127.0.0.1', port: wrongGrokBind.port },
+  storage_path: '/tmp/grok-bot-http-wrong-pin.json',
+  trust_seeds: [{ node_id: ALICE, fingerprint: 'aaaaaaaaaaaaaaaa' }],
+}, { storage: 'memory', keys: keysHook(), fetch: mockFetch });
+wrongGrokBind.set(request => wrongGrok.fetch(request));
+wrongGrok.node.client.runMaintenance();
+closers.push(async () => { wrongGrok.node.client.stopMaintenance(); await wrongGrok.stop(); });
+await pinPeer.discovery.observe(wrongGrokBind.url, 'bootstrap');
+await wrongGrok.node.discovery.observe(pinPeerBind.url, 'bootstrap');
+const wrongId = (await wrongGrok.node.keys.describe())!;
+let pinMismatch = false;
+try {
+  await pinPeer.trust.request({ actor: ALICE }, WRONG, wrongId.fingerprint);
+} catch (error) {
+  pinMismatch = error instanceof OnlyneError;
+}
+const wrongPhase = (await wrongGrok.node.trust.entry(ALICE));
+ok('a pinned fingerprint that does not match is refused, not auto-accepted',
+  pinMismatch && (wrongPhase === undefined || trustPhase(wrongPhase) !== 'exchanged'));
+
+// --- webhook retry against a real failing HTTP endpoint ----------------------
+
+let wakeStatus = 503;
+let wakeHits = 0;
+const wakeServer = Bun.serve({
+  hostname: '127.0.0.1',
+  port: 0,
+  idleTimeout: SERVE_IDLE_TIMEOUT_SEC,
+  fetch: () => {
+    wakeHits += 1;
+    return new Response(null, { status: wakeStatus });
+  },
+});
+servers.push(wakeServer);
+const retryGrokBind = serve(async () => new Response('starting', { status: 503 }));
+const retryGrok = await createGrokBotNode({
+  ...grokConfig,
+  server: { bind: '127.0.0.1', port: retryGrokBind.port },
+  storage_path: '/tmp/grok-bot-http-retry.json',
+  webhook: {
+    ...grokConfig.webhook,
+    url: `http://127.0.0.1:${wakeServer.port}/wake`,
+    timeout_ms: 200,
+    max_attempts: 6,
+    retry_base_ms: 20,
+  },
+}, { storage: 'memory', keys: keysHook() });
+retryGrokBind.set(request => retryGrok.fetch(request));
+closers.push(async () => { retryGrok.node.client.stopMaintenance(); await retryGrok.stop(); });
+await retryGrok.node.messages.admit({ actor: ALICE }, {
+  idempotency_key: crypto.randomUUID(),
+  retry_until: new Date(Date.now() + 60_000).toISOString(),
+  message: { id: 'retry-01', sender: ALICE, delivery_kind: 'note', msg: 'retry me' },
+  target_endpoint: GROK,
+  plan: { response: 'none', execution: 'existing' },
+});
+ok('a real 503 webhook is retried', await waitFor(() => wakeHits >= 1, 2_000));
+wakeStatus = 204;
+ok('webhook retry against a real endpoint eventually delivers', await waitFor(async () => {
+  await retryGrok.maintain();
+  const snap = await retryGrok.dispatcher.snapshot();
+  return snap.queue.delivered >= 1;
+}, 3_000));
 
 for (const close of closers.splice(0)) await close();
 for (const server of servers.splice(0)) server.stop(true);

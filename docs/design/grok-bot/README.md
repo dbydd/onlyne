@@ -69,6 +69,14 @@ flowchart LR
 
 实现：`PullInbox` + `GrokBotPullClient`（`packages/grok-bot`）。设备不需要 Onlyne 身份钥，只需要账户 sender key。
 
+长轮询默认 25s、上限 30s。Bun.serve 默认 `idleTimeout` 是 10 秒，安静的 GET 在写出响应之前会被掐断，所以监听器把 idleTimeout 设到上限以上。本节点自己的 `/grok/reply` **不会**再进 webhook / pull 队列，避免消费方对每条 wake 再回复形成自环。
+
+第一条落到新 `grokbot:dm:` / `grokbot:group:` 的消息回执里 `thread_created` 为 true（节点会先 create 稳定 thread 再 admit，库本身会记 false；宿主把 seq 1 的 grokbot thread 视为新会话）。
+
+## 无 TUI 配对
+
+`ONLYNE_NO_TUI=1` 或非 TTY 时信任终端不能按 `[a]`。配置 `trust_seeds`（或环境变量 `ONLYNE_GROK_TRUST_SEEDS`）钉扎 **具体** 对端：`node_id` + 该对端当前公钥的 16 位 hex fingerprint。指纹一致才本地批准；不一致拒绝；名单外的对端仍保持 invited，需要人在 TTY 上确认。没有“全接受”。指纹要在带外核对后再写入；钉扎强度等于复制指纹的那条通道。
+
 ## `/grok/reply` 如何继续同一会话
 
 支持的做法是把 webhook 里的 `thread` 和 `in_reply_to` 原样带回。`to` 填本节点 id（webhook 的 `node_id`），因为 thread 由 grok-bot 拥有、由本节点接纳。

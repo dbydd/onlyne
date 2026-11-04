@@ -8,8 +8,13 @@ export { DEFAULT_ACK_PATH, DEFAULT_EVENTS_PATH } from './config.ts';
 export const DEFAULT_PULL_WAIT_MS = 25_000;
 export const DEFAULT_PULL_LEASE_MS = 30_000;
 export const DEFAULT_PULL_LIMIT = 16;
-const MAX_WAIT_MS = 30_000;
+export const MAX_PULL_WAIT_MS = 30_000;
 const MAX_LIMIT = 50;
+/**
+ * Bun.serve idleTimeout is seconds (default 10, max 255). A quiet long-poll writes no bytes
+ * until it returns, so this must exceed MAX_PULL_WAIT_MS or GET /grok/events is reset.
+ */
+export const SERVE_IDLE_TIMEOUT_SEC = Math.min(255, Math.ceil(MAX_PULL_WAIT_MS / 1000) + 5);
 const PREFIX = 'grok/pull/';
 
 export type PullState = 'owed' | 'leased' | 'acked';
@@ -43,7 +48,7 @@ export function clampWaitMs(value: unknown, fallback = DEFAULT_PULL_WAIT_MS): nu
   if (value === undefined || value === null || value === '') return fallback;
   const parsed = typeof value === 'string' ? Number(value) : value;
   if (typeof parsed !== 'number' || !Number.isFinite(parsed) || parsed < 0) return fallback;
-  return Math.min(MAX_WAIT_MS, Math.floor(parsed));
+  return Math.min(MAX_PULL_WAIT_MS, Math.floor(parsed));
 }
 
 export function clampLimit(value: unknown, fallback = DEFAULT_PULL_LIMIT): number {

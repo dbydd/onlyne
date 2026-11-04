@@ -173,6 +173,14 @@ export async function bindGrokBotInbound(node: OnlyneNode, owner: NodeId, reques
 /** Host-side rewrite of `messages.admit` so HTTP and programmatic admissions share the bind. */
 export function installGrokBotAdmit(node: OnlyneNode, owner: NodeId): void {
   const original = node.messages.admit.bind(node.messages);
-  node.messages.admit = async (auth: Auth, request: SendRequest) =>
-    original(auth, await bindGrokBotInbound(node, owner, request));
+  node.messages.admit = async (auth: Auth, request: SendRequest) => {
+    const receipt = await original(auth, await bindGrokBotInbound(node, owner, request));
+    // The stable thread is created before admit, so the library's first-contact flag is
+    // false. Seq 1 on a grokbot:dm/group id is still the first message of that conversation.
+    if (receipt.thread_created === true) return receipt;
+    if (receipt.seq === '1' && parseGrokBotThreadId(receipt.thread_ref.id) !== undefined) {
+      return { ...receipt, thread_created: true };
+    }
+    return receipt;
+  };
 }

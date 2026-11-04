@@ -159,6 +159,9 @@ webhook on `/grok/reply` to continue the same conversation.
 A device behind NAT does not listen. It long-polls `GET /grok/events` with the same sender key,
 acks with `POST /grok/events/ack`, and replies on `/grok/reply`. Delivery is at-least-once:
 unacked leases are offered again after they expire. The cloud webhook POST stays available.
+This node's own replies are not re-queued as wakes. Headless pairing (`ONLYNE_NO_TUI=1`) uses
+`trust_seeds` / `ONLYNE_GROK_TRUST_SEEDS`: pin specific `node_id` + 16-hex fingerprint, never
+accept-all. A mismatched live key is refused.
 
 ## Onlyne MCP server
 

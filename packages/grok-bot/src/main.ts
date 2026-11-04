@@ -3,7 +3,7 @@ import { createLogger, createNodeKey, startNodeHost, type NodeHostOptions } from
 import { resolveLocale, setLocale } from '@onlyne/node-host/i18n';
 import { dirname, join } from 'node:path';
 import { loadConfig } from './config.ts';
-import { createGrokBotNode, nodeClock, type GrokBotNode } from './index.ts';
+import { createGrokBotNode, nodeClock, SERVE_IDLE_TIMEOUT_SEC, type GrokBotNode } from './index.ts';
 import { t } from './node-text.ts';
 
 const PUSH_INTERVAL_MS = 2_000;
@@ -22,7 +22,12 @@ const { log, ring } = logger;
 
 let handler: (request: Request) => Promise<Response> = async () =>
   new Response(t('startup.pending'), { status: 503 });
-const server = Bun.serve({ hostname: config.server.bind, port: config.server.port, fetch: request => handler(request) });
+const server = Bun.serve({
+  hostname: config.server.bind,
+  port: config.server.port,
+  idleTimeout: SERVE_IDLE_TIMEOUT_SEC,
+  fetch: request => handler(request),
+});
 config.server.port = server.port ?? config.server.port;
 
 const keys = await createNodeKey(config.node.id);
@@ -40,6 +45,7 @@ const hostOptions: NodeHostOptions & { status?: () => Promise<string[]> } = {
   status: () => grok.statusLines(),
 };
 const host = await startNodeHost(hostOptions);
+await grok.approvePinned();
 
 const clock = nodeClock();
 let timer: unknown;
@@ -70,5 +76,7 @@ log('grok.bot.listening', {
   endpoint,
   reply: config.reply_path,
   events: config.events_path,
+  idleTimeout: SERVE_IDLE_TIMEOUT_SEC,
+  pins: config.trust_seeds?.length ?? 0,
   webhook: config.webhook.url.replace(/\?.*$/, ''),
 });

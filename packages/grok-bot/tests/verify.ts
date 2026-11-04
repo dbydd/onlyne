@@ -127,6 +127,58 @@ const fileText = await Bun.file(configPath).text();
 ok('the committed-shape config file does not contain the live key',
   !fileText.includes(KEY) && (fileText.includes('$GROK_BOT_WEBHOOK_KEY') || fileText.includes('${GROK_BOT_WEBHOOK_KEY}')));
 
+const pinPath = join(dir, 'grok-bot-pin.json');
+await writeFile(pinPath, JSON.stringify({
+  node: { id: GROK },
+  server: { bind: '127.0.0.1', port: 0 },
+  storage: { path: join(dir, 'store.json') },
+  webhook: { url: '$GROK_BOT_WEBHOOK_URL', key: '${GROK_BOT_WEBHOOK_KEY}' },
+  trust_seeds: [{ node_id: SENDER, fingerprint: '0123456789abcdef' }],
+}));
+const pinned = await loadConfig(pinPath, {
+  GROK_BOT_WEBHOOK_URL: 'http://127.0.0.1:9/wake',
+  GROK_BOT_WEBHOOK_KEY: KEY,
+});
+ok('loadConfig reads pinned trust_seeds',
+  pinned.trust_seeds?.length === 1
+  && pinned.trust_seeds[0]?.node_id === SENDER
+  && pinned.trust_seeds[0]?.fingerprint === '0123456789abcdef');
+
+const envPinned = await loadConfig(configPath, {
+  GROK_BOT_WEBHOOK_URL: 'http://127.0.0.1:9/wake',
+  GROK_BOT_WEBHOOK_KEY: KEY,
+  ONLYNE_GROK_TRUST_SEEDS: JSON.stringify([{ node_id: BOB, fingerprint: 'AABBCCDDEEFF0011' }]),
+});
+ok('ONLYNE_GROK_TRUST_SEEDS overrides pins and lowercases the fingerprint',
+  envPinned.trust_seeds?.length === 1
+  && envPinned.trust_seeds[0]?.node_id === BOB
+  && envPinned.trust_seeds[0]?.fingerprint === 'aabbccddeeff0011');
+
+try {
+  await loadConfig(pinPath, {
+    GROK_BOT_WEBHOOK_URL: 'http://127.0.0.1:9/wake',
+    GROK_BOT_WEBHOOK_KEY: KEY,
+    ONLYNE_GROK_TRUST_SEEDS: JSON.stringify([{ node_id: SENDER, fingerprint: '*' }]),
+  });
+  ok('a wildcard fingerprint is refused', false);
+} catch (error) {
+  ok('a wildcard fingerprint is refused', error instanceof OnlyneError);
+}
+
+try {
+  await loadConfig(configPath, {
+    GROK_BOT_WEBHOOK_URL: 'http://127.0.0.1:9/wake',
+    GROK_BOT_WEBHOOK_KEY: KEY,
+    ONLYNE_GROK_TRUST_SEEDS: JSON.stringify([
+      { node_id: SENDER, fingerprint: '0123456789abcdef' },
+      { node_id: SENDER, fingerprint: '0123456789abcde0' },
+    ]),
+  });
+  ok('a duplicate pin node_id is refused', false);
+} catch (error) {
+  ok('a duplicate pin node_id is refused', error instanceof OnlyneError);
+}
+
 // --- inbound POST -----------------------------------------------------------
 
 const posts: Posted[] = [];
@@ -183,21 +235,21 @@ const admitOn = async (
   id: string,
   msg: string,
   meta?: Record<string, unknown>,
-): Promise<void> => {
-  await target.node.messages.admit({ actor: sender }, {
-    ...mut(),
-    message: {
-      id, sender, delivery_kind: 'note', msg,
-      ...(meta === undefined ? {} : { meta: meta as never }),
-    },
-    target_endpoint: GROK,
-    plan: { response: 'none', execution: 'existing' },
-  });
-};
-const admit = async (id: string, msg: string, meta?: Record<string, unknown>): Promise<void> =>
+) => target.node.messages.admit({ actor: sender }, {
+  ...mut(),
+  message: {
+    id, sender, delivery_kind: 'note', msg,
+    ...(meta === undefined ? {} : { meta: meta as never }),
+  },
+  target_endpoint: GROK,
+  plan: { response: 'none', execution: 'existing' },
+});
+const admit = (id: string, msg: string, meta?: Record<string, unknown>) =>
   admitOn(grok, SENDER, id, msg, meta);
 
-await admit('msg-01', 'hello grok');
+const firstReceipt = await admit('msg-01', 'hello grok');
+ok('the first message on a new grokbot:dm thread reports thread_created',
+  firstReceipt.thread_created === true && firstReceipt.seq === '1');
 ok('an inbound admission POSTs the webhook', await waitFor(() => posts.length >= 1) && posts.length >= 1);
 
 const first = posts[0];
@@ -225,6 +277,12 @@ await admit('msg-01', 'hello grok');
 const afterDup = posts.length;
 await settle(80);
 ok('a duplicate admission does not POST a second webhook', posts.length === afterDup);
+
+const secondReceipt = await admit('msg-02-created', 'still alice');
+ok('a later message on the same grokbot:dm thread reports thread_created false',
+  secondReceipt.thread_created === false && secondReceipt.seq !== '1');
+ok('the second message also POSTs the webhook',
+  await waitFor(() => posts.some(post => post.body.message_id === 'msg-02-created')));
 
 // --- retries ----------------------------------------------------------------
 
@@ -478,6 +536,11 @@ ok('a reply that brings back the inbound thread lands on that thread_ref',
   rec(sentReceipt?.thread_ref)?.owner === GROK
   && rec(sentReceipt?.thread_ref)?.id === aliceDm
   && rec(sentReceipt?.thread_ref)?.id === inboundThread?.id);
+ok('a /grok/reply is not posted back as a webhook wake',
+  posts.every(post => post.body.message_id !== 'reply-ack' && post.body.sender !== GROK));
+ok('a /grok/reply is not offered on the pull inbox',
+  !(await replyNode.pull.pull({ wait_ms: 0 })).some(item => rec(item.payload)?.sender === GROK
+    || rec(item.payload)?.message_id === 'reply-ack'));
 
 const continued = await replyNode.node.messages.list(replyNode.node.auth, { owner: GROK, id: aliceDm }, {
   attention: 'thread', page_size: 50,
@@ -605,6 +668,35 @@ if (clientHit !== undefined) {
 const pullStatus = await pullNode.status();
 ok('status reports the pull inbox separately from the webhook queue',
   pullStatus.pull.acked >= 1 && pullStatus.events_path === '/grok/events');
+
+ok('GrokBotPullClient reply does not re-queue a self-authored wake',
+  !(await pullNode.pull.pull({ wait_ms: 0 })).some(item => rec(item.payload)?.sender === GROK
+    || rec(item.payload)?.message_id === 'pull-client-ack'));
+
+webhookStatus = 503;
+const persistPath = join(dir, `persist-${crypto.randomUUID()}.json`);
+const persistA = await createGrokBotNode({ ...config(), storage_path: persistPath }, { fetch: mockFetch, log });
+await admitOn(persistA, SENDER, 'persist-01', 'keep me across restart');
+ok('owed webhook and pull rows exist before restart', await waitFor(async () => {
+  const pull = await persistA.pull.snapshot();
+  const web = await persistA.dispatcher.snapshot();
+  return pull.owed + pull.leased >= 1 && web.queue.owed + web.queue.failed >= 1;
+}));
+await persistA.stop();
+const persistB = await createGrokBotNode({ ...config(), storage_path: persistPath }, { fetch: mockFetch, log });
+const pullB = await persistB.pull.snapshot();
+const webB = await persistB.dispatcher.snapshot();
+ok('owed pull rows survive a process restart', pullB.owed + pullB.leased >= 1);
+ok('owed webhook rows survive a process restart', webB.queue.owed + webB.queue.failed >= 1);
+const persistPulled = await persistB.pull.pull({ wait_ms: 0 });
+ok('the persisted pull row is the same inbound',
+  persistPulled.some(item => rec(item.payload)?.message_id === 'persist-01'));
+webhookStatus = 204;
+ok('webhook retry after restart delivers the persisted row', await waitFor(async () => {
+  await persistB.maintain();
+  return (await persistB.dispatcher.snapshot()).queue.delivered >= 1;
+}));
+await persistB.stop();
 
 await pullNode.stop();
 await isolated.stop();

@@ -1,4 +1,4 @@
-import { OnlyneError, type Json, type NodeId } from '@onlyne/lib';
+import { OnlyneError, type Json, type NodeId, type TrustSeed } from '@onlyne/lib';
 import type { Locale } from '@onlyne/node-host/i18n';
 import { t } from './node-text.ts';
 
@@ -40,6 +40,12 @@ export interface GrokBotConfig {
   events_path: string;
   /** POST ack path for pulled wakes. Default `/grok/events/ack`. */
   ack_path: string;
+  /**
+   * Pinned peers this node may approve without the trust terminal. Each row is a node id
+   * plus the 16-hex fingerprint of that peer's current key. A live key that does not match
+   * is refused; peers not listed still need a human (or a later pin). There is no accept-all.
+   */
+  trust_seeds?: TrustSeed[];
   peers?: string[];
   contexts?: string[];
   language?: Locale;
@@ -124,6 +130,50 @@ function parseUrl(value: string, field: string): string {
   return value;
 }
 
+const FINGERPRINT = /^[0-9a-f]{16}$/;
+
+function parseFingerprint(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !FINGERPRINT.test(value.trim().toLowerCase())) {
+    throw new OnlyneError('invalid_request', t('config.trustFingerprint', { field }));
+  }
+  return value.trim().toLowerCase();
+}
+
+/** Parses pinned `{ node_id, fingerprint }` rows. Missing fingerprint is refused, never a wildcard. */
+export function parseTrustSeeds(value: Json | undefined, field = 'trust_seeds'): TrustSeed[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new OnlyneError('invalid_request', t('config.trustSeeds', { field }));
+  const seeds: TrustSeed[] = [];
+  const seen = new Set<string>();
+  for (const [index, entry] of value.entries()) {
+    const object = rec(entry);
+    if (object === undefined) throw new OnlyneError('invalid_request', t('config.trustSeeds', { field }));
+    const node_id = typeof object.node_id === 'string' ? object.node_id.trim() : '';
+    if (node_id.length === 0) {
+      throw new OnlyneError('invalid_request', t('config.trustSeeds', { field: `${field}[${index}].node_id` }));
+    }
+    const fingerprint = parseFingerprint(object.fingerprint, `${field}[${index}].fingerprint`);
+    if (seen.has(node_id)) throw new OnlyneError('invalid_request', t('config.trustDuplicate', { node: node_id }));
+    seen.add(node_id);
+    seeds.push({ node_id, fingerprint });
+  }
+  return seeds;
+}
+
+function rec(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function parseEnvJson(value: string, field: string): Json {
+  try {
+    return JSON.parse(value) as Json;
+  } catch {
+    throw new OnlyneError('invalid_request', t('config.trustSeeds', { field }));
+  }
+}
+
 function parsePath(value: Json | undefined, fallback: string, field: string): string {
   if (value === undefined) return fallback;
   if (typeof value !== 'string' || !value.startsWith('/')) {
@@ -201,6 +251,10 @@ export async function loadConfig(path: string, env: Record<string, string | unde
   if (env.ONLYNE_BIND !== undefined) server.bind = env.ONLYNE_BIND;
   if (env.ONLYNE_PORT !== undefined) server.port = env.ONLYNE_PORT;
   const owner = typeof node.id === 'string' && node.id.length > 0 ? node.id : DEFAULT_NODE_ID;
+  const trustRaw = env.ONLYNE_GROK_TRUST_SEEDS !== undefined
+    ? parseEnvJson(env.ONLYNE_GROK_TRUST_SEEDS, 'ONLYNE_GROK_TRUST_SEEDS')
+    : raw.trust_seeds;
+  const trust_seeds = parseTrustSeeds(trustRaw);
   return {
     node: { id: owner },
     server: {
@@ -212,6 +266,7 @@ export async function loadConfig(path: string, env: Record<string, string | unde
     reply_path: parsePath(raw.reply_path, DEFAULT_REPLY_PATH, 'reply_path'),
     events_path: parsePath(raw.events_path, DEFAULT_EVENTS_PATH, 'events_path'),
     ack_path: parsePath(raw.ack_path, DEFAULT_ACK_PATH, 'ack_path'),
+    ...(trust_seeds === undefined || trust_seeds.length === 0 ? {} : { trust_seeds }),
     ...(Array.isArray(raw.peers)
       ? { peers: raw.peers.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0) }
       : {}),
