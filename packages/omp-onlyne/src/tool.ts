@@ -80,8 +80,17 @@ export function registerMsgTool(pi: ExtensionAPI): void {
 						details: { result: entry },
 					};
 				}
-				if (typeof parsed.data.meta?.draft_id === "string") {
-					const result = await sendDraft(runtime, ctx, parsed.data.meta.draft_id, signal);
+				const draftId = typeof parsed.data.meta?.draft_id === "string" ? parsed.data.meta.draft_id : undefined;
+				// `send_draft` names the act, not the row: the draft is found by the message it
+				// answers, or by the newest one this session created. `meta.draft_id` alone keeps
+				// working because the handoff from a drafting child reports exactly that id.
+				if (op === "send_draft" || draftId !== undefined) {
+					const result = await sendDraft(runtime, ctx, {
+						...(draftId === undefined ? {} : { id: draftId }),
+						...(parsed.data.meta?.in_reply_to === undefined
+							? {}
+							: { in_reply_to: parsed.data.meta.in_reply_to as Json }),
+					}, signal);
 					recordAwaitResult(pi, toolCallId, result, ctx);
 					return { content: [{ type: "text", text: `${summary(result, spelling(parsed.data.meta?.to))}\n\n${JSON.stringify(visibleResult(result), null, 2)}` }], details: { result: visibleResult(result) } };
 				}

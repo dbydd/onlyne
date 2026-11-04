@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { MemoryStorage, OnlyneError } from "@onlyne/lib";
 import type { TrustEntry } from "@onlyne/lib";
-import { DEFAULT_ACQUISITION, type AcquisitionPolicy } from "../src/acquire.ts";
+import { DEFAULT_ACQUISITION, type AcquisitionPolicy } from "@onlyne/node-host/acquire";
 import {
 	AcquisitionLog,
 	approvePeer,

@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { Entry, Page, Thread, ThreadRef } from "@onlyne/lib";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { fitState, needsReplyOf, JudgeDecider, knownPeers, reuseThread, type Answers, type DeciderDeps, type DecisionScope, type PeerRecord, type Questions } from "../src/decider.ts";
-import type { ContextRegistry } from "../src/store.ts";
-import type { ContextRecord, OnlyneConfig } from "../src/types.ts";
+import type { ContextRegistry } from "@onlyne/node-host/store";
+import type { ContextRecord, OnlyneConfig } from "@onlyne/node-host/types";
 
 const node = "urn:onlyne:agent:a";
 const other = "urn:onlyne:agent:b";

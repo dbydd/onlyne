@@ -1,63 +1,6 @@
-import type { MessageRef, NodeId, ThreadRef, TrustPhase, TrustSeed } from "@onlyne/lib";
-import type { Locale } from "@onlyne/node-host/i18n";
-import type { AcquisitionPolicy } from "./acquire.ts";
-
-/**
- * Project-scoped configuration in `<project>/.onlyne/config.toml`.
- *
- * Delivery decisions are made by OMP's `judge` model role, so no model
- * endpoint or model name belongs here.
- */
-export interface OnlyneConfig {
-	path: string;
-	language?: Locale;
-	/** Protocol membership, independent from the node identity. */
-	region: string;
-	node: {
-		id: NodeId;
-		key_ref?: string;
-		/** Where the node identity lives: the project's `.onlyne/keys`, the user's key store, or no key at all. */
-		key_scope?: "project" | "global" | "none";
-	};
-	server: {
-		bind: string;
-		/**
-		 * The port this node answers on. Absent asks the operating system for one, and the
-		 * chosen port is written back here: a node whose address changes on every start
-		 * leaves every peer that recorded it calling a port nobody serves.
-		 */
-		port?: number;
-		/** The externally reachable base URL when a reverse proxy fronts the node. */
-		public_url?: string;
-	};
-	threads: {
-		page_size: number;
-	};
-	/** Bootstrap contact seeds the node reaches at every start. */
-	discovery?: {
-		seeds?: string[];
-	};
-	/** Pinned peer fingerprints; an arriving key that matches is trusted without a prompt. */
-	trust?: TrustSeed[];
-	/** RFC 0018 §2: peers this node may approve without a human confirming first. */
-	acquisition?: AcquisitionPolicy;
-}
-
-/** One execution context the plugin registered for a delivered message. */
-export interface ContextRecord {
-	alias: string;
-	node_id: NodeId;
-	main_agent_id: string;
-	source?: { sender: NodeId; id: string };
-	agent_id?: string;
-	session_file?: string;
-	parent_id?: string;
-	thread_ref?: ThreadRef;
-	summary: string;
-	state: "unbound" | "idle" | "running" | "parked" | "lost";
-	created_at: string;
-	bound_at?: string;
-}
+import type { MessageRef, NodeId, ThreadRef, TrustPhase } from "@onlyne/lib";
+import type { AcquirePolicy } from "@onlyne/node-host/acquire";
+import type { ContextRecord } from "@onlyne/node-host/types";
 
 /** One row of the viewer's queue page. */
 export interface QueueItem {
@@ -118,6 +61,56 @@ export interface ViewerContact {
 	last_seen: string;
 }
 
+/** RFC 0018 §5: the acquisition settings this runtime actually runs with, read back for the panel. */
+export interface AcquisitionSnapshot {
+	policy: AcquirePolicy;
+	allow: string[];
+	/**
+	 * The discovery layer's separate loopback switch (RFC 0018 §5.1). It decides what may enter
+	 * the catalog, not what may be approved without a human, and the panel shows both values
+	 * together so loosening one is never mistaken for loosening the other.
+	 */
+	allow_loopback: boolean;
+}
+
+/**
+ * One acquisition audit row. The actors stay distinguishable (RFC 0018 §5): a human's panel
+ * action, an agent's decision, a configured seed's pre-authorization, and the policy's own
+ * automatic verdict. `allowed` is the verdict the gate reached; `override` marks a human
+ * approval that committed although the policy refused it, and a seed authorization that
+ * bypasses the policy by design.
+ */
+export interface AcquisitionAuditEntry {
+	at: string;
+	actor: "human" | "agent" | "seed" | "policy";
+	action: string;
+	node_id?: NodeId;
+	fingerprint?: string;
+	/** The address the peer's statement arrived from, as this host observed it. */
+	observed?: string;
+	/** The address the peer wrote into its own statement. */
+	declared?: string;
+	policy?: AcquirePolicy;
+	allowed?: boolean;
+	reason?: string;
+	override?: boolean;
+	/** The configuration file a seed authorization came from. */
+	source?: string;
+}
+
+/**
+ * One trust row with both addresses the panel needs. `base_url` is what the peer declared;
+ * `observed` is where its last statement actually arrived from, and the two need not agree
+ * (RFC 0018 §2.1).
+ */
+export interface ViewerTrustRow {
+	node_id: NodeId;
+	fingerprint: string;
+	phase: TrustPhase;
+	base_url: string;
+	observed?: string;
+}
+
 /** Read-only snapshot the viewer renders. */
 export interface ViewerSnapshot {
 	region?: string;
@@ -129,12 +122,11 @@ export interface ViewerSnapshot {
 	contacts: ViewerContact[];
 	discovery_error?: string;
 	/** Every trust row, projected through `trustPhase`: the only stage this package renders. */
-	trust?: Array<{
-		node_id: NodeId;
-		fingerprint: string;
-		phase: TrustPhase;
-		base_url: string;
-	}>;
+	trust?: ViewerTrustRow[];
+	/** RFC 0018 §5: the acquisition panel's current settings. */
+	acquisition?: AcquisitionSnapshot;
+	/** The persisted acquisition audit, newest first; the panel renders the first 20. */
+	audit?: AcquisitionAuditEntry[];
 	identity?: { public_key: string; fingerprint: string };
 }
 

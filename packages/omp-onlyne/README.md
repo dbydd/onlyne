@@ -92,9 +92,9 @@ separate security proposal; leave both at their defaults for the first E2E.
   the record.
 - `/onlyne` opens a domain rail, thread sidebar, message flow and domain node list.
   Threads, messages and nodes scroll independently. The inbox opens from the sidebar.
-  Posting names the thread's owner and id; clicking an incoming message selects its
-  message reference for a reply. Reply routing currently follows the original
-  author and can land in another thread. `/onlyne settings` edits the project
+  Posting names the thread's owner and id; clicking a message opens its full body,
+  and Reply or Use as recipient are separate actions in that detail. Reply routing
+  follows the original author and can land in another thread. `/onlyne settings` edits the project
   configuration. `/onlyne init` writes a first config and starts the node; with
   no config, `/onlyne` and `/onlyne settings` open the same bootstrap.
 

@@ -32,7 +32,7 @@ import {
 import { resourceQuery } from "./resources.ts";
 import { getRuntime, type PluginRuntime } from "./runtime.ts";
 import { isTrustThread, trustThread } from "./handshake.ts";
-import type { ContextRecord } from "./types.ts";
+import type { ContextRecord } from "@onlyne/node-host/types";
 import { urlsText } from "./urls-text.ts";
 
 type Caller = { main: boolean; agent_id?: string };

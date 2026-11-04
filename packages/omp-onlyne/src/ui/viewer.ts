@@ -16,9 +16,18 @@ import {
 	text as textNode,
 } from "@oh-my-pi/pi-tui";
 import { normalizeServiceUrl, shortNodeId } from "../config.ts";
-import { getRuntime } from "../runtime.ts";
+import { DEFAULT_ACQUISITION, parseAllowBlock, type AcquirePolicy } from "@onlyne/node-host/acquire";
+import { getRuntime, type PluginRuntime } from "../runtime.ts";
 import { runDecision } from "../decider.ts";
-import type { OnlyneStatus, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "../types.ts";
+import type {
+	AcquisitionAuditEntry,
+	AcquisitionSnapshot,
+	OnlyneStatus,
+	ViewerDiscovery,
+	ViewerMessage,
+	ViewerSnapshot,
+	ViewerThread,
+} from "../types.ts";
 import { ageText, clockText, fit, oneLine, shortAlias, sinceText } from "./format.ts";
 import { type ViewerTextKey, t } from "./viewer-text.ts";
 
@@ -94,7 +103,7 @@ const PHASE_SHORT: Record<TrustPhase, ViewerTextKey> = {
 
 interface Peer {
 	record: ViewerDiscovery;
-	trust?: { phase: TrustPhase; fingerprint: string };
+	trust?: { phase: TrustPhase; fingerprint: string; observed?: string };
 }
 
 /**
@@ -112,10 +121,47 @@ interface Invite {
 	node_id: string;
 	fingerprint: string;
 	base_url: string;
+	observed?: string;
 }
 
-/** What the main column shows: one thread, or the queue waiting on this node. */
-type View = { kind: "thread"; alias: string } | { kind: "inbox" };
+/** What the main column shows: one thread, the queue waiting on this node, or the trust rules. */
+type View = { kind: "thread"; alias: string } | { kind: "inbox" } | { kind: "trust" };
+
+/** The chrome tones this surface paints; every one is a prop value `node()` accepts. */
+type SurfaceTone = "accent" | "info" | "success" | "warning" | "error" | "muted";
+
+/** RFC 0018 §5: the ring says where the exchange stands; selection is a separate background. */
+const CANDIDATE_TONE: Record<TrustPhase, SurfaceTone> = {
+	exchanged: "success",
+	requested: "info",
+	invited: "info",
+	revoked: "error",
+};
+
+/** The newest decisions the panel lists; the logger keeps the durable record. */
+const AUDIT_LIMIT = 20;
+
+const POLICY_TEXT: Record<AcquisitionSnapshot["policy"], ViewerTextKey> = {
+	all: "trustpage.policy.all",
+	segment: "trustpage.policy.segment",
+	none: "trustpage.policy.none",
+};
+
+const POLICY_VALUES: readonly AcquirePolicy[] = ["all", "segment", "none"];
+
+const AUDIT_ACTOR: Record<AcquisitionAuditEntry["actor"], ViewerTextKey> = {
+	human: "trustpage.actor.human",
+	agent: "trustpage.actor.agent",
+	seed: "trustpage.actor.seed",
+	policy: "trustpage.actor.policy",
+};
+
+const AUDIT_TONE: Record<AcquisitionAuditEntry["actor"], SurfaceTone> = {
+	human: "accent",
+	agent: "info",
+	seed: "warning",
+	policy: "muted",
+};
 
 /** A described node with a scroll request attached; `node()` only builds the wire shape. */
 function scrolling(described: NativeNode, scroll: NativeScroll): NativeNode {
@@ -165,9 +211,19 @@ export class OnlyneViewer implements Component {
 	/** Bumped to ask the terminal to scroll the message list to its newest row. */
 	private messageScroll = 0;
 	private messageScrollBy: NativeScroll["by"] = "end";
+	/** The message opened for full reading; target selection is its own action. */
+	private opened: ViewerMessage | undefined;
+	/** A policy change restarts the node, so one runs at a time. */
+	private policyBusy = false;
+	/** The allow set being edited in the trust page. */
+	private allowEditing = false;
+	private allowEditor: Editor | undefined;
+	private allowDraft = "";
 	private notice: { text: string; error: boolean } | undefined;
 	private noticeTimer: Timer | undefined;
 	private unsubscribe: (() => void) | undefined;
+	/** The runtime instance the change subscription belongs to; a restart replaces it. */
+	private watched: PluginRuntime | undefined;
 	private described: NativeNode | undefined;
 	private describedKey: string | undefined;
 	private rendered: { key: string; lines: readonly string[] } | undefined;
@@ -190,8 +246,17 @@ export class OnlyneViewer implements Component {
 		private readonly signal: AbortSignal,
 		private readonly rows: () => number = () => 40,
 	) {
+		this.bindRuntime();
 		void this.reload();
-		this.unsubscribe = getRuntime()?.onChange(() => {
+	}
+
+	/** A config save restarts the node: the old runtime stops notifying, so bind the new one. */
+	private bindRuntime(): void {
+		const runtime = getRuntime();
+		if (runtime === this.watched) return;
+		this.unsubscribe?.();
+		this.watched = runtime;
+		this.unsubscribe = runtime?.onChange(() => {
 			if (this.disposed || this.signal.aborted) return;
 			void this.reload();
 		});
@@ -205,8 +270,54 @@ export class OnlyneViewer implements Component {
 		this.requestRender();
 	}
 
+	/**
+	 * The rows the described sheet's body may draw: the fullscreen frame spends one row on
+	 * the title and one on the inset around the columns.
+	 */
+	private bodyRows(): number {
+		return Math.max(8, this.rows() - 2);
+	}
+
+	/**
+	 * A list inside a column needs its own height cap: `grow` alone expands to the content,
+	 * so a long thread pushes the composer past the pane and no scroller exists to page.
+	 * The caps below subtract every fixed block that shares the column.
+	 */
+	private messageListRows(): number {
+		// Thread head 2, composer 5, the shared cards, one card per approval, and gaps.
+		const chrome = 2 + 5 + this.flowExtrasRows() + this.invites().length * 7;
+		return Math.max(3, this.bodyRows() - chrome - 3);
+	}
+
+	/** The opened message takes the message list's place, so it gets that whole budget. */
+	private detailListRows(): number {
+		return Math.max(3, this.bodyRows() - 2 - 5 - this.flowExtrasRows() - 3);
+	}
+
+	private inboxListRows(): number {
+		return Math.max(3, this.bodyRows() - 2 - this.flowExtrasRows() - 3);
+	}
+
+	private sidebarListRows(): number {
+		// Three identity lines and the column's one small gap.
+		return Math.max(3, this.bodyRows() - 5);
+	}
+
+	private memberListRows(): number {
+		// Head row, optional address card, the selected candidate's detail, and gaps.
+		const detail = this.memberKey === undefined ? 0 : 11;
+		const address = this.addressOpen ? 9 : 0;
+		return Math.max(3, this.bodyRows() - 4 - detail - address);
+	}
+
+	/** Every card above the list in the flow column: errors, notices and an open exchange. */
+	private flowExtrasRows(): number {
+		return (this.error === undefined ? 0 : 2) + (this.notice === undefined ? 0 : 1) + (this.exchange === undefined ? 0 : 8);
+	}
+
 	async reload(): Promise<void> {
 		if (this.disposed || this.signal.aborted) return;
+		this.bindRuntime();
 		const generation = ++this.generation;
 		const runtime = getRuntime();
 		if (runtime === undefined) {
@@ -278,12 +389,12 @@ export class OnlyneViewer implements Component {
 	private invites(): Invite[] {
 		return (this.snapshot?.trust ?? [])
 			.filter(entry => entry.phase === "invited")
-			.map(entry => ({ node_id: entry.node_id, fingerprint: entry.fingerprint, base_url: entry.base_url }));
-	}
-
-	/** This node's trust row for a peer, undefined when the two never exchanged keys. */
-	private trustOf(nodeId: string): Peer["trust"] {
-		return this.snapshot?.trust?.find(entry => entry.node_id === nodeId);
+			.map(entry => ({
+				node_id: entry.node_id,
+				fingerprint: entry.fingerprint,
+				base_url: entry.base_url,
+				...(entry.observed === undefined ? {} : { observed: entry.observed }),
+			}));
 	}
 
 	/**
@@ -308,7 +419,13 @@ export class OnlyneViewer implements Component {
 				record,
 				...(trust === undefined
 					? {}
-					: { trust: { phase: trust.phase, fingerprint: trust.fingerprint } }),
+					: {
+						trust: {
+							phase: trust.phase,
+							fingerprint: trust.fingerprint,
+							...(trust.observed === undefined ? {} : { observed: trust.observed }),
+						},
+					}),
 			});
 		}
 		const own = this.snapshot?.region;
@@ -346,6 +463,13 @@ export class OnlyneViewer implements Component {
 			return t("send.blocked.noTarget");
 		}
 		return undefined;
+	}
+
+	/** The opened message as the current thread holds it: a reload replaces the row object. */
+	private openedIn(thread: ViewerThread | undefined): ViewerMessage | undefined {
+		const opened = this.opened;
+		if (thread === undefined || opened === undefined) return undefined;
+		return thread.messages.find(message => message.ref.sender === opened.ref.sender && message.ref.id === opened.ref.id);
 	}
 
 	// ── recurring pieces ────────────────────────────────────────────────────
@@ -436,6 +560,7 @@ export class OnlyneViewer implements Component {
 						role: "onlyne.rail.list",
 						grow: 1,
 						basis: 0,
+						max: { lines: Math.max(3, this.bodyRows() - 1) },
 						selected: current === undefined ? null : `domain:${current.key}`,
 						empty: [span(t("rail.empty"), "muted")],
 					},
@@ -521,6 +646,18 @@ export class OnlyneViewer implements Component {
 				"inbox",
 			),
 		);
+		rows.push(
+			node(
+				"item",
+				{
+					label: [span(t("trustpage.open"), "muted")],
+					value: [span(String(invites.length), invites.length === 0 ? "dim" : "warning")],
+					title: t("trustpage.open.title"),
+				},
+				undefined,
+				"trust",
+			),
+		);
 
 		return node(
 			"col",
@@ -542,7 +679,14 @@ export class OnlyneViewer implements Component {
 						role: "onlyne.threads.list",
 						grow: 1,
 						basis: 0,
-						selected: this.view?.kind === "inbox" ? "inbox" : selected === undefined ? null : `thread:${selected.alias}`,
+						max: { lines: this.sidebarListRows() },
+						selected: this.view?.kind === "trust"
+							? "trust"
+							: this.view?.kind === "inbox"
+								? "inbox"
+								: selected === undefined
+									? null
+									: `thread:${selected.alias}`,
 						empty: [span(t("sidebar.empty"), "muted")],
 					},
 					rows,
@@ -570,7 +714,8 @@ export class OnlyneViewer implements Component {
 					this.facts([
 						{ k: t("field.peerFingerprint"), v: invite.fingerprint },
 						{ k: t("field.ownFingerprint"), v: mine },
-						{ k: t("field.endpoint"), v: invite.base_url },
+						{ k: t("field.declared"), v: invite.base_url },
+						{ k: t("field.observed"), v: invite.observed ?? t("member.observed.none") },
 					]),
 					node(
 						"row",
@@ -606,11 +751,50 @@ export class OnlyneViewer implements Component {
 					span(`  ${clockText(message.at) || "—"}`, "dim"),
 					...(message.relation === undefined ? [] : [span(`  ${message.relation}`, "dim")]),
 				],
-				title: t("message.reply.title", { seq: message.seq }),
+				title: t("message.open.title", { seq: message.seq }),
 				actions: { click: `onlyne.message:${messageKey}` },
 			},
 			[textNode(message.text, { wrap: "word" })],
 			`message-${messageKey}`,
+		);
+	}
+
+	/** The full body in the message list's place; reply and recipient are two explicit actions. */
+	private messageDetailCard(message: ViewerMessage): NativeNode {
+		const own = message.author === this.status?.node_id;
+		const identity = `${encodeURIComponent(message.ref.sender)}/${encodeURIComponent(message.ref.id)}`;
+		return node(
+			"card",
+			{
+				role: "onlyne.message-detail",
+				inset: true,
+				head: [span(t("messageDetail.head", {
+					seq: message.seq,
+					author: plainAuthor(message.author),
+					time: clockText(message.at) || t("time.unknown"),
+				}), "strong")],
+			},
+			[
+				textNode(message.text, { wrap: "word" }),
+				node(
+					"row",
+					{ gap: "sm", align: "center", wrap: true },
+					[
+						...(own ? [] : [
+							this.button(t("messageDetail.reply"), `onlyne.message.reply:${identity}`, {
+								tone: "accent",
+								title: t("messageDetail.reply.title"),
+							}),
+							this.button(t("messageDetail.target"), `onlyne.message.target:${identity}`, {
+								title: t("messageDetail.target.title"),
+							}),
+						]),
+						this.button(t("messageDetail.close"), "onlyne.message.close", { title: t("messageDetail.close.title") }),
+					],
+					"acts",
+				),
+			],
+			identity,
 		);
 	}
 
@@ -625,7 +809,7 @@ export class OnlyneViewer implements Component {
 			this.composer = editor;
 		}
 		// One caret at a time: the address card owns it while it is open.
-		this.composer.focused = this.focused && !this.addressOpen;
+		this.composer.focused = this.focused && !this.addressOpen && !this.allowEditing;
 		const where = this.replyTo !== undefined
 			? t("composer.reply", { node: shortNodeId(this.replyTo.sender), id: this.replyTo.id })
 			: this.target !== undefined
@@ -701,10 +885,163 @@ export class OnlyneViewer implements Component {
 				role: "onlyne.inbox.list",
 				grow: 1,
 				basis: 0,
+				max: { lines: this.inboxListRows() },
 				empty: [span(t("inbox.empty"), "muted")],
 			},
 			rows,
 			"queue",
+		);
+	}
+
+	/** RFC 0018 §5: one page carries the policy, the waiting peers and the decision record. */
+	private trustPage(): NativeNode {
+		const acquisition = this.snapshot?.acquisition;
+		const current = getRuntime()?.config.acquisition ?? acquisition ?? DEFAULT_ACQUISITION;
+		const effective = acquisition ?? current;
+		const allowLoopback = "allow_loopback" in effective ? effective.allow_loopback : false;
+		const invited = this.invites();
+		const audit = (this.snapshot?.audit ?? []).slice(0, AUDIT_LIMIT);
+		const children: NativeChild[] = [
+			node(
+				"card",
+				{ role: "onlyne.trust-policy", head: [span(t("trustpage.title"), "strong")] },
+				[
+					this.facts([
+						{ k: t("trustpage.policy"), v: t(POLICY_TEXT[effective.policy]) },
+						{
+							k: t("trustpage.allow"),
+							v: effective.allow.length === 0
+								? t("trustpage.allow.none")
+								: effective.allow.join(", "),
+						},
+						{
+							k: t("trustpage.allowLoopback"),
+							v: allowLoopback
+								? t("trustpage.allowLoopback.on")
+								: t("trustpage.allowLoopback.off"),
+						},
+					]),
+					node(
+						"row",
+						{ role: "onlyne.policy", gap: "sm", align: "center", wrap: true },
+						POLICY_VALUES.map(value =>
+							node(
+								"row",
+								{
+									role: "omp.btn",
+									actions: { click: `onlyne.policy:${value}` },
+									tone: current.policy === value ? "accent" : undefined,
+									title: t("trustpage.policy.set", { value }),
+								},
+								[textNode([span(value, current.policy === value ? "accent strong" : "muted")])],
+								`policy-${value}`,
+							),
+						),
+						"policy-switch",
+					),
+					...(this.allowEditing
+						? [this.allowEditorNode()]
+						: [
+							node("row", { gap: "sm", align: "center" }, [
+								this.button(t("trustpage.allow.edit"), "onlyne.allow.open", { title: t("trustpage.allow.edit.title") }),
+							], "allow-edit"),
+						]),
+					textNode([span(t("trustpage.edit"), "dim")], { wrap: "word" }),
+					textNode([span(t("trustpage.warn.lan"), "warning")], { wrap: "word" }),
+					textNode([span(t("trustpage.warn.axes"), "dim")], { wrap: "word" }),
+					textNode([span(t("trustpage.warn.limits"), "dim")], { wrap: "word" }),
+				],
+				"trust-policy",
+			),
+			this.heading(t("trustpage.invited.head"), invited.length),
+		];
+		if (invited.length === 0) children.push(textNode([span(t("trustpage.invited.empty"), "muted")], { wrap: "word" }));
+		else children.push(...this.approvalsCard());
+		children.push(this.heading(t("trustpage.audit.head"), audit.length));
+		if (audit.length === 0) children.push(textNode([span(t("trustpage.audit.empty"), "muted")], { wrap: "word" }));
+		else children.push(...audit.map((entry, index) => this.auditCard(entry, index)));
+		return node(
+			"list",
+			{
+				role: "onlyne.trust.list",
+				grow: 1,
+				basis: 0,
+				max: { lines: Math.max(3, this.bodyRows() - 3) },
+			},
+			children,
+			"trust",
+		);
+	}
+
+	/**
+	 * One recorded decision. The actor is the whole point: a human's approval that bypassed
+	 * the policy reads differently from a policy auto-approval, an agent's call, or a seed.
+	 */
+	private auditCard(entry: AcquisitionAuditEntry, index: number): NativeNode {
+		const tone = AUDIT_TONE[entry.actor];
+		const head: TspSpan[] = [
+			span(t(AUDIT_ACTOR[entry.actor]), `${tone} strong`),
+			span(` · ${entry.action}`, "strong"),
+		];
+		if (entry.override === true) head.push(span(` · ${t("trustpage.override")}`, "warning"));
+		if (entry.actor === "seed") head.push(span(` · ${t("trustpage.seed")}`, "warning"));
+		const when = clockText(entry.at);
+		if (when !== "") head.push(span(`  ${when}`, "dim"));
+		const peer = entry.node_id === undefined
+			? ""
+			: `${shortNodeId(entry.node_id)}${entry.fingerprint === undefined ? "" : ` ${entry.fingerprint.slice(0, 8)}`}`;
+		const verdict = entry.allowed === undefined
+			? ""
+			: ` · ${t(entry.allowed ? "trustpage.audit.allowed" : "trustpage.audit.denied")}`;
+		const judgement = [
+			entry.policy === undefined ? "" : `${t("trustpage.policy")}: ${entry.policy}`,
+			entry.reason === undefined ? "" : entry.reason,
+		].filter(part => part !== "").join(" · ");
+		const addresses = [
+			entry.observed === undefined ? "" : `${t("field.observed")}: ${entry.observed}`,
+			entry.declared === undefined ? "" : `${t("field.declared")}: ${entry.declared}`,
+		].filter(part => part !== "").join(" · ");
+		return node(
+			"section",
+			{ role: "onlyne.audit", tone },
+			[
+				textNode(head, { wrap: "word" }),
+				...(peer === "" ? [] : [textNode([span(peer, "muted")], { wrap: "word" })]),
+				...(judgement === "" && verdict === ""
+					? []
+					: [textNode([span(`${judgement}${verdict}`, "dim")], { wrap: "word" })]),
+				...(addresses === "" ? [] : [textNode([span(addresses, "dim")], { wrap: "word" })]),
+			],
+			`audit-${index}`,
+		);
+	}
+
+	/** The allow set as one editable line; entries are CIDR blocks or host names. */
+	private allowEditorNode(): NativeNode {
+		if (this.allowEditor === undefined) {
+			const editor = new Editor(getEditorTheme());
+			editor.disableSubmit = true;
+			editor.setText(this.allowDraft);
+			editor.setMaxHeight(2);
+			editor.onChange = () => {
+				this.allowDraft = editor.getExpandedText();
+				this.described = undefined;
+				this.requestRender();
+			};
+			this.allowEditor = editor;
+		}
+		this.allowEditor.focused = this.focused;
+		return node(
+			"col",
+			{ role: "onlyne.allow-editor", gap: "xs" },
+			[
+				this.allowEditor,
+				node("row", { gap: "sm", align: "center" }, [
+					this.button(t("trustpage.allow.save"), "onlyne.allow.save", { tone: "accent" }),
+					this.button(t("trustpage.allow.cancel"), "onlyne.allow.cancel"),
+				], "acts"),
+			],
+			"allow-editor",
 		);
 	}
 
@@ -739,7 +1076,20 @@ export class OnlyneViewer implements Component {
 			);
 		}
 
-		if (this.view?.kind === "inbox") {
+		if (this.view?.kind === "trust") {
+			children.push(
+				node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
+					node("col", { gap: "none", grow: 1 }, [
+						textNode([span(t("trustpage.title"), "strong")], { truncate: "end" }),
+						textNode([span(t("trustpage.meta", {
+							pending: this.invites().length,
+							audit: Math.min(this.snapshot?.audit?.length ?? 0, AUDIT_LIMIT),
+						}), "dim")], { truncate: "end" }),
+					]),
+				], "thread-head"),
+				this.trustPage(),
+			);
+		} else if (this.view?.kind === "inbox") {
 			children.push(
 				node("row", { role: "onlyne.thread-head", gap: "md", align: "center", justify: "between" }, [
 					node("col", { gap: "none", grow: 1 }, [
@@ -755,6 +1105,7 @@ export class OnlyneViewer implements Component {
 				children.push(textNode([span(t("flow.empty"), "muted")], { wrap: "word", lines: 3 }));
 			} else {
 				const messages = thread.messages;
+				const opened = this.openedIn(thread);
 				const last = messages.at(-1);
 				const lastLine = last === undefined
 					? ""
@@ -776,20 +1127,36 @@ export class OnlyneViewer implements Component {
 						]),
 					], "thread-head"),
 					...this.approvalsCard(),
-					scrolling(
-						node(
-							"list",
-							{
-								role: "onlyne.messages",
-								grow: 1,
-								basis: 0,
-								empty: [span(t("thread.empty"), "muted")],
-							},
-							messages.map(message => this.messageCard(message)),
-							"messages",
+					opened === undefined
+						? scrolling(
+							node(
+								"list",
+								{
+									role: "onlyne.messages",
+									grow: 1,
+									basis: 0,
+									max: { lines: this.messageListRows() },
+									empty: [span(t("thread.empty"), "muted")],
+								},
+								messages.map(message => this.messageCard(message)),
+								"messages",
+							),
+							{ by: this.messageScrollBy, n: this.messageScroll },
+						)
+						: scrolling(
+							node(
+								"list",
+								{
+									role: "onlyne.message-detail",
+									grow: 1,
+									basis: 0,
+									max: { lines: this.detailListRows() },
+								},
+								[this.messageDetailCard(opened)],
+								"message-detail",
+							),
+							{ by: this.messageScrollBy, n: this.messageScroll },
 						),
-						{ by: this.messageScrollBy, n: this.messageScroll },
-					),
 					this.composerNode(),
 				);
 			}
@@ -851,21 +1218,7 @@ export class OnlyneViewer implements Component {
 	/** The member column: the current domain's peers, then the selected one's detail. */
 	private memberColumn(): NativeNode {
 		const peers = this.peers();
-		const rows: NativeChild[] = peers.map(peer => {
-			const phase = peer.trust?.phase;
-			return node(
-				"item",
-				{
-					label: [span("● ", phase === undefined ? "muted" : PHASE_TONE[phase]), span(shortNodeId(peer.record.node_id), "strong")],
-					// Every row here belongs to the selected domain, so the region would repeat
-					// the column head and truncate the id it sits next to.
-					value: [span(phase === undefined ? t("trust.none") : t(PHASE_SHORT[phase]), phase === undefined ? "dim" : PHASE_TONE[phase])],
-					title: `${peer.record.node_id}\n${peer.record.base_url}`,
-				},
-				undefined,
-				`peer:${peer.record.node_id}`,
-			);
-		});
+		const rows: NativeChild[] = peers.map(peer => this.candidateCard(peer));
 		const children: NativeChild[] = [
 			node("row", { gap: "sm", align: "center", justify: "between" }, [
 				textNode([span(t("members.head", { count: peers.length }), "dim")]),
@@ -886,7 +1239,7 @@ export class OnlyneViewer implements Component {
 					role: "onlyne.members.list",
 					grow: 1,
 					basis: 0,
-					selected: this.memberKey === undefined ? null : `peer:${this.memberKey}`,
+					max: { lines: this.memberListRows() },
 					empty: [span(t("members.empty"), "muted")],
 				},
 				rows,
@@ -902,6 +1255,7 @@ export class OnlyneViewer implements Component {
 					"card",
 					{
 						role: "onlyne.member-detail",
+						tone: phase === undefined ? undefined : CANDIDATE_TONE[phase],
 						head: [span(shortNodeId(peer.record.node_id), "strong"), ...(phase === undefined ? [] : [span(` · ${t(PHASE_LABEL[phase])}`, PHASE_TONE[phase])])],
 					},
 					[
@@ -909,7 +1263,8 @@ export class OnlyneViewer implements Component {
 							{ k: t("field.fingerprint"), v: peer.trust?.fingerprint ?? t("member.fingerprint.none") },
 							{ k: t("field.domain"), v: regionLabel(peer.record.region) },
 							{ k: t("field.status"), v: phase === undefined ? t("trust.none") : t(PHASE_LABEL[phase]) },
-							{ k: t("field.endpoint"), v: peer.record.base_url },
+							{ k: t("field.declared"), v: peer.record.base_url },
+							{ k: t("field.observed"), v: peer.trust?.observed ?? t("member.observed.none") },
 							{ k: t("field.source"), v: peer.record.source === "bootstrap" ? t("member.source.seed") : peer.record.source },
 							{
 								k: t("field.lastSeen"),
@@ -934,6 +1289,32 @@ export class OnlyneViewer implements Component {
 			{ role: "onlyne.members", gap: "sm", align: "stretch", min: { w: "24ch" }, max: { w: "34ch" } },
 			children,
 			"members",
+		);
+	}
+
+	/**
+	 * RFC 0018 §5 / design §5.3: the ring says where the exchange stands (blue while it is
+	 * in progress, green once both sides confirmed), and selection paints its own background
+	 * over that ring instead of replacing it.
+	 */
+	private candidateCard(peer: Peer): NativeNode {
+		const phase = peer.trust?.phase;
+		const open = this.memberKey === peer.record.node_id;
+		return node(
+			"card",
+			{
+				role: "onlyne.candidate",
+				tone: phase === undefined ? undefined : CANDIDATE_TONE[phase],
+				selected: open,
+				actions: { click: `onlyne.member:${peer.record.node_id}` },
+				head: [
+					span(shortNodeId(peer.record.node_id), "strong"),
+					span(` · ${phase === undefined ? t("trust.none") : t(PHASE_SHORT[phase])}`, phase === undefined ? "dim" : PHASE_TONE[phase]),
+				],
+				title: `${peer.record.node_id}\n${peer.record.base_url}`,
+			},
+			[textNode([span(peer.record.base_url, "dim")], { truncate: "end" })],
+			`peer:${peer.record.node_id}`,
 		);
 	}
 
@@ -964,10 +1345,15 @@ export class OnlyneViewer implements Component {
 			this.view = { kind: "thread", alias };
 			this.target = undefined;
 			this.replyTo = undefined;
+			this.opened = undefined;
+			this.allowEditing = false;
+			this.allowEditor = undefined;
+			this.allowDraft = "";
 			this.messageScrollBy = "end";
 			this.messageScroll++;
 		} else if (id.startsWith("invite:")) {
 			this.memberKey = id.slice("invite:".length);
+			this.view = { kind: "trust" };
 		} else if (id.startsWith("domain:")) {
 			this.domainKey = id.slice("domain:".length);
 			this.memberKey = undefined;
@@ -976,10 +1362,24 @@ export class OnlyneViewer implements Component {
 			this.memberKey = this.memberKey === peer ? undefined : peer;
 		} else if (id === "inbox") {
 			this.view = { kind: "inbox" };
+			this.opened = undefined;
+			this.allowEditing = false;
+			this.allowEditor = undefined;
+			this.allowDraft = "";
+		} else if (id === "trust") {
+			this.view = { kind: "trust" };
+			this.opened = undefined;
 		} else {
 			return;
 		}
 		this.changed();
+	}
+
+	/** A message in the open thread, by the identity its card carries. */
+	private messageByIdentity(identity: string): ViewerMessage | undefined {
+		return this.selectedThread()?.messages.find(
+			message => `${encodeURIComponent(message.ref.sender)}/${encodeURIComponent(message.ref.id)}` === identity,
+		);
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
@@ -988,6 +1388,9 @@ export class OnlyneViewer implements Component {
 			if (this.addressOpen) {
 				this.address?.handleNativeEvent(event);
 				this.addressText = this.address?.getExpandedText() ?? this.addressText;
+			} else if (this.allowEditing) {
+				this.allowEditor?.handleNativeEvent(event);
+				this.allowDraft = this.allowEditor?.getExpandedText() ?? this.allowDraft;
 			} else {
 				this.composer?.handleNativeEvent(event);
 				this.draft = this.composer?.getExpandedText() ?? this.draft;
@@ -1018,6 +1421,11 @@ export class OnlyneViewer implements Component {
 		}
 		if (act === "onlyne.reply.clear") {
 			this.replyTo = undefined;
+			this.changed();
+			return;
+		}
+		if (act === "onlyne.message.close") {
+			this.opened = undefined;
 			this.changed();
 			return;
 		}
@@ -1067,16 +1475,54 @@ export class OnlyneViewer implements Component {
 			this.changed();
 			return;
 		}
+		if (act.startsWith("onlyne.policy:")) {
+			const policy = act.slice("onlyne.policy:".length);
+			if (policy === "all" || policy === "segment" || policy === "none") void this.setPolicy(policy);
+			return;
+		}
+		if (act === "onlyne.allow.open") {
+			this.openAllow();
+			return;
+		}
+		if (act === "onlyne.allow.save") {
+			void this.saveAllow();
+			return;
+		}
+		if (act === "onlyne.allow.cancel") {
+			this.closeAllow();
+			return;
+		}
 		if (act.startsWith("onlyne.message:")) {
 			const identity = act.slice("onlyne.message:".length);
-			const thread = this.selectedThread();
-			const message = thread?.messages.find(entry => `${encodeURIComponent(entry.ref.sender)}/${encodeURIComponent(entry.ref.id)}` === identity);
-			if (message !== undefined && thread !== undefined) {
-				if (message.ref.sender === this.status?.node_id) return;
-				this.replyTo = message.ref;
-				this.target = undefined;
-				this.changed();
+			const message = this.messageByIdentity(identity);
+			if (message === undefined) return;
+			const already = this.opened !== undefined
+				&& `${encodeURIComponent(this.opened.ref.sender)}/${encodeURIComponent(this.opened.ref.id)}` === identity;
+			this.opened = already ? undefined : message;
+			if (!already) {
+				// A long body starts at its head, not wherever the message list was left.
+				this.messageScrollBy = "start";
+				this.messageScroll++;
 			}
+			this.changed();
+			return;
+		}
+		if (act.startsWith("onlyne.message.reply:")) {
+			const message = this.messageByIdentity(act.slice("onlyne.message.reply:".length));
+			if (message === undefined || message.ref.sender === this.status?.node_id) return;
+			this.replyTo = message.ref;
+			this.target = undefined;
+			this.opened = undefined;
+			this.changed();
+			return;
+		}
+		if (act.startsWith("onlyne.message.target:")) {
+			const message = this.messageByIdentity(act.slice("onlyne.message.target:".length));
+			if (message === undefined || message.ref.sender === this.status?.node_id) return;
+			this.target = message.author;
+			this.replyTo = undefined;
+			this.opened = undefined;
+			this.changed();
 			return;
 		}
 		if (act.startsWith("onlyne.accept:")) {
@@ -1105,6 +1551,15 @@ export class OnlyneViewer implements Component {
 				this.closeAddress();
 				return;
 			}
+			if (this.allowEditing) {
+				this.closeAllow();
+				return;
+			}
+			if (this.opened !== undefined) {
+				this.opened = undefined;
+				this.changed();
+				return;
+			}
 			this.done();
 			return;
 		}
@@ -1116,6 +1571,17 @@ export class OnlyneViewer implements Component {
 			}
 			this.address?.handleInput(data);
 			this.addressText = this.address?.getExpandedText() ?? this.addressText;
+			this.described = undefined;
+			this.requestRender();
+			return;
+		}
+		if (this.allowEditing) {
+			if (matchesKey(data, "enter")) {
+				void this.saveAllow();
+				return;
+			}
+			this.allowEditor?.handleInput(data);
+			this.allowDraft = this.allowEditor?.getExpandedText() ?? this.allowDraft;
 			this.described = undefined;
 			this.requestRender();
 			return;
@@ -1145,6 +1611,68 @@ export class OnlyneViewer implements Component {
 			this.setNotice(t("notice.refreshed"));
 		} catch (error) {
 			this.setNotice(t("notice.refreshFailed", { error: errorText(error) }), true);
+		}
+		await this.reload();
+	}
+
+	/** RFC 0018 §2: a policy change is configuration, and never rewrites existing trust. */
+	private async setPolicy(policy: AcquirePolicy): Promise<void> {
+		const runtime = getRuntime();
+		if (runtime === undefined || this.policyBusy) return;
+		const current = runtime.config.acquisition ?? DEFAULT_ACQUISITION;
+		if (current.policy === policy) return;
+		this.policyBusy = true;
+		this.changed();
+		try {
+			await runtime.updateConfig({ ...runtime.config, acquisition: { ...current, policy } });
+			this.setNotice(t("notice.policySaved", { policy }));
+		} catch (error) {
+			this.setNotice(t("notice.policyFailed", { error: errorText(error) }), true);
+		} finally {
+			this.policyBusy = false;
+			await this.reload();
+		}
+	}
+
+	private openAllow(): void {
+		const runtime = getRuntime();
+		const current = runtime?.config.acquisition ?? this.snapshot?.acquisition ?? DEFAULT_ACQUISITION;
+		this.allowDraft = current.allow.join(", ");
+		this.allowEditor = undefined;
+		this.allowEditing = true;
+		this.changed();
+	}
+
+	private closeAllow(): void {
+		this.allowEditing = false;
+		this.allowEditor = undefined;
+		this.allowDraft = "";
+		this.changed();
+	}
+
+	private async saveAllow(): Promise<void> {
+		const runtime = getRuntime();
+		if (runtime === undefined) {
+			this.setNotice(t("notice.notRunning"), true);
+			return;
+		}
+		const allow = this.allowDraft
+			.split(/[,\s]+/)
+			.map(entry => entry.trim())
+			.filter(entry => entry.length > 0);
+		for (const entry of allow) {
+			if (parseAllowBlock(entry) === undefined) {
+				this.setNotice(t("trustpage.allowInvalid", { value: entry }), true);
+				return;
+			}
+		}
+		const current = runtime.config.acquisition ?? DEFAULT_ACQUISITION;
+		try {
+			await runtime.updateConfig({ ...runtime.config, acquisition: { policy: current.policy, allow } });
+			this.closeAllow();
+			this.setNotice(t("notice.allowSaved"));
+		} catch (error) {
+			this.setNotice(t("notice.allowFailed", { error: errorText(error) }), true);
 		}
 		await this.reload();
 	}
@@ -1305,6 +1833,7 @@ export class OnlyneViewer implements Component {
 				this.draft = "";
 				this.composer?.setText("");
 				this.replyTo = undefined;
+				this.opened = undefined;
 				this.messageScrollBy = "end";
 				this.messageScroll++;
 			}
@@ -1352,6 +1881,31 @@ export class OnlyneViewer implements Component {
 	private ansiRows(width: number): string[] {
 		const lines: string[] = [];
 		const short = (text: string): string => fit(text, width);
+		if (this.view?.kind === "trust") {
+			const acquisition = this.snapshot?.acquisition;
+			lines.push(short(t("trustpage.title")));
+			if (acquisition !== undefined) {
+				lines.push(short(`${t("trustpage.policy")}: ${t(POLICY_TEXT[acquisition.policy])}`));
+				lines.push(short(`${t("trustpage.allow")}: ${acquisition.allow.length === 0 ? t("trustpage.allow.none") : oneLine(acquisition.allow.join(", "))}`));
+				lines.push(short(`${t("trustpage.allowLoopback")}: ${acquisition.allow_loopback ? t("trustpage.allowLoopback.on") : t("trustpage.allowLoopback.off")}`));
+			} else lines.push(short(t("trustpage.policy.unknown")));
+			lines.push(short(t("trustpage.warn.lan")));
+			lines.push(short(t("trustpage.warn.limits")));
+			lines.push(short(`${t("trustpage.invited.head")} · ${this.invites().length}`));
+			for (const invite of this.invites()) {
+				lines.push(short(
+					`${shortNodeId(invite.node_id)} · ${invite.fingerprint} · ${t("field.declared")}: ${invite.base_url} · ${t("field.observed")}: ${invite.observed ?? t("member.observed.none")}`,
+				));
+			}
+			const audit = (this.snapshot?.audit ?? []).slice(0, AUDIT_LIMIT);
+			lines.push(short(`${t("trustpage.audit.head")} · ${audit.length}`));
+			for (const entry of audit) {
+				lines.push(short(
+					`${t(AUDIT_ACTOR[entry.actor])} · ${entry.action}${entry.override === true ? ` · ${t("trustpage.override")}` : ""}${entry.node_id === undefined ? "" : ` · ${shortNodeId(entry.node_id)}`}${entry.reason === undefined ? "" : ` · ${entry.reason}`}`,
+				));
+			}
+			return lines;
+		}
 		if (this.view?.kind === "inbox") {
 			lines.push(short(t("fallback.inbox", { count: this.snapshot?.queue.length ?? 0 })));
 			for (const entry of this.snapshot?.queue ?? []) {
@@ -1365,9 +1919,21 @@ export class OnlyneViewer implements Component {
 			title: thread === undefined ? t("fallback.none") : thread.title,
 		})));
 		for (const invite of this.invites()) {
-			lines.push(short(t("fallback.invite", { node: shortNodeId(invite.node_id), fingerprint: invite.fingerprint })));
+			lines.push(short(t("fallback.invite", {
+				node: shortNodeId(invite.node_id),
+				fingerprint: `${invite.fingerprint} · ${invite.base_url} · ${invite.observed ?? t("member.observed.none")}`,
+			})));
 		}
-		for (const message of thread?.messages ?? []) {
+		const opened = this.openedIn(thread);
+		if (opened !== undefined) {
+			lines.push(short(t("messageDetail.head", {
+				seq: opened.seq,
+				author: plainAuthor(opened.author),
+				time: clockText(opened.at) || t("time.unknown"),
+			})));
+			for (const line of opened.text.split("\n")) lines.push(short(`  ${line}`));
+		}
+		for (const message of opened === undefined ? thread?.messages ?? [] : []) {
 			lines.push(short(`${message.direction === "out" ? "→" : "←"} [${message.seq}] ${plainAuthor(message.author)} ${clockText(message.at)}`));
 			for (const line of message.text.split("\n").slice(0, 6)) lines.push(short(`  ${line}`));
 		}
@@ -1395,8 +1961,10 @@ export class OnlyneViewer implements Component {
 		this.noticeTimer = undefined;
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		this.watched = undefined;
 		this.composer = undefined;
 		this.address = undefined;
+		this.allowEditor = undefined;
 		this.described = undefined;
 		this.rendered = undefined;
 	}

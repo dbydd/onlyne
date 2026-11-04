@@ -14,9 +14,9 @@ import { MemoryStorage, OnlyneError, type Action, type Entry, type Json, type Mu
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { JudgeDecider } from "../src/decider.ts";
 import { createRuntimeBridge, type BridgeDeps } from "../src/messages.ts";
-import { createOnlyneNode } from "../src/node.ts";
-import { ContextRegistry } from "../src/store.ts";
-import type { OnlyneConfig } from "../src/types.ts";
+import { createOnlyneNode } from "@onlyne/node-host/node";
+import { ContextRegistry } from "@onlyne/node-host/store";
+import type { OnlyneConfig } from "@onlyne/node-host/types";
 
 const PEER = "urn:onlyne:agent:peer";
 const SELF = "urn:onlyne:agent:self";

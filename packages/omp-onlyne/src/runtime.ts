@@ -5,20 +5,29 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { ensureKeyDir } from "@onlyne/node-host/keys";
 import { NetworkDiscovery } from "@onlyne/node-host/network";
 import { resolveLocale, setLocale } from "@onlyne/node-host/i18n";
-import { acquisitionOf } from "./acquire.ts";
+import { acquisitionOf, evaluateAcquisition, type AcquireInput, type AcquireVerdict } from "@onlyne/node-host/acquire";
 import { AcquisitionLog, approvePeer, beginPeer, handshakeEntry, isTrustThread, judgeApproval, judgementFacts, revokePeer, trustThread, TRUST_THREAD, type ApprovalDeps, type ApprovalJudgement, type ApprovalRequest } from "./handshake.ts";
 import { commandText as t } from "./ui/command-text.ts";
 import { registerMsgTool } from "./tool.ts";
 import { currentDecision, JudgeDecider } from "./decider.ts";
 import { loadConfig, normalizeServiceUrl, saveConfig, shortNodeId } from "./config.ts";
 import { createRuntimeBridge } from "./messages.ts";
-import { advertisedHost, createOnlyneNode } from "./node.ts";
-import { canAnswer, ContextRegistry, SqliteStorage } from "./store.ts";
+import { advertisedHost, createOnlyneNode } from "@onlyne/node-host/node";
+import { canAnswer, ContextRegistry, SqliteStorage } from "@onlyne/node-host/store";
 import { resourceQuery } from "./resources.ts";
-import type { OnlyneConfig, OnlyneStatus, QueueItem, ViewerContact, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread } from "./types.ts";
+import type { OnlyneConfig } from "@onlyne/node-host/types";
+import type { AcquisitionAuditEntry, OnlyneStatus, QueueItem, ViewerContact, ViewerDiscovery, ViewerMessage, ViewerSnapshot, ViewerThread, ViewerTrustRow } from "./types.ts";
 
 /** The trust transition of RFC 0017 §5, as the host receives it. */
 type TrustNotify = Extract<NotifyEvent, { event: "trust" }>;
+
+/** Which actor a judgement in flight belongs to: the agent that asked, or the policy approving on its own. */
+interface AuditScope {
+	actor: AcquisitionAuditEntry["actor"];
+	action: string;
+	/** The judgement this scope produced, kept because a refusal throws away the value the caller sees. */
+	capture?: (judgement: ApprovalJudgement) => void;
+}
 
 export interface PluginRuntime {
 	readonly config: OnlyneConfig;
@@ -83,6 +92,16 @@ export async function stopRuntime(): Promise<void> {
 /** How often the discovery catalog is re-observed; well inside the library's 120 s freshness window. */
 const DISCOVERY_REFRESH_MS = 30_000;
 
+/**
+ * The discovery layer's loopback switch. `createOnlyneNode` passes no `plugins.allow_loopback`,
+ * so this host always runs the documented default; the panel reports it beside the policy.
+ */
+const ALLOW_LOOPBACK = false;
+/** Audit rows kept in the store; the panel renders the newest 20, pruning keeps the file bounded. */
+const AUDIT_PREFIX = "acquisition/audit/";
+const AUDIT_KEEP = 64;
+const AUDIT_VISIBLE = 20;
+
 /** The alias the context registry gives this node's main session (`ContextRegistry.ensureMain`). */
 const MAIN_CONTEXT = "main";
 
@@ -112,6 +131,10 @@ class OmpRuntime implements PluginRuntime {
 	endpoint = "";
 	/** RFC 0018 §2.1: where the connection being served came from, for the library's own call into `notify`. */
 	private readonly connection = new AsyncLocalStorage<string | undefined>();
+	/** RFC 0018 §5: the actor a judgement in flight belongs to, so the audit can tell an agent from the policy. */
+	private readonly auditScope = new AsyncLocalStorage<AuditScope>();
+	/** Two audit rows can share a millisecond; the tick keeps their stored order equal to their arrival. */
+	private auditTick = 0;
 	private readonly log: AcquisitionLog;
 	/** The host side of one approval, built once with the node in `start`. */
 	private peers!: ApprovalDeps;
@@ -169,6 +192,21 @@ class OmpRuntime implements PluginRuntime {
 		if (this.config.server.public_url === undefined && this.config.server.port !== bound) {
 			await this.rememberPort(bound);
 		}
+		// RFC 0018 §2.3/§5.1: a trust seed is a human pre-authorization the policy never judges,
+		// so the bypass is written where it can be re-read: one line per seed naming the config
+		// file it came from, and the policy status beside it. A fingerprint is the audit fact,
+		// never a credential. The discovery axis is separate and, like the policy, reported here.
+		const policy = acquisitionOf(this.config);
+		this.pi.logger.info("onlyne.acquisition.policy", {
+			policy: policy.policy, allow: [...policy.allow],
+			allow_loopback: ALLOW_LOOPBACK,
+		});
+		for (const seed of this.config.trust ?? []) {
+			this.pi.logger.info("onlyne.acquisition.seed", {
+				node: seed.node_id, fingerprint: seed.fingerprint, source: this.config.path,
+				actor: "human", conclusion: "seed_authorized",
+			});
+		}
 		const instanceId = crypto.randomUUID();
 		// The decider probes peers for their execution contexts, so it must use the node's own
 		// transport: an unsigned probe is refused by every keyed peer.
@@ -201,7 +239,15 @@ class OmpRuntime implements PluginRuntime {
 				.filter(thread => !isTrustThread(this.config.node.id, thread.thread_ref)),
 			listJoinedThreads: async () => (await allPages(cursor => this.node.threads.joined(this.node.auth, { page_size: 100, cursor })))
 				.filter(thread => !isTrustThread(this.config.node.id, thread.thread_ref)),
-			listMessages: (thread, cursor) => this.node.messages.list(this.node.auth, thread, { attention: "thread", page_size: 100, cursor }),
+			// A joined thread's entries live on its owner; this node holds no local copy, so the
+			// owner's message route is the only source. Both legs keep the same page shape, and
+			// resolving a joined `{thread, seq}` reference now reads the entries it names.
+			listMessages: async (thread, cursor) => {
+				const query = { attention: "thread" as const, page_size: 100, ...(cursor === undefined ? {} : { cursor }) };
+				return thread.owner === this.config.node.id
+					? this.node.messages.list(this.node.auth, thread, query)
+					: this.node.client.threadEntries(thread, query);
+			},
 			listInbox: async () => (await allPages(cursor => this.node.messages.inbox(this.node.auth, { page_size: 100, cursor })))
 				.map(row => ({ context: row.context, attention: row.attention })),
 			threadMembers: async thread => (await this.node.threads.describe(this.node.auth, thread)).members.map(member => member.peer),
@@ -237,7 +283,11 @@ class OmpRuntime implements PluginRuntime {
 			observed: async (nodeId, fingerprint) => (await this.log.observation(nodeId, fingerprint))?.observed,
 			declared: async nodeId => (await this.node.trust.entry(nodeId))?.base_url,
 			recorded: nodeId => this.recorded(nodeId),
-			audit: judgement => this.pi.logger.info("onlyne.acquire.decided", judgementFacts(judgement)),
+			audit: judgement => {
+				this.pi.logger.info("onlyne.acquire.decided", judgementFacts(judgement));
+				// The caller decided the actor; a judgement made with no scope is the policy's own.
+				this.auditScope.getStore()?.capture?.(judgement);
+			},
 			accept: (nodeId, fingerprint) => this.node.trust.accept(this.node.auth, nodeId, fingerprint),
 			revoke: nodeId => this.node.trust.revoke(this.node.auth, nodeId),
 			now: () => new Date().toISOString(),
@@ -318,6 +368,17 @@ class OmpRuntime implements PluginRuntime {
 				...(observed === undefined ? {} : { observed }), at, cause: event.cause,
 			});
 		} else await this.log.transition(node, fingerprint, at, event.cause);
+		// RFC 0018 §2.3/§5: a pinned seed is a human pre-authorization the policy never judges.
+		// The startup log lists the seeds; this row records the statement that actually used one.
+		const seed = (this.config.trust ?? []).find(row => row.node_id === node && row.fingerprint === fingerprint);
+		if (event.cause === "peer-statement" && seed !== undefined) {
+			await this.recordAudit({
+				at, actor: "seed", action: "seed_authorized", node_id: node, fingerprint,
+				...(observed === undefined ? {} : { observed }),
+				...(event.entry.base_url === "" ? {} : { declared: event.entry.base_url }),
+				policy: this.peers.policy.policy, allowed: true, reason: "seed_authorized", override: true, source: this.config.path,
+			});
+		}
 		// RFC 0018 §2.2: the verdict reads the catalog as it stood when the statement arrived.
 		// The record this host derives from that statement is not part of the judgement, or the
 		// two conditions would collapse into one.
@@ -333,6 +394,8 @@ class OmpRuntime implements PluginRuntime {
 		const judgement = event.phase === "invited" && event.cause === "peer-statement"
 			? await judgeApproval(this.peers, { node_id: node, fingerprint, observed, recorded })
 			: undefined;
+		// §4.1: a verdict is audited whether it allows the approval or refuses it.
+		if (judgement !== undefined) await this.recordAudit(this.auditEntry(judgement, "policy", "approve"));
 		if (judgement?.verdict.allowed === true) this.approveDeferred(node, fingerprint);
 		await this.deliverHandshake(event, observed, judgement);
 	}
@@ -392,6 +455,52 @@ class OmpRuntime implements PluginRuntime {
 		return [...new Set(records.filter(record => record.node_id === node).map(record => record.base_url))];
 	}
 	/**
+	 * The persisted acquisition audit. One row per fact, keyed by its own time so the scan is the
+	 * history; the oldest rows are pruned past `AUDIT_KEEP`, and the panel reads the newest
+	 * `AUDIT_VISIBLE` back out. A failed write is logged and never doubts a committed decision.
+	 */
+	private async recordAudit(entry: AcquisitionAuditEntry): Promise<void> {
+		if (this.closed) return;
+		try {
+			await this.storage.transaction(async tx => {
+				const rows = await tx.scan<AcquisitionAuditEntry>(AUDIT_PREFIX);
+				await tx.put(`${AUDIT_PREFIX}${entry.at}/${String(this.auditTick++).padStart(12, "0")}-${crypto.randomUUID()}`, entry);
+				const excess = rows.length + 1 - AUDIT_KEEP;
+				for (const row of rows.slice(0, Math.max(0, excess))) await tx.delete(row.key);
+			});
+		} catch (error) {
+			this.pi.logger.warn("onlyne.acquisition.audit_failed", { error: errorText(error) });
+		}
+	}
+	/** One judgement as the audit stores it: the time, the actor, and every input the verdict read. */
+	private auditEntry(judgement: ApprovalJudgement, actor: AcquisitionAuditEntry["actor"], action: string): AcquisitionAuditEntry {
+		return {
+			at: judgement.at, actor, action, node_id: judgement.node_id,
+			...(judgement.fingerprint === undefined ? {} : { fingerprint: judgement.fingerprint }),
+			...(judgement.input.observed === undefined ? {} : { observed: judgement.input.observed }),
+			...(judgement.input.declared === undefined ? {} : { declared: judgement.input.declared }),
+			policy: judgement.policy.policy, allowed: judgement.verdict.allowed, reason: judgement.verdict.reason,
+		};
+	}
+	/**
+	 * What the policy would say about this peer right now, read from the same stored facts a
+	 * judgement reads. The human path asks only to mark an override; it never gates the action.
+	 */
+	private async policyVerdict(node: string, fingerprint?: string): Promise<{ observed?: string; declared?: string; verdict: AcquireVerdict }> {
+		const observed = fingerprint === undefined ? undefined : (await this.log.observation(node, fingerprint))?.observed;
+		const declared = (await this.node.trust.entry(node))?.base_url;
+		const input: AcquireInput = {
+			...(observed === undefined || observed === "" ? {} : { observed }),
+			...(declared === undefined || declared === "" ? {} : { declared }),
+			recorded: await this.recorded(node),
+		};
+		return {
+			...(observed === undefined ? {} : { observed }),
+			...(declared === undefined ? {} : { declared }),
+			verdict: await evaluateAcquisition(this.peers.policy, input),
+		};
+	}
+	/**
 	 * A user-typed address. It is normalized once, read for its own identity and everything it
 	 * declares, and only a successful read becomes a seed. The node keeps running: a seed is a
 	 * routing hint, not a second binding.
@@ -449,41 +558,78 @@ class OmpRuntime implements PluginRuntime {
 	}
 	/** Stage one of one exchange: the peer's proved fingerprint, and the session that commits it. */
 	async trustBegin(node: string): Promise<KeyExchange> {
-		return this.node.trust.begin(this.node.auth, node);
+		const session = await this.node.trust.begin(this.node.auth, node);
+		await this.recordAudit({
+			at: new Date().toISOString(), actor: "human", action: "begin",
+			node_id: node, fingerprint: session.fingerprint, declared: session.base_url,
+		});
+		return session;
 	}
 	async trustAccept(node: string, fingerprint: string): Promise<void> {
+		// The panel keeps the human gate outside the policy (RFC 0018 §2). Read the verdict first
+		// so a row the policy would have refused is recorded as the override it is.
+		const admission = await this.policyVerdict(node, fingerprint);
 		await this.node.trust.accept(this.node.auth, node, fingerprint);
+		await this.recordAudit({
+			at: new Date().toISOString(), actor: "human", action: "accept", node_id: node, fingerprint,
+			...(admission.observed === undefined ? {} : { observed: admission.observed }),
+			...(admission.declared === undefined ? {} : { declared: admission.declared }),
+			policy: this.peers.policy.policy, allowed: admission.verdict.allowed, reason: admission.verdict.reason,
+			...(admission.verdict.allowed ? {} : { override: true }),
+		});
 	}
 	async trustRevoke(node: string): Promise<void> {
+		const row = await this.node.trust.entry(node);
+		const observed = row === undefined ? undefined : (await this.log.observation(node, row.fingerprint))?.observed;
 		await this.node.trust.revoke(this.node.auth, node);
+		await this.recordAudit({
+			at: new Date().toISOString(), actor: "human", action: "revoke", node_id: node,
+			...(row === undefined ? {} : { fingerprint: row.fingerprint, declared: row.base_url }),
+			...(observed === undefined ? {} : { observed }),
+		});
 	}
 	/** RFC 0018 §2/§3.1: the agent's approval, refused with `policy_denied` when the policy does not allow it. */
 	async acquireAccept(node: string, fingerprint: string): Promise<TrustEntry> {
-		return approvePeer(this.peers, node, fingerprint);
+		let judged: ApprovalJudgement | undefined;
+		try {
+			return await this.auditScope.run({ actor: "agent", action: "accept", capture: judgement => { judged = judgement; } },
+				() => approvePeer(this.peers, node, fingerprint));
+		} finally {
+			if (judged !== undefined) await this.recordAudit(this.auditEntry(judged, "agent", "accept"));
+		}
 	}
 	/** RFC 0018 §2/§3.1: the agent's revocation, which no policy judges. */
 	async acquireRevoke(node: string): Promise<void> {
 		await revokePeer(this.peers, node);
+		await this.recordAudit({ at: new Date().toISOString(), actor: "agent", action: "revoke", node_id: node });
 	}
 	/**
 	 * RFC 0018 §2/§3.1: the agent's initiation of one exchange. The judgement reads only what this
 	 * host already stores; the peer's key is read after it, so a refusal sends nothing.
 	 */
 	async acquireBegin(node: string): Promise<TrustEntry> {
-		const row = await this.node.trust.entry(node);
-		const statement = row === undefined ? undefined : (await this.log.observation(node, row.fingerprint))?.observed;
-		const records = (await this.node.discovery.listRecords()).filter(record => record.node_id === node);
-		const observed = outboundObserved({ statement, records, declared: row?.base_url });
-		const request: ApprovalRequest = {
-			node_id: node,
-			...(row === undefined ? {} : { fingerprint: row.fingerprint }),
-			...(observed === undefined ? {} : { observed }),
-		};
-		const committed = await beginPeer(this.peers, target => this.node.trust.begin(this.node.auth, target), request);
-		return committed.entry;
+		let judged: ApprovalJudgement | undefined;
+		try {
+			return await this.auditScope.run({ actor: "agent", action: "begin", capture: judgement => { judged = judgement; } }, async () => {
+				const row = await this.node.trust.entry(node);
+				const statement = row === undefined ? undefined : (await this.log.observation(node, row.fingerprint))?.observed;
+				const records = (await this.node.discovery.listRecords()).filter(record => record.node_id === node);
+				const observed = outboundObserved({ statement, records, declared: row?.base_url });
+				const request: ApprovalRequest = {
+					node_id: node,
+					...(row === undefined ? {} : { fingerprint: row.fingerprint }),
+					...(observed === undefined ? {} : { observed }),
+				};
+				const committed = await beginPeer(this.peers, target => this.node.trust.begin(this.node.auth, target), request);
+				return committed.entry;
+			});
+		} finally {
+			if (judged !== undefined) await this.recordAudit(this.auditEntry(judged, "agent", "begin"));
+		}
 	}
 	async trustRotate(): Promise<{ fingerprint: string }> {
 		const identity = await this.node.trust.rotate(this.node.auth);
+		await this.recordAudit({ at: new Date().toISOString(), actor: "human", action: "rotate", fingerprint: identity.fingerprint });
 		return { fingerprint: identity.fingerprint };
 	}
 	async refreshDiscovery(): Promise<void> {
@@ -619,9 +765,28 @@ class OmpRuntime implements PluginRuntime {
 			last_seen: record.last_seen,
 		}));
 		const trust = this.node.keys.enabled ? await this.node.trust.list(this.node.auth) : [];
+		// RFC 0018 §2.1: the declared address is what the peer wrote; the observed one is the
+		// connection this host recorded for its last statement. Both are shown, never merged.
+		const trustRows: ViewerTrustRow[] = [];
+		for (const row of trust) {
+			const observation = await this.log.observation(row.node_id, row.fingerprint);
+			trustRows.push({
+				node_id: row.node_id, fingerprint: row.fingerprint, phase: trustPhase(row), base_url: row.base_url,
+				...(observation?.observed === undefined ? {} : { observed: observation.observed }),
+			});
+		}
+		// Newest first: the panel renders this array in order and never sorts it.
+		const auditRows = await this.storage.transaction(tx => tx.scan<AcquisitionAuditEntry>(AUDIT_PREFIX));
+		const audit = auditRows
+			.sort((left, right) => right.value.at.localeCompare(left.value.at) || right.key.localeCompare(left.key))
+			.slice(0, AUDIT_VISIBLE)
+			.map(row => row.value);
+		const policy = acquisitionOf(this.config);
 		const identity = this.node.keys.enabled ? await this.node.keys.describe() : undefined;
 		return { region: this.config.region, endpoint: this.endpoint, contexts, queue, threads: views, discovery, contacts,
-			trust: trust.map(row => ({ node_id: row.node_id, fingerprint: row.fingerprint, phase: trustPhase(row), base_url: row.base_url })),
+			trust: trustRows,
+			acquisition: { policy: policy.policy, allow: [...policy.allow], allow_loopback: ALLOW_LOOPBACK },
+			audit,
 			...(identity === undefined ? {} : { identity: { public_key: identity.public_key, fingerprint: identity.fingerprint } }),
 			...(this.discoveryError === undefined ? {} : { discovery_error: this.discoveryError }) };
 	}

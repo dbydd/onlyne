@@ -1,9 +1,9 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { OnlyneConfig } from "./types.ts";
+import type { OnlyneConfig } from "@onlyne/node-host/types";
 import type { Locale } from "@onlyne/node-host/i18n";
-import { hostText as t } from "./host-text.ts";
-import { DEFAULT_ACQUISITION, parseAllowBlock, type AcquirePolicy, type AcquisitionPolicy } from "./acquire.ts";
+import { hostText as t } from "@onlyne/node-host/host-text";
+import { DEFAULT_ACQUISITION, parseAllowBlock, type AcquirePolicy, type AcquisitionPolicy } from "@onlyne/node-host/acquire";
 
 const CONFIG_RELATIVE_PATH = join(".onlyne", "config.toml");
 const REGION_PREFIX = "urn:onlyne:region:";
@@ -181,7 +181,9 @@ export function serializeConfig(config: OnlyneConfig): string {
 	);
 	const acquisition = config.acquisition ?? DEFAULT_ACQUISITION;
 	lines.push("", "[acquisition]", `policy = ${tomlString(acquisition.policy)}`);
-	if (acquisition.allow.length > 0) lines.push(`allow = [${acquisition.allow.map(entry => tomlString(entry)).join(", ")}]`);
+	// An empty set is a decision ("approve nobody"), not an absent one: omitting the line
+	// would reload it as the default loopback set.
+	lines.push(`allow = [${acquisition.allow.map(entry => tomlString(entry)).join(", ")}]`);
 	if (config.discovery?.seeds !== undefined || config.trust !== undefined) {
 		lines.push("", "[discovery]");
 		const seeds = config.discovery?.seeds ?? [];

@@ -22,10 +22,8 @@ const en = {
 	draftNotFound: "No reply draft is named {id}.",
 	draftNeedsReference: "A reply draft needs in_reply_to {sender,id} or {thread,seq}.",
 	draftSourceUnavailable: "The draft source message is unavailable.",
-
-	contextNotRegistered: "No execution context is registered as {alias}.",
-	mainSummary: "Main OMP session",
-	storeClosed: "The Onlyne store is closed.",
+	draftNoMatch: "No stored reply draft answers {sender}/{id}. Create the draft first, or pass meta.draft_id.",
+	draftNoRecent: "This session has no stored reply draft to send. Create the draft first, or pass meta.draft_id.",
 
 	todoContextRequired: "A todo decision needs a non-empty context alias.",
 	todoUnknownAction: "The judge returned an unknown todo action: {action}.",
@@ -93,10 +91,8 @@ const zh: Record<keyof typeof en, string> = {
 	draftNotFound: "没有名为 {id} 的回复草稿。",
 	draftNeedsReference: "回复草稿需要 in_reply_to {sender,id} 或 {thread,seq}。",
 	draftSourceUnavailable: "草稿的源消息不可用。",
-
-	contextNotRegistered: "没有注册名为 {alias} 的执行上下文。",
-	mainSummary: "OMP 主会话",
-	storeClosed: "Onlyne 存储已关闭。",
+	draftNoMatch: "没有回答 {sender}/{id} 的已存回复草稿。请先起草，或传 meta.draft_id。",
+	draftNoRecent: "本会话没有可发送的已存回复草稿。请先起草，或传 meta.draft_id。",
 
 	todoContextRequired: "todo 决策需要非空的上下文别名。",
 	todoUnknownAction: "judge 返回了未知的 todo 动作：{action}。",

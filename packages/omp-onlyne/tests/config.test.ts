@@ -13,7 +13,7 @@ import {
 	serializeConfig,
 	shortNodeId,
 } from "../src/config.ts";
-import type { OnlyneConfig } from "../src/types.ts";
+import type { OnlyneConfig } from "@onlyne/node-host/types";
 
 const SAMPLE = `# project config
 [node]

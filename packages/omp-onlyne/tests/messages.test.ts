@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OnlyneError, type Entry } from "@onlyne/lib";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { createRuntimeBridge, type BridgeDeps } from "../src/messages.ts";
-import type { ContextRegistry } from "../src/store.ts";
+import type { ContextRegistry } from "@onlyne/node-host/store";
 import type { JudgeDecider } from "../src/decider.ts";
 
 /** One entry per test: the bridge keys its attempts by thread and seq, for the process lifetime. */

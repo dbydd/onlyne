@@ -145,7 +145,6 @@ const en = {
 	"error.contexts_unreadable": "The target's published contexts cannot be read: {reason}",
 	"error.context_not_published": "The target does not publish an execution context named {alias}.",
 	"error.thread_reference_shape": "meta.thread must be a thread alias or {owner,id}.",
-	"error.ambiguous_local_thread": "More than one local thread is named {value}.",
 	"error.routing_target": "The decision did not choose a routing target.",
 	"error.needs_answer": "The decision did not say whether this message needs an answer.",
 	"error.registry_unreadable": "The context registry could not be read: {error}",
@@ -163,7 +162,6 @@ const en = {
 	"error.thread_title_required": "thread create needs a title.",
 	"error.thread_reference_required": "thread {op} needs a thread reference.",
 	"error.thread_target_required": "thread {op} needs a target.",
-	"error.resource_fields": "resource needs owner, id and operation.",
 	"error.read_thread_required": "read {name} needs a thread reference.",
 	"error.read_message_required":
 		"read {name} needs a message reference: meta.message {sender,id} or {thread,seq}.",
@@ -180,7 +178,7 @@ const en = {
 	"error.domain_op": "The judge did not choose a domain operation.",
 	"error.domain_id": "domain {op} needs domain_id.",
 	"error.resource_action_fields":
-		"A resource action needs meta.resource {owner,id} and meta.operation.",
+		"A resource action needs meta.resource {owner,id} and meta.operation. If this call was meant as a message to a peer (including an instruction to change a file on its own node), send it with meta.to or meta.in_reply_to instead.",
 	"error.meta_to_single":
 		"meta.to names one target; pass an array to the tool for several, or send one call per peer.",
 	"error.meta_to_empty": "meta.to must be a non-empty string.",
@@ -360,7 +358,6 @@ const zh: Record<keyof typeof en, string> = {
 	"error.contexts_unreadable": "无法读取目标已发布的上下文：{reason}",
 	"error.context_not_published": "目标未发布名为 {alias} 的执行上下文。",
 	"error.thread_reference_shape": "meta.thread 必须是 thread 别名或 {owner,id}。",
-	"error.ambiguous_local_thread": "有多个本地 thread 名为 {value}。",
 	"error.routing_target": "决策没有选择路由目标。",
 	"error.needs_answer": "决策没有说明这条消息是否需要答复。",
 	"error.registry_unreadable": "无法读取上下文注册表：{error}",
@@ -374,7 +371,6 @@ const zh: Record<keyof typeof en, string> = {
 	"error.thread_title_required": "thread create 需要一个 title。",
 	"error.thread_reference_required": "thread {op} 需要一个 thread 引用。",
 	"error.thread_target_required": "thread {op} 需要一个目标。",
-	"error.resource_fields": "resource 需要 owner、id 和 operation。",
 	"error.read_thread_required": "read {name} 需要一个 thread 引用。",
 	"error.read_message_required":
 		"read {name} 需要一条消息引用：meta.message {sender,id} 或 {thread,seq}。",
@@ -390,7 +386,8 @@ const zh: Record<keyof typeof en, string> = {
 	"error.thread_op_target": "judge 选择了 thread {op}，但没有目标。",
 	"error.domain_op": "judge 没有选择域操作。",
 	"error.domain_id": "domain {op} 需要 domain_id。",
-	"error.resource_action_fields": "资源动作需要 meta.resource {owner,id} 和 meta.operation。",
+	"error.resource_action_fields":
+		"资源动作需要 meta.resource {owner,id} 和 meta.operation。如果这次调用本意是发消息给某个 peer（包括让对方改它自己节点上的文件），请改用 meta.to 或 meta.in_reply_to 发送。",
 	"error.meta_to_single":
 		"meta.to 只能点名一个目标；要发给多个，请向工具传数组，或每个 peer 发一次调用。",
 	"error.meta_to_empty": "meta.to 必须是非空字符串。",

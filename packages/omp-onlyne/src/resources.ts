@@ -1,5 +1,5 @@
 import { OnlyneError, trustPhase, type OnlyneNode, type ResourceReadQuery } from "@onlyne/lib";
-import { hostText as t } from "./host-text.ts";
+import { hostText as t } from "@onlyne/node-host/host-text";
 
 export async function resourceOwners(node: OnlyneNode): Promise<string[]> {
 	const trusted = await node.trust.list(node.auth);

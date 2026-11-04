@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_ACQUISITION, allowMatch, evaluateAcquisition, parseAllowBlock } from "../src/acquire.ts";
-import type { AcquisitionPolicy, Resolver } from "../src/acquire.ts";
+import { DEFAULT_ACQUISITION, allowMatch, evaluateAcquisition, parseAllowBlock } from "@onlyne/node-host/acquire";
+import type { AcquisitionPolicy, Resolver } from "@onlyne/node-host/acquire";
 
 const loopback = DEFAULT_ACQUISITION;
 const open: AcquisitionPolicy = { policy: "all", allow: [] };

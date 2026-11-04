@@ -15,13 +15,13 @@ import {
 	type Action, type DiscoveryRecord, type KeyExchange, type Mutation, type Plugins, type ThreadRef, type Transport, type TrustEntry,
 } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { DEFAULT_ACQUISITION, type AcquisitionPolicy } from "../src/acquire.ts";
+import { DEFAULT_ACQUISITION, type AcquisitionPolicy } from "@onlyne/node-host/acquire";
 import { currentDecision, JudgeDecider, reuseThread, type DeciderDeps, type PeerRecord } from "../src/decider.ts";
 import { AcquisitionLog, beginPeer, type ApprovalDeps, type ApprovalJudgement } from "../src/handshake.ts";
 import { outboundObserved, setRuntime, type PluginRuntime } from "../src/runtime.ts";
-import type { ContextRegistry } from "../src/store.ts";
+import type { ContextRegistry } from "@onlyne/node-host/store";
 import { registerMsgTool } from "../src/tool.ts";
-import type { OnlyneConfig } from "../src/types.ts";
+import type { OnlyneConfig } from "@onlyne/node-host/types";
 
 const NODE = "urn:onlyne:agent:mine";
 const ALPHA = "urn:onlyne:agent:alpha";

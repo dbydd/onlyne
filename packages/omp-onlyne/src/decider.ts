@@ -10,7 +10,6 @@ import {
 	type Entry,
 	type JoinedThread,
 	type Json,
-	type MessageRef,
 	type MsgInput,
 	type NodeId,
 	type Page,
@@ -21,26 +20,41 @@ import {
 } from "@onlyne/lib";
 import { getLocale } from "@onlyne/node-host/i18n";
 import { isTrustThread } from "./handshake.ts";
-import type { ContextRecord, OnlyneConfig } from "./types.ts";
-import { canAnswer, type ContextRegistry } from "./store.ts";
+import type { ContextRecord, OnlyneConfig } from "@onlyne/node-host/types";
+import { canAnswer, type ContextRegistry } from "@onlyne/node-host/store";
 import { text } from "./decider-text.ts";
+import { ActionGuard, settleIntent, type OutboundIntent } from "./guard.ts";
+import { continueThread, inheritedModes, resolvedModes, resourceAction, resourceFields, sendAction } from "./plan.ts";
+import {
+	choice,
+	contextQuestions,
+	domainOpQuestions,
+	insertionQuestions,
+	intentQuestions,
+	needsAnswerQuestions,
+	originalQuestions,
+	planQuestions,
+	readScopeQuestions,
+	relationQuestions,
+	targetQuestions,
+	threadOpQuestions,
+	threadQuestions,
+	type Answers,
+	type Questions,
+} from "./questions.ts";
+import {
+	References,
+	knownPeers,
+	lastSegment,
+	threadKey,
+	type PeerRecord,
+	type ReplyReference,
+} from "./resolve.ts";
 
 type Row = Record<string, unknown>;
 
-interface ChoiceQuestion {
-	type: "choice";
-	instructions: string;
-	criteria: Record<string, string>;
-}
-
-export type Questions = Record<string, ChoiceQuestion>;
-
-interface ChoiceAnswer {
-	type?: string;
-	choice?: string;
-}
-
-export type Answers = Record<string, ChoiceAnswer | undefined>;
+export type { Answers, Questions } from "./questions.ts";
+export type { PeerRecord } from "./resolve.ts";
 
 /** A decision input that either carries its records or states why it has none. */
 type Source<T> = { available: true; value: T } | { available: false; reason: string };
@@ -57,14 +71,6 @@ function valueOf<T>(source: unknown): T | undefined {
 	const row = asRecord(source);
 	if (row?.available !== true) return undefined;
 	return row.value as T;
-}
-
-/** One discovered peer, as the library's discovery records it. */
-export interface PeerRecord {
-	node_id: NodeId;
-	base_url: string;
-	instance_id: string;
-	last_seen: string;
 }
 
 /** One execution context a receiving node publishes for a target-qualified delivery. */
@@ -108,72 +114,7 @@ export function currentDecision(): DecisionScope | undefined {
 	return decisionScope.getStore();
 }
 
-/**
- * The thread a send continues: the most recently opened open thread this node owns whose members
- * already include the addressee. Derived from local records alone (RFC 0016 §5), so it costs no
- * judgement. A node may hold several open threads with one peer; the newest is the conversation
- * still in use, and a caller that wants a fresh topic names one or plans `execution: new`.
- *
- * Only a thread holding this node and the addressee continues: a thread with a third member is a
- * group conversation, and folding a private message into it would put a body in front of every
- * member. A group is addressed by naming it, which is why `meta.thread` wins over this lookup.
- */
-export async function reuseThread(deps: DeciderDeps, to: NodeId): Promise<ThreadRef | undefined> {
-	const self = deps.config.node.id;
-	const threads = await deps.listThreads();
-	const candidates = threads
-		.filter(thread => thread.thread_ref.owner === self && thread.state === "open")
-		.sort((left, right) => right.created_at.localeCompare(left.created_at));
-	for (const thread of candidates) {
-		let members: NodeId[];
-		try {
-			members = await deps.threadMembers(thread.thread_ref);
-		} catch (error) {
-			// An unreadable member list is a reason to try the next thread, not to open a new one
-			// silently, so it is reported and skipped.
-			deps.log?.("onlyne.thread.members_unreadable", { thread: threadKey(thread.thread_ref), error: message(error) });
-			continue;
-		}
-		if (members.includes(to) && members.every(member => member === self || member === to)) return thread.thread_ref;
-	}
-	return undefined;
-}
-
-/**
- * Every peer this node can name, from both sources that know one.
- *
- * A trust row is identity: the peer exists whether or not anyone answered a probe recently. A
- * discovery record is an address, and a live one wins over the address a statement declared.
- * Callers that ask "who is this" and callers that ask "who may receive this" must not diverge,
- * or the same peer resolves for `meta.to` and vanishes from the target question — the shape of
- * the reported `No discovered node is named …` failure.
- */
-export async function knownPeers(deps: DeciderDeps): Promise<PeerRecord[]> {
-	const byId = new Map<NodeId, PeerRecord>();
-	let readable = false;
-	let failure = "";
-	try {
-		for (const row of await deps.listTrust()) {
-			readable = true;
-			if (row.phase === "revoked") continue;
-			byId.set(row.node_id, { node_id: row.node_id, base_url: row.base_url ?? "", instance_id: "trust", last_seen: "" });
-		}
-	} catch (error) {
-		failure = message(error);
-		deps.log?.("onlyne.judge.trust_unreadable", { error: failure });
-	}
-	try {
-		for (const peer of await deps.listPeers()) {
-			readable = true;
-			byId.set(peer.node_id, peer);
-		}
-	} catch (error) {
-		failure = message(error);
-		deps.log?.("onlyne.judge.peers_unreadable", { error: failure });
-	}
-	if (!readable) throw new OnlyneError("unavailable", text("reason.discovery_unreadable", { error: failure }));
-	return [...byId.values()].filter(peer => peer.node_id !== deps.config.node.id);
-}
+export { knownPeers, reuseThread } from "./resolve.ts";
 
 export interface DeciderDeps {
 	config: OnlyneConfig;
@@ -261,13 +202,20 @@ export function fitState(state: Row): { fitted: Row; dropped: string[]; chars: n
 
 /** Decisions go through OMP's `judge` role; the plugin never picks a target or a plan itself. */
 export class JudgeDecider {
-	constructor(private readonly deps: DeciderDeps) {}
+	/** Deterministic reference resolution: one rule per reference, shared by every entry point. */
+	readonly refs: References;
+	private readonly guard: ActionGuard;
+
+	constructor(private readonly deps: DeciderDeps) {
+		this.refs = new References(this.deps);
+		this.guard = new ActionGuard({ contexts: deps.contexts, nodeId: deps.config.node.id });
+	}
 
 	async decide(scope: DecisionScope): Promise<Action> {
 		const explicit = await this.#explicit(scope);
 		if (explicit !== undefined) {
-			const filled = await this.#threaded(explicit);
-			await this.#guard(scope, filled);
+			const filled = await continueThread(this.deps, explicit);
+			await this.#allow(scope, filled);
 			return filled;
 		}
 
@@ -276,7 +224,13 @@ export class JudgeDecider {
 		// asked for its own slice was told it had no rights at all (caerulea report 4, problem 1).
 		// Classification costs one local judge call; a write is refused either way.
 		const meta = scope.input.meta ?? {};
-		const intent = await this.#intent(scope);
+		const settlement = settleIntent(await this.#intent(scope), meta);
+		if (settlement.override !== undefined) {
+			// The judge named an intent whose fields the call does not carry. Naming the fallback
+			// in the record is what makes a misread visible instead of a silent rewrite.
+			this.deps.log?.("onlyne.judge.overridden", { direction: "outbound", ...settlement.override });
+		}
+		const intent = settlement.intent;
 		const action = intent === "communicate"
 			? await this.#communicate(scope, meta)
 			: intent === "inspect"
@@ -285,32 +239,28 @@ export class JudgeDecider {
 					? await this.#threadAction(scope, meta)
 					: intent === "manage_domain"
 						? await this.#domainAction(scope, meta)
-						: await this.#resourceAction(meta);
-		const filled = await this.#threaded(action);
-		await this.#guard(scope, filled);
+						: await resourceAction(meta);
+		const filled = await continueThread(this.deps, action);
+		await this.#allow(scope, filled);
 		this.deps.log?.("onlyne.judge.action", { direction: "outbound", ...actionFacts(filled) });
 		return filled;
 	}
 
-	/**
-	 * The thread a send belongs to, decided once for every path that produces one.
-	 *
-	 * A reply lands on the thread that holds its original (the client resolves it), and a plan
-	 * that says `new` opens a topic. Otherwise the message continues the conversation this node
-	 * already has with its addressee: leaving it unnamed makes the client open a thread per
-	 * message, and asking the model for an alias it cannot know is the mistake the design already
-	 * recorded. This is a lookup over local records, not a judgement (RFC 0016 §5), so it sits
-	 * after both the explicit and the judged paths rather than inside either.
-	 */
-	async #threaded(action: Action): Promise<Action> {
-		if (action.kind !== "send" || action.thread !== undefined) return action;
-		if (action.in_reply_to !== undefined || action.execution === "new") return action;
-		const thread = await reuseThread(this.deps, action.to);
-		return thread === undefined ? action : { ...action, thread };
+	/** The one guard every decided action passes before the client commits it. */
+	async #allow(scope: DecisionScope, action: Action): Promise<void> {
+		await this.guard.assert({ readOnly: scope.readOnly === true, agentId: scope.ctx.agent.id }, action);
 	}
 
-	/** Node O-1: one question, five options, no lists of peers, threads, or history. */
-	async #intent(scope: DecisionScope): Promise<"communicate" | "inspect" | "manage_thread" | "manage_domain" | "operate_resource"> {
+	/**
+	 * Node O-1: one question, only the options this call can execute, no lists of peers,
+	 * threads, or history.
+	 *
+	 * `operate_resource` is offered only when the call names a complete resource action. The
+	 * criterion that says a message mentioning a file is not this intent is still prose the
+	 * model may misread; withholding the option makes the misread unanswerable rather than
+	 * lethal (issue: outbound-intent-resource-false-positive).
+	 */
+	async #intent(scope: DecisionScope): Promise<OutboundIntent> {
 		const started = Date.now();
 		const answers = await this.#judge(
 			scope.ctx,
@@ -319,19 +269,7 @@ export class JudgeDecider {
 				trigger: this.#trigger(scope.ctx),
 				host_env: { session_type: scope.ctx.agent.kind, read_only: scope.readOnly === true },
 			},
-			{
-				intent: {
-					type: "choice",
-					instructions: text("judge.o1.instructions"),
-					criteria: {
-						communicate: text("judge.o1.communicate"),
-						inspect: text("judge.o1.inspect"),
-						manage_thread: text("judge.o1.manage_thread"),
-						manage_domain: text("judge.o1.manage_domain"),
-						operate_resource: text("judge.o1.operate_resource"),
-					},
-				},
-			},
+			intentQuestions({ resource: resourceFields(scope.input.meta) !== undefined }),
 			scope.signal,
 		);
 		const intent = choice(answers, "intent");
@@ -344,7 +282,12 @@ export class JudgeDecider {
 
 	/** Nodes O-2A / O-3A / O-3A-Ctx for a send, reply or followup. */
 	async #communicate(scope: DecisionScope, meta: Record<string, Json>): Promise<Action> {
-		let reply = await this.#reply(meta);
+		// Every reference this send names — recipient, thread, mentions, the message it answers —
+		// is resolved here, once, before the delivery plan is chosen. A plan built on a
+		// half-resolved reference is how the same spelling came to mean two things on two paths
+		// (audit §2.7).
+		const refs = await this.refs.forSend(meta);
+		let reply = refs.reply;
 		const explicitRelation = relation(meta);
 		if (reply === undefined && explicitRelation === undefined) {
 			// Node O-2A: no reference and no relation. The judge still answers one question —
@@ -363,23 +306,21 @@ export class JudgeDecider {
 		if (reply !== undefined) {
 			// O-2A pre-pruning: the reply authority is the only target; meta.to and the judge's
 			// answer must not move a reply to another node (caerulea report 3).
-			const explicitTarget = await this.#target(meta);
-			if (explicitTarget !== undefined && explicitTarget !== reply.authority) {
+			if (refs.target !== undefined && refs.target !== reply.authority) {
 				throw new OnlyneError(
 					"invalid_request",
-					text("error.reply_authority", { authority: reply.authority, target: explicitTarget }),
+					text("error.reply_authority", { authority: reply.authority, target: refs.target }),
 				);
 			}
 			to = reply.authority;
 		} else {
-			to = await this.#target(meta) ?? await this.#targetQuestion(scope, meta);
+			to = refs.target ?? await this.#targetQuestion(scope, meta);
 			if (to.length === 0) {
 				throw new OnlyneError("ambiguous_target", text("error.delivery_target"));
 			}
 		}
 
 		const plan = await this.#deliveryPlan(scope, meta, lockedRelation, reply !== undefined);
-		const thread = await this.#sendThread(meta, to);
 		const context = plan.execution === "new" ? undefined : await this.#receiverContext(scope, to, meta);
 		if (plan.execution === "existing" && context === undefined) {
 			// RFC 0005 §1: `existing` disambiguates or refuses. Quietly opening a new context made
@@ -389,18 +330,16 @@ export class JudgeDecider {
 				text("error.execution_context_missing", { to }),
 			);
 		}
-		const mentions = await this.#mentions(meta);
-		return {
-			kind: "send",
+		return sendAction({
 			to,
-			...(thread === undefined ? {} : { thread }),
+			...(refs.thread === undefined ? {} : { thread: refs.thread }),
 			...(context === undefined ? {} : { context }),
-			...(reply === undefined ? {} : { in_reply_to: reply.ref }),
+			...(reply === undefined ? {} : { reply }),
 			...(lockedRelation === undefined ? {} : { relation: lockedRelation }),
-			...(mentions === undefined ? {} : { mentions }),
+			...(refs.mentions === undefined ? {} : { mentions: refs.mentions }),
 			response: plan.response,
 			execution: plan.execution,
-		};
+		});
 	}
 
 	/**
@@ -409,23 +348,25 @@ export class JudgeDecider {
 	 * the exact MessageRef and the owner-attested reply authority from the record it names, so
 	 * no message id ever travels from the model to the wire.
 	 */
-	async #originalQuestion(scope: DecisionScope): Promise<{ ref: MessageRef; authority: NodeId; thread_ref?: ThreadRef } | undefined> {
+	async #originalQuestion(scope: DecisionScope): Promise<ReplyReference | undefined> {
 		const candidates = await this.#replyCandidates(scope);
 		if (candidates.length === 0) return undefined;
 		const started = Date.now();
 		const keyOf = (index: number): string => `answer_${index + 1}`;
-		const criteria: Record<string, string> = { new_message: text("judge.original.new") };
 		const facts = candidates.map((entry, index) => {
-			criteria[keyOf(index)] = text("judge.original.candidate", {
-				from: entry.message.sender, kind: entry.message.delivery_kind,
-				thread: threadKey(entry.thread_ref), seq: entry.seq, body: boundText(entry.message.msg),
-			});
-			return { key: keyOf(index), from: entry.message.sender, kind: entry.message.delivery_kind, thread: threadKey(entry.thread_ref), seq: entry.seq };
+			return {
+				key: keyOf(index),
+				from: entry.message.sender,
+				kind: entry.message.delivery_kind,
+				thread: threadKey(entry.thread_ref),
+				seq: entry.seq,
+				body: boundText(entry.message.msg),
+			};
 		});
 		const answers = await this.#judge(
 			scope.ctx,
 			{ focus: this.#focus(scope), trigger: this.#trigger(scope.ctx), candidates: facts },
-			{ original: { type: "choice", instructions: text("judge.original.instructions"), criteria } },
+			originalQuestions(facts),
 			scope.signal,
 		);
 		this.#record("outbound.o2a_original", scope.input, answers, Date.now() - started);
@@ -505,16 +446,7 @@ export class JudgeDecider {
 		const answers = await this.#judge(
 			scope.ctx,
 			{ focus: this.#focus(scope), in_reply_to: meta.in_reply_to ?? null },
-			{
-				relation: {
-					type: "choice",
-					instructions: text("judge.relation.instructions"),
-					criteria: {
-						reply: text("judge.relation.reply"),
-						followup: text("judge.relation.followup"),
-					},
-				},
-			},
+			relationQuestions(),
 			scope.signal,
 		);
 		this.#record("outbound.o2a", scope.input, answers, Date.now() - started);
@@ -545,26 +477,7 @@ export class JudgeDecider {
 				})),
 				recent_inbound_unanswered: await this.#unanswered(scope.ctx),
 			},
-			{
-				target: {
-					type: "choice",
-					instructions: text("judge.target.instructions"),
-					criteria: {
-						// The abstain exit: an unnamed recipient must surface as ambiguous_target,
-						// never as a low-confidence random pick among peers.
-						none: text("judge.target.none"),
-						...Object.fromEntries(peers.map(peer => [
-							peer.node_id,
-							text("judge.target.peer", {
-								node: peer.node_id,
-								base_url: peer.base_url,
-								instance: peer.instance_id,
-								last_seen: peer.last_seen,
-							}),
-						])),
-					},
-				},
-			},
+			targetQuestions(peers),
 			scope.signal,
 		);
 		this.#record("outbound.o2a", scope.input, answers, Date.now() - started);
@@ -585,63 +498,25 @@ export class JudgeDecider {
 		relation: "reply" | "followup" | undefined,
 		isReply: boolean,
 	): Promise<{ response: "await" | "async" | "none"; execution: "existing" | "new" }> {
-		const response = this.#inherited(meta, "response");
-		const execution = this.#inherited(meta, "execution");
-		if (response !== undefined && execution !== undefined) {
-			return { response: response as "await" | "async" | "none", execution: execution as "existing" | "new" };
+		const inherited = inheritedModes(meta);
+		// A plan the caller stated completely is not a question: asking it would offer to
+		// overrule the one party that knows what the call wants.
+		if (inherited.response !== undefined && inherited.execution !== undefined) {
+			return resolvedModes(inherited, {});
 		}
 		const started = Date.now();
 		const answers = await this.#judge(
 			scope.ctx,
 			{ focus: this.#focus(scope), relation: relation ?? "new" },
-			{
-				...(response === undefined
-					? {
-							response: {
-								type: "choice",
-								instructions: text("judge.response.instructions"),
-								criteria: {
-									none: text("judge.response.none"),
-									async: text("judge.response.async"),
-									await: text("judge.response.await"),
-								},
-							},
-						}
-					: {}),
-				...(execution === undefined
-					? {
-							execution: {
-								type: "choice",
-								instructions: text("judge.execution.instructions"),
-								criteria: {
-									existing: isReply
-										? text("judge.execution.existing.reply")
-										: text("judge.execution.existing.new"),
-									new: text("judge.execution.new"),
-								},
-							},
-						}
-					: {}),
-			},
+			planQuestions({
+				response: inherited.response === undefined,
+				execution: inherited.execution === undefined,
+				reply: isReply,
+			}),
 			scope.signal,
 		);
 		this.#record("outbound.o3a", scope.input, answers, Date.now() - started);
-		const chosenResponse = response ?? choice(answers, "response");
-		const chosenExecution = execution ?? choice(answers, "execution");
-		if (chosenResponse !== "none" && chosenResponse !== "async" && chosenResponse !== "await") {
-			throw new OnlyneError("decision_unavailable", text("error.response_mode"));
-		}
-		if (chosenExecution !== "existing" && chosenExecution !== "new") {
-			throw new OnlyneError("decision_unavailable", text("error.execution_mode"));
-		}
-		return { response: chosenResponse, execution: chosenExecution };
-	}
-
-	#inherited(meta: Record<string, Json>, key: string): "await" | "async" | "none" | "existing" | "new" | undefined {
-		const value = meta[key];
-		if (value === "await" || value === "async" || value === "none" || value === "existing" || value === "new") return value;
-		if (value !== undefined) throw new OnlyneError("invalid_request", text("error.meta_mode", { key }));
-		return undefined;
+		return resolvedModes(inherited, answers);
 	}
 
 	/**
@@ -672,19 +547,7 @@ export class JudgeDecider {
 		const answers = await this.#judge(
 			scope.ctx,
 			{ focus: this.#focus(scope), target_published_contexts: published },
-			{
-				context: {
-					type: "choice",
-					instructions: text("judge.context.instructions"),
-					criteria: {
-						...Object.fromEntries(published.map(context => [
-							context.alias,
-							text("judge.context.published", { summary: context.summary, state: context.state }),
-						])),
-						none: text("judge.context.none"),
-					},
-				},
-			},
+			contextQuestions(published),
 			scope.signal,
 		);
 		this.#record("outbound.o3a-ctx", scope.input, answers, Date.now() - started);
@@ -693,32 +556,6 @@ export class JudgeDecider {
 		// is where work continues, and the caller refuses only when there is no such context.
 		if (alias === undefined || alias === "none" || !published.some(context => context.alias === alias)) return main;
 		return alias;
-	}
-
-	/**
-	 * The thread a send names. The thread decides where the message is stored; `to` decides who
-	 * is addressed. An initiator owns its thread for the whole conversation, so every member
-	 * writes into it and the client routes each message to that owner. A bare id that names no
-	 * local thread is the target's thread id, as a receipt reports it.
-	 */
-	async #sendThread(meta: Record<string, Json> | undefined, to: NodeId): Promise<ThreadRef | undefined> {
-		if (meta?.thread === undefined) return undefined;
-		const value = meta.thread;
-		if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-			return this.#thread(meta);
-		}
-		if (typeof value !== "string" || value.length === 0) {
-			throw new OnlyneError("invalid_request", text("error.thread_reference_shape"));
-		}
-		const matches = (await this.#namedThreads()).filter(thread => thread.ref.id === value || thread.title === value);
-		if (matches.length > 1) throw new OnlyneError("ambiguous_target", text("error.ambiguous_local_thread", { value }));
-		if (matches.length === 1) return matches[0]!.ref;
-		// The same slash grammar as #threadByAlias; a bare id names a thread the addressee hosts.
-		const slash = value.lastIndexOf("/");
-		if (slash > 0 && slash < value.length - 1) {
-			return { owner: value.slice(0, slash), id: value.slice(slash + 1) };
-		}
-		return { owner: to, id: value };
 	}
 
 	/**
@@ -848,16 +685,7 @@ export class JudgeDecider {
 				current_work: this.#trigger(scope),
 				thread_dialogue: await this.#threadEvidenceFor([entry.thread_ref]),
 			},
-			{
-				needs_answer: {
-					type: "choice",
-					instructions: text("judge.needs_answer.instructions"),
-					criteria: {
-						yes: text("judge.needs_answer.yes"),
-						no: text("judge.needs_answer.no"),
-					},
-				},
-			},
+			needsAnswerQuestions(),
 			undefined,
 		);
 		this.#record("inbound.i0", { delivery_kind: entry.message.delivery_kind, msg: entry.message.msg, meta: entry.message.meta }, answers, Date.now() - started);
@@ -898,11 +726,6 @@ export class JudgeDecider {
 		const started = Date.now();
 		// `fragment` never starts a turn, so a message that needs an answer can never be one;
 		// offering it would be an option whose choice guarantees the obligation is missed.
-		const criteria: Record<string, string> = {
-			steer: text("judge.insertion.steer"),
-			follow_up: text("judge.insertion.follow_up"),
-			...(needsAnswer ? {} : { fragment: text("judge.insertion.fragment") }),
-		};
 		const answers = await this.#judge(
 			scope,
 			{
@@ -910,13 +733,7 @@ export class JudgeDecider {
 				host_running_state: { is_turn_active: !scope.isIdle(), plan_mode: this.#planActive(scope) },
 				urgency_signals: { has_stop_or_change: URGENCY_CUES.some(cue => body.includes(cue)) },
 			},
-			{
-				insertion_mode: {
-					type: "choice",
-					instructions: text("judge.insertion.instructions"),
-					criteria,
-				},
-			},
+			insertionQuestions({ fragment: !needsAnswer }),
 		);
 		this.#record("inbound.i2", { delivery_kind: entry.message.delivery_kind, msg: entry.message.msg, meta: entry.message.meta }, answers, Date.now() - started);
 		const mode = choice(answers, "insertion_mode");
@@ -1071,8 +888,9 @@ export class JudgeDecider {
 	}
 
 	/**
-	 * Only stable, explicit fields route without a decision. Everything semantic,
-	 * including a bare thread reference, goes to the judge.
+	 * Only stable, explicit fields route without a decision. A reference is resolved, never
+	 * judged: `meta.thread`, `meta.to` and `meta.resource` name a record, and whether the
+	 * message means to use them at all is what the judge answers.
 	 */
 	async #explicit(scope: DecisionScope): Promise<Action | undefined> {
 		const meta = scope.input.meta;
@@ -1080,8 +898,8 @@ export class JudgeDecider {
 		if (meta.scope === "resources") return this.#read(scope, "resources");
 		const op = stringField(meta, "op");
 		if (op !== undefined && isThreadOp(op)) {
-			const thread = await this.#thread(meta);
-			const to = await this.#target(meta);
+			const thread = await this.refs.thread(meta);
+			const to = await this.refs.target(meta);
 			const title = stringField(meta, "title");
 			if (op === "create" && title === undefined) throw new OnlyneError("invalid_request", text("error.thread_title_required"));
 			if (op !== "create" && op !== "list" && thread === undefined) {
@@ -1099,22 +917,7 @@ export class JudgeDecider {
 			};
 		}
 
-		const resource = recordField(meta, "resource");
-		if (resource !== undefined) {
-			const owner = stringField(resource, "owner");
-			const id = stringField(resource, "id");
-			const operation = stringField(meta, "operation");
-			if (owner === undefined || id === undefined || operation === undefined) {
-				throw new OnlyneError("invalid_request", text("error.resource_fields"));
-			}
-			return {
-				kind: "resource",
-				resource: { owner, id },
-				operation,
-				...(meta.data === undefined ? {} : { data: meta.data }),
-				...(typeof meta.expected_revision === "string" ? { expected_revision: meta.expected_revision } : {}),
-			};
-		}
+		if (recordField(meta, "resource") !== undefined) return resourceAction(meta);
 
 		const scopeName = stringField(meta, "scope");
 		if (scopeName !== undefined) {
@@ -1134,7 +937,7 @@ export class JudgeDecider {
 			if (this.deps.resourceQuery === undefined) throw new OnlyneError("unavailable", text("error.resource_host_unavailable"));
 			return { kind: "read", scope: name, query: await this.deps.resourceQuery(meta) };
 		}
-		const thread = await this.#thread(meta);
+		const thread = await this.refs.thread(meta);
 		const page_size = pageSize(meta);
 		const cursor = stringField(meta, "cursor");
 		const seq = stringField(meta, "seq");
@@ -1164,7 +967,7 @@ export class JudgeDecider {
 				attention: attention(meta),
 			};
 		}
-		const resolved = await this.#messageRef(meta, thread);
+		const resolved = await this.refs.message(meta, thread);
 		if (resolved === undefined) {
 			throw new OnlyneError("invalid_request", text("error.read_message_required", { name }));
 		}
@@ -1185,20 +988,7 @@ export class JudgeDecider {
 		const answers = await this.#judge(
 			scope.ctx,
 			{ focus: { delivery_kind: scope.input.delivery_kind, msg: scope.input.msg, meta: meta ?? null } },
-			{
-				read_scope: {
-					type: "choice",
-					instructions: text("judge.read_scope.instructions"),
-					criteria: {
-						peers: text("judge.read_scope.peers"),
-						inbox: text("judge.read_scope.inbox"),
-						messages: text("judge.read_scope.messages"),
-						evidence: text("judge.read_scope.evidence"),
-						resources: text("judge.read_scope.resources"),
-						none: text("judge.read_scope.none"),
-					},
-				},
-			},
+			readScopeQuestions(),
 			scope.signal,
 		);
 		this.#record("outbound.o2b", scope.input, answers, Date.now() - started);
@@ -1214,7 +1004,7 @@ export class JudgeDecider {
 			throw new OnlyneError("decision_unavailable", text("error.read_scope_unknown", { scope: scopeName }));
 		}
 		const name: ActionReadScope = scopeName === "peers" ? "neighbors" : scopeName;
-		const thread = await this.#thread(meta);
+		const thread = await this.refs.thread(meta);
 		if (name === "messages") {
 			const chosen = thread ?? await this.#threadQuestion(scope, "outbound.o3b-th");
 			return {
@@ -1228,7 +1018,7 @@ export class JudgeDecider {
 			};
 		}
 		if (name === "evidence") {
-			const resolved = await this.#messageRef(meta, thread);
+			const resolved = await this.refs.message(meta, thread);
 			if (resolved === undefined) {
 				throw new OnlyneError("invalid_request", text("error.read_message_required", { name }));
 			}
@@ -1263,21 +1053,7 @@ export class JudgeDecider {
 					next_seq: thread.next_seq,
 				})),
 			},
-			{
-				thread: {
-					type: "choice",
-					instructions: text("judge.thread.instructions"),
-					criteria: Object.fromEntries(threads.map(thread => [
-						thread.thread_ref.id,
-						text("judge.thread.item", {
-							title: thread.title,
-							owner: thread.thread_ref.owner,
-							id: thread.thread_ref.id,
-							state: thread.state,
-						}),
-					])),
-				},
-			},
+			threadQuestions(threads.map(thread => ({ ref: thread.thread_ref, title: thread.title, state: thread.state }))),
 			scope.signal,
 		);
 		this.#record(node, scope.input, answers, Date.now() - started);
@@ -1285,7 +1061,7 @@ export class JudgeDecider {
 		if (alias === undefined || alias === "none") {
 			throw new OnlyneError("decision_unavailable", text("error.local_thread_choice"));
 		}
-		return this.#threadByAlias(alias);
+		return this.refs.threadByAlias(alias);
 	}
 
 	/** Node O-2C: the local thread operation. */
@@ -1294,20 +1070,7 @@ export class JudgeDecider {
 		const answers = await this.#judge(
 			scope.ctx,
 			{ focus: this.#focus(scope) },
-			{
-				thread_op: {
-					type: "choice",
-					instructions: text("judge.thread_op.instructions"),
-					criteria: {
-						create: text("judge.thread_op.create"),
-						close: text("judge.thread_op.close"),
-						list: text("judge.thread_op.list"),
-						describe: text("judge.thread_op.describe"),
-						member_add: text("judge.thread_op.member_add"),
-						member_remove: text("judge.thread_op.member_remove"),
-					},
-				},
-			},
+			threadOpQuestions(),
 			scope.signal,
 		);
 		this.#record("outbound.o2c", scope.input, answers, Date.now() - started);
@@ -1318,9 +1081,9 @@ export class JudgeDecider {
 		// A dependent second call: which thread the operation names is only decidable once the
 		// operation is known, and meta.thread settles it without a call (design §4, stepwise).
 		const thread = op === "create" || op === "list"
-			? await this.#thread(meta)
-			: await this.#thread(meta) ?? await this.#threadQuestion(scope, "outbound.o2c-thread");
-		const to = await this.#target(meta);
+			? await this.refs.thread(meta)
+			: await this.refs.thread(meta) ?? await this.#threadQuestion(scope, "outbound.o2c-thread");
+		const to = await this.refs.target(meta);
 		const title = stringField(meta, "title");
 		if ((op === "member_add" || op === "member_remove") && to === undefined) {
 			throw new OnlyneError("decision_unavailable", text("error.thread_op_target", { op }));
@@ -1343,20 +1106,7 @@ export class JudgeDecider {
 		const answers = await this.#judge(
 			scope.ctx,
 			{ focus: this.#focus(scope) },
-			{
-				domain_op: {
-					type: "choice",
-					instructions: text("judge.domain_op.instructions"),
-					criteria: {
-						create: text("judge.domain_op.create"),
-						join: text("judge.domain_op.join"),
-						leave: text("judge.domain_op.leave"),
-						list: text("judge.domain_op.list"),
-						describe: text("judge.domain_op.describe"),
-						discover: text("judge.domain_op.discover"),
-					},
-				},
-			},
+			domainOpQuestions(),
 			scope.signal,
 		);
 		this.#record("outbound.o2d", scope.input, answers, Date.now() - started);
@@ -1372,24 +1122,6 @@ export class JudgeDecider {
 			kind: "domain",
 			op,
 			...(domainId === undefined ? {} : { domain_id: domainId }),
-			...(typeof meta.expected_revision === "string" ? { expected_revision: meta.expected_revision } : {}),
-		};
-	}
-
-	/** The resource branch carries no judge node: meta names every field. */
-	async #resourceAction(meta: Record<string, Json>): Promise<Action> {
-		const resource = recordField(meta, "resource");
-		const owner = resource === undefined ? undefined : stringField(resource, "owner");
-		const id = resource === undefined ? undefined : stringField(resource, "id");
-		const operation = stringField(meta, "operation");
-		if (owner === undefined || id === undefined || operation === undefined) {
-			throw new OnlyneError("invalid_request", text("error.resource_action_fields"));
-		}
-		return {
-			kind: "resource",
-			resource: { owner, id },
-			operation,
-			...(meta.data === undefined ? {} : { data: meta.data }),
 			...(typeof meta.expected_revision === "string" ? { expected_revision: meta.expected_revision } : {}),
 		};
 	}
@@ -1443,273 +1175,12 @@ export class JudgeDecider {
 	}
 
 
-	async #thread(meta: Record<string, Json> | undefined): Promise<ThreadRef | undefined> {
-		if (meta === undefined) return undefined;
-		const value = meta.thread;
-		if (value === undefined) return undefined;
-		if (typeof value === "string") return this.#threadByAlias(value);
-		const record = recordField(meta, "thread");
-		const owner = record === undefined ? undefined : stringField(record, "owner");
-		const id = record === undefined ? undefined : stringField(record, "id");
-		if (owner !== undefined && id !== undefined) return { owner, id };
-		throw new OnlyneError("invalid_request", text("error.thread_reference_shape"));
-	}
-
-	async #threadByAlias(alias: string): Promise<ThreadRef> {
-		const matches = (await this.#namedThreads()).filter(thread => thread.ref.id === alias || thread.title === alias);
-		if (matches.length === 1) return matches[0]!.ref;
-		if (matches.length > 1) throw new OnlyneError("ambiguous_target", text("error.ambiguous_thread", { alias }));
-		// One slash grammar for every textual thread reference: the owner is the part before the
-		// LAST slash, which is safe for urn owners and for ids that never carry a slash.
-		const slash = alias.lastIndexOf("/");
-		if (slash > 0 && slash < alias.length - 1) {
-			return { owner: alias.slice(0, slash), id: alias.slice(slash + 1) };
-		}
-		throw new OnlyneError("not_found", text("error.thread_not_found", { alias }));
-	}
-
-	/**
-	 * Every thread this node can name by id or title: the ones it hosts, plus the ones it was
-	 * invited into. A joined thread lives on its owner, so naming it here is a reference, never
-	 * a claim that this node holds the thread record.
-	 */
-	async #namedThreads(): Promise<Array<{ ref: ThreadRef; title: string | undefined }>> {
-		const [owned, joined] = await Promise.all([this.deps.listThreads(), this.deps.listJoinedThreads()]);
-		return [
-			...owned.map(thread => ({ ref: thread.thread_ref, title: thread.title as string | undefined })),
-			...joined.map(thread => ({ ref: thread.thread_ref, title: thread.title })),
-		];
-	}
-
-	async #target(meta: Record<string, Json> | undefined): Promise<NodeId | undefined> {
-		if (meta === undefined) return undefined;
-		const value = meta.to;
-		if (value === undefined) return undefined;
-		if (typeof value !== "string") {
-			throw new OnlyneError("invalid_request", text("error.meta_to_single"));
-		}
-		if (value.length === 0) throw new OnlyneError("invalid_request", text("error.meta_to_empty"));
-		return this.#peerId(value);
-	}
-
 	/**
 	 * RFC 0018 §3.1: the node a mechanical `op` names, resolved against the same peer set a send
 	 * resolves `meta.to` from, so a name that addresses a peer once addresses it everywhere.
 	 */
 	async peerId(alias: string): Promise<NodeId> {
-		return this.#peerId(alias);
-	}
-
-	/**
-	 * Resolve an explicit target to a node id. Identity comes from the trust table and the
-	 * discovery catalog, never from liveness: a peer whose exchange is done is still that peer
-	 * when its discovery record goes stale or is deleted. Whether we can reach it is a delivery
-	 * question, reported as `unavailable` by the transport, not a reason to claim no such node
-	 * exists. A bare alias is accepted only when exactly one known node's last segment names it.
-	 */
-	async #peerId(alias: string): Promise<NodeId> {
-		const ids = await this.#knownIds();
-		if (alias === "self") return this.deps.config.node.id;
-		if (ids.includes(alias)) return alias;
-		const matches = ids.filter(id => lastSegment(id) === alias);
-		if (matches.length === 1) return matches[0]!;
-		if (matches.length > 1) {
-			throw new OnlyneError("ambiguous_target", text("error.alias_ambiguous", { alias, matches: matches.join(", ") }));
-		}
-		throw new OnlyneError("not_found", text("error.alias_not_found", { alias }));
-	}
-
-	/**
-	 * Every node this one can name: itself, each peer it holds a live trust row with, and each
-	 * peer discovery currently reports. The trust rows come first because they are the ones that
-	 * survive a peer moving, restarting or dropping out of the catalog for a refresh window.
-	 */
-	async #knownIds(): Promise<NodeId[]> {
-		const ids = new Set<NodeId>([this.deps.config.node.id]);
-		try {
-			for (const peer of await knownPeers(this.deps)) ids.add(peer.node_id);
-		} catch (error) {
-			// Both sources failing leaves only this node; an alias then resolves to `not_found`,
-			// which is the honest answer when nothing can be read at all.
-			this.deps.log?.("onlyne.judge.peers_unreadable", { error: message(error) });
-		}
-		return [...ids];
-	}
-
-	async #mentions(meta: Record<string, Json> | undefined): Promise<string[] | undefined> {
-		if (meta === undefined) return undefined;
-		const value = meta.mentions;
-		if (value === undefined) return undefined;
-		if (!Array.isArray(value)) throw new OnlyneError("invalid_request", text("error.mentions_array"));
-		const resolved: string[] = [];
-		for (const item of value) {
-			if (typeof item !== "string" || item.length === 0) {
-				throw new OnlyneError("invalid_request", text("error.mention_empty"));
-			}
-			if (item === "@all") {
-				resolved.push(item);
-				continue;
-			}
-			resolved.push(await this.#peerId(item.startsWith("@") ? item.slice(1) : item));
-		}
-		return resolved;
-	}
-
-	async #reply(meta: Record<string, Json> | undefined): Promise<{ ref: MessageRef; authority: NodeId; thread_ref?: ThreadRef } | undefined> {
-		if (meta === undefined) return undefined;
-		const value = meta.in_reply_to;
-		if (value === undefined) return undefined;
-		if (value === null || typeof value !== "object" || Array.isArray(value)) {
-			throw new OnlyneError("invalid_request", text("error.in_reply_to_object"));
-		}
-		const record = value as Record<string, Json>;
-		const sender = stringField(record, "sender");
-		const id = stringField(record, "id");
-		if (sender !== undefined && id !== undefined) {
-			// The authority is an identity, not the caller's spelling: `caerulea` and
-			// `urn:onlyne:agent:caerulea` name the same node, so both the ref and the authority
-			// carry the resolved id and every later comparison is like-for-like. Comparing a raw
-			// string against a resolved one produced two contradictory errors in a row
-			// (cyanea report 1, problem 1).
-			const authority = await this.#peerId(sender).catch(() => sender);
-			// A reference the node can prove wrong is refused here, before the ref reaches the
-			// wire and dies in the peer's not_found: an id that names a different sender locally
-			// is a definite error, and the error names the message the id really belongs to.
-			const elsewhere = (await this.deps.listInbox()).find(row =>
-				row.attention.entry !== undefined && row.attention.entry.message.id === id
-				&& row.attention.entry.message.sender !== authority);
-			if (elsewhere !== undefined) {
-				const actual = elsewhere.attention.entry!.message.sender;
-				throw new OnlyneError("invalid_request", text("error.reply_reference_conflict", { named: sender, actual }));
-			}
-			return { ref: { sender: authority, id }, authority };
-		}
-		const threadAlias = stringField(record, "thread");
-		const seq = seqField(record, "seq");
-		if (threadAlias === undefined) {
-			throw new OnlyneError("invalid_request", text("error.in_reply_to_shape"));
-		}
-		if (seq === undefined) {
-			throw new OnlyneError("invalid_request", text("error.in_reply_to_seq"));
-		}
-		const thread = await this.#threadByAlias(threadAlias);
-		const entry = await this.#entryAt(thread, seq);
-		if (entry === undefined) throw new OnlyneError("not_found", text("error.message_not_found", { thread: threadAlias, seq }));
-		return {
-			ref: { sender: entry.message.sender, id: entry.message.id },
-			authority: entry.reply_authority,
-			thread_ref: entry.thread_ref,
-		};
-	}
-
-	/**
-	 * The message a read names, with the thread it was resolved in. `{sender,id}` carries no
-	 * thread here; `{thread,seq}` does, and an explicit meta.thread that contradicts the
-	 * reference is refused rather than silently winning.
-	 */
-	async #messageRef(meta: Record<string, Json>, thread?: ThreadRef): Promise<{ ref: MessageRef; thread?: ThreadRef } | undefined> {
-		const value = meta.message;
-		const record = value !== null && typeof value === "object" && !Array.isArray(value)
-			? (value as Record<string, Json>)
-			: undefined;
-		const sender = record === undefined ? undefined : stringField(record, "sender");
-		const id = record === undefined ? undefined : stringField(record, "id");
-		if (sender !== undefined && id !== undefined) {
-			return { ref: { sender, id }, ...(thread === undefined ? {} : { thread }) };
-		}
-		// meta.message takes the same two shapes as meta.in_reply_to, including its own thread
-		// reference: `{thread, seq}` is the form a reader copies out of another reference, and
-		// refusing it while accepting `{sender, id}` made the same fact two spellings (caerulea 4).
-		const alias = record === undefined ? undefined : stringField(record, "thread");
-		const embedded = alias === undefined ? undefined : await this.#threadByAlias(alias);
-		if (thread !== undefined && embedded !== undefined && threadKey(thread) !== threadKey(embedded)) {
-			throw new OnlyneError(
-				"invalid_request",
-				text("error.message_thread_conflict", { thread: threadKey(thread), embedded: threadKey(embedded) }),
-			);
-		}
-		const scope = thread ?? embedded;
-		if (scope === undefined) return undefined;
-		const seq = (record === undefined ? undefined : seqField(record, "seq")) ?? seqField(meta, "seq");
-		if (seq === undefined) return undefined;
-		const entry = await this.#entryAt(scope, seq);
-		if (entry === undefined) throw new OnlyneError("not_found", text("error.message_not_found", { thread: scope.id, seq }));
-		return { ref: { sender: entry.message.sender, id: entry.message.id }, thread: scope };
-	}
-
-	async #entryAt(thread: ThreadRef, seq: string): Promise<Entry | undefined> {
-		let cursor: string | undefined;
-		for (let page = 0; page < MAX_TAIL_PAGES; page++) {
-			const result: Page<Entry> = await this.deps.listMessages(thread, cursor);
-			const found = result.items.find(entry => entry.seq === seq);
-			if (found !== undefined) return found;
-			cursor = result.next_cursor ?? undefined;
-			if (cursor === undefined) return undefined;
-		}
-		return undefined;
-	}
-
-	/**
-	 * A subagent may read only the threads its own context records authorize on
-	 * this node. The unfiltered node-wide views stay with the main session.
-	 */
-	async #guard(scope: DecisionScope, action: Action): Promise<void> {
-		if (scope.readOnly !== true) return;
-		if (action.kind !== "read") {
-			throw new OnlyneError(
-				"forbidden",
-				text("error.guard_write"),
-			);
-		}
-		if (action.scope === "resources") throw new OnlyneError("forbidden", text("error.resources_main_only"));
-		if (action.scope === "directory" || action.scope === "neighbors" || action.scope === "threads" || action.scope === "inbox") {
-			throw new OnlyneError(
-				"forbidden",
-				text("error.guard_node_listing"),
-			);
-		}
-		const records = await this.#authorizedRecords(scope.ctx.agent.id);
-		if (action.scope === "evidence") {
-			const ref = action.message;
-			const tied = ref !== undefined && records.some(record =>
-				record.source !== undefined && record.source.sender === ref.sender && record.source.id === ref.id,
-			);
-			if (!tied) {
-				throw new OnlyneError("forbidden", text("error.guard_evidence"));
-			}
-			return;
-		}
-		// `{sender,id}` names no thread, so the record that received that message is the
-		// authorization — the same tie evidence uses.
-		if (action.scope === "message" && action.thread === undefined && action.message !== undefined) {
-			const ref = action.message;
-			const tied = records.some(record =>
-				record.source !== undefined && record.source.sender === ref.sender && record.source.id === ref.id,
-			);
-			if (!tied) {
-				throw new OnlyneError("forbidden", text("error.guard_message"));
-			}
-			return;
-		}
-		if (action.thread === undefined) {
-			throw new OnlyneError("forbidden", text("error.guard_thread_required"));
-		}
-		const key = threadKey(action.thread);
-		if (!records.some(record => record.thread_ref !== undefined && threadKey(record.thread_ref) === key)) {
-			throw new OnlyneError("forbidden", text("error.guard_no_slice", { thread: key }));
-		}
-	}
-
-	async #authorizedRecords(agentId: string): Promise<ContextRecord[]> {
-		let records: ContextRecord[];
-		try {
-			records = await this.deps.contexts.list();
-		} catch (error) {
-			throw new OnlyneError("unavailable", text("error.registry_unreadable", { error: message(error) }));
-		}
-		return records.filter(record =>
-			record.node_id === this.deps.config.node.id && record.agent_id === agentId && record.thread_ref !== undefined,
-		);
+		return this.refs.peerId(alias);
 	}
 
 	async #contextRows(): Promise<Source<Row[]>> {
@@ -1874,12 +1345,6 @@ function actionFacts(action: Action): Record<string, string> {
 	return facts;
 }
 
-function choice(answers: Answers, key: string): string | undefined {
-	const answer = answers[key];
-	if (answer === undefined || answer === null || typeof answer !== "object") return undefined;
-	return typeof answer.choice === "string" ? answer.choice : undefined;
-}
-
 function stringField(record: Record<string, Json>, key: string): string | undefined {
 	const value = record[key];
 	return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -1935,10 +1400,6 @@ function branchOf(ctx: ExtensionContext): readonly SessionEntry[] {
 	return ctx.sessionManager.getBranch();
 }
 
-function threadKey(ref: ThreadRef): string {
-	return `${ref.owner}/${ref.id}`;
-}
-
 /**
  * A wording hint about whether the sender expects an answer: metadata says reply, or the body
  * greets or asks. It is evidence for node I-0, never the decision — a completed reply also
@@ -1949,13 +1410,6 @@ export function needsReplyOf(entry: Entry): boolean {
 	if (entry.message.meta?.relation === "reply") return true;
 	const body = entry.message.msg.toLowerCase();
 	return REPLY_CUES.some(cue => body.includes(cue.toLowerCase())) || /\?|？|\bplease\b|期待/.test(entry.message.msg);
-}
-
-/** A node id's last URN segment; plain ids are their own segment. */
-function lastSegment(nodeId: NodeId): string {
-	const trimmed = nodeId.replace(/\/+$/, "");
-	const parts = trimmed.split(/[:/]/).filter(part => part.length > 0);
-	return parts.at(-1) ?? trimmed;
 }
 
 function entryFacts(entry: Entry): Row {

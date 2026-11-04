@@ -3,11 +3,11 @@ import { MemoryStorage } from "@onlyne/lib";
 import type { Action, OnlyneNode, Outbound } from "@onlyne/lib";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ResolveContext } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { createOnlyneNode } from "../src/node.ts";
+import { createOnlyneNode } from "@onlyne/node-host/node";
 import { TRUST_THREAD } from "../src/handshake.ts";
 import { setRuntime, type PluginRuntime } from "../src/runtime.ts";
-import { ContextRegistry } from "../src/store.ts";
-import type { OnlyneConfig } from "../src/types.ts";
+import { ContextRegistry } from "@onlyne/node-host/store";
+import type { OnlyneConfig } from "@onlyne/node-host/types";
 import { registerOnlyneUrls } from "../src/urls.ts";
 
 const servers: Array<{ stop(force?: boolean): void }> = [];

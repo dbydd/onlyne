@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { MemoryStorage, generateKeyMaterial } from "@onlyne/lib";
 import type { Action, OnlyneNode } from "@onlyne/lib";
-import { ContextRegistry } from "../src/store.ts";
-import { createOnlyneNode } from "../src/node.ts";
-import type { OnlyneConfig } from "../src/types.ts";
+import { ContextRegistry } from "@onlyne/node-host/store";
+import { createOnlyneNode } from "@onlyne/node-host/node";
+import type { OnlyneConfig } from "@onlyne/node-host/types";
 
 const servers: Array<{ stop(force?: boolean): void }> = [];
 afterEach(() => { for (const server of servers.splice(0)) server.stop(true); });

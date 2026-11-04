@@ -1,8 +1,9 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { ConfigError, loadConfig } from "../config.ts";
+import { DEFAULT_ACQUISITION } from "@onlyne/node-host/acquire";
 import { getRuntime, startRuntime } from "../runtime.ts";
 import { detectTernSession } from "../tern.ts";
-import type { OnlyneConfig } from "../types.ts";
+import type { OnlyneConfig } from "@onlyne/node-host/types";
 import { OnlyneBootstrap, type BootstrapDefaults } from "./bootstrap.ts";
 import { OnlyneViewer } from "./viewer.ts";
 import { LOCALES, setLocale, type Locale } from "@onlyne/node-host/i18n";
@@ -103,6 +104,8 @@ export function registerUi(pi: ExtensionAPI): void {
 						bind: current?.server.bind ?? "127.0.0.1",
 						keyScope: current?.node.key_scope ?? "project",
 						pageSize: current?.threads.page_size ?? 50,
+						policy: current?.acquisition?.policy ?? DEFAULT_ACQUISITION.policy,
+						allow: current?.acquisition?.allow ?? DEFAULT_ACQUISITION.allow,
 						...(current === undefined ? {} : { current }),
 					};
 					await ctx.ui.custom<void>(

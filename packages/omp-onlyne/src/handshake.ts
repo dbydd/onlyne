@@ -1,7 +1,7 @@
 import { OnlyneError, type Json, type KeyExchange, type Message, type NodeId, type Storage, type ThreadRef, type TrustEntry, type TrustPhase } from "@onlyne/lib";
-import { evaluateAcquisition, type AcquireInput, type AcquireVerdict, type AcquisitionPolicy } from "./acquire.ts";
+import { evaluateAcquisition, type AcquireInput, type AcquireVerdict, type AcquisitionPolicy } from "@onlyne/node-host/acquire";
 import { bridgeText as t } from "./bridge-text.ts";
-import { hostText } from "./host-text.ts";
+import { hostText } from "@onlyne/node-host/host-text";
 
 /**
  * RFC 0018 §3.2: the handshake entries live in one thread this node owns alone, so nothing in

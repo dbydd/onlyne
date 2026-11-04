@@ -17,12 +17,19 @@ import {
 	text as textNode,
 } from "@oh-my-pi/pi-tui";
 import { configPath, normalizeNodeId, normalizeRegion, normalizeServiceUrl, saveConfig, shortNodeId } from "../config.ts";
+import { parseAllowBlock, type AcquirePolicy } from "@onlyne/node-host/acquire";
 import { startRuntime } from "../runtime.ts";
-import type { OnlyneConfig } from "../types.ts";
+import type { OnlyneConfig } from "@onlyne/node-host/types";
 import { t, type UiTextKey } from "./bootstrap-text.ts";
 
-const FIELDS = ["region", "nodeId", "bind", "keyScope", "pageSize", "contact"] as const;
+const FIELDS = ["region", "nodeId", "bind", "keyScope", "pageSize", "contact", "policy", "allow"] as const;
 type FieldName = (typeof FIELDS)[number];
+
+const POLICIES: ReadonlyArray<{ value: AcquirePolicy; key: UiTextKey }> = [
+	{ value: "all", key: "bootstrap.policy.all" },
+	{ value: "segment", key: "bootstrap.policy.segment" },
+	{ value: "none", key: "bootstrap.policy.none" },
+];
 
 const LABELS: Record<FieldName, UiTextKey> = {
 	region: "bootstrap.field.region",
@@ -31,6 +38,8 @@ const LABELS: Record<FieldName, UiTextKey> = {
 	keyScope: "bootstrap.field.keyScope",
 	pageSize: "bootstrap.field.pageSize",
 	contact: "bootstrap.field.contact",
+	policy: "bootstrap.field.policy",
+	allow: "bootstrap.field.allow",
 };
 
 const HINTS: Record<FieldName, UiTextKey> = {
@@ -40,6 +49,8 @@ const HINTS: Record<FieldName, UiTextKey> = {
 	keyScope: "bootstrap.hint.keyScope",
 	pageSize: "bootstrap.hint.pageSize",
 	contact: "bootstrap.hint.contact",
+	policy: "bootstrap.hint.policy",
+	allow: "bootstrap.hint.allow",
 };
 
 /** The values the command handler derived from Tern and the saved config. */
@@ -51,6 +62,10 @@ export interface BootstrapDefaults {
 	bind: string;
 	keyScope: string;
 	pageSize: number;
+	/** RFC 0018 §2: the policy this project currently enforces. */
+	policy: AcquirePolicy;
+	/** The allow set as stored, one entry per element. */
+	allow: readonly string[];
 	/** Existing configuration; the draft carries what the form does not edit. */
 	current?: OnlyneConfig;
 }
@@ -96,6 +111,8 @@ export class OnlyneBootstrap implements Component {
 				(defaults.current?.discovery?.seeds ?? []).join(", "),
 				t(HINTS.contact),
 			),
+			policy: this.makeField(t(LABELS.policy), defaults.policy, t(HINTS.policy)),
+			allow: this.makeField(t(LABELS.allow), defaults.allow.join(", "), t(HINTS.allow)),
 		};
 	}
 
@@ -162,6 +179,21 @@ export class OnlyneBootstrap implements Component {
 			this.fail(error instanceof Error ? error.message : String(error));
 			return;
 		}
+		const policy = this.value("policy").toLowerCase();
+		if (policy !== "all" && policy !== "segment" && policy !== "none") {
+			this.fail(t("bootstrap.policyInvalid"));
+			return;
+		}
+		const allow = this.value("allow")
+			.split(/[,\s]+/)
+			.map(entry => entry.trim())
+			.filter(entry => entry.length > 0);
+		for (const entry of allow) {
+			if (parseAllowBlock(entry) === undefined) {
+				this.fail(t("bootstrap.allowInvalid", { value: entry }));
+				return;
+			}
+		}
 		const previous = this.defaults.current;
 		const config: OnlyneConfig = {
 			path: configPath(this.ctx.cwd),
@@ -180,7 +212,7 @@ export class OnlyneBootstrap implements Component {
 			threads: { page_size: Number(this.value("pageSize")) },
 			...(seeds.length === 0 ? {} : { discovery: { seeds } }),
 			...(previous?.trust === undefined ? {} : { trust: previous.trust }),
-			...(previous?.acquisition === undefined ? {} : { acquisition: previous.acquisition }),
+			acquisition: { policy, allow },
 			...(previous?.language === undefined ? {} : { language: previous.language }),
 		};
 		this.saving = true;
@@ -254,6 +286,29 @@ export class OnlyneBootstrap implements Component {
 		return node("row", { role: "omp.btn", actions: { click: act }, title: label }, [textNode(label)], act);
 	}
 
+	/** The three values side by side: a policy is chosen, not typed into a free-form field. */
+	private policyRow(): NativeNode {
+		const current = this.value("policy").toLowerCase();
+		return node(
+			"row",
+			{ role: "onlyne.policy", gap: "sm", align: "center" },
+			POLICIES.map(item =>
+				node(
+					"row",
+					{
+						role: "omp.btn",
+						actions: { click: `onlyne.bootstrap.policy.${item.value}` },
+						tone: current === item.value ? "accent" : undefined,
+						title: t("bootstrap.policy.title", { value: item.value }),
+					},
+					[textNode([span(t(item.key), current === item.value ? "accent strong" : "muted")])],
+					item.value,
+				),
+			),
+			"policy-switch",
+		);
+	}
+
 	describe(_cx: DescribeContext): NativeNode {
 		if (this.locale !== getLocale()) {
 			this.locale = getLocale();
@@ -268,6 +323,7 @@ export class OnlyneBootstrap implements Component {
 				body.push(draft.field);
 			} else body.push(this.fieldRow(name));
 			if (name === "region") body.push(node("text", { text: this.regionPreview(), wrap: "word" }));
+			if (name === "policy") body.push(this.policyRow());
 		}
 		if (this.error !== undefined) body.push(node("text", { spans: [span(this.error, "error")], wrap: "word" }));
 		body.push(
@@ -290,6 +346,15 @@ export class OnlyneBootstrap implements Component {
 		}
 		if (act === "onlyne.bootstrap.cancel" || act === "onlyne.close") {
 			this.done();
+			return;
+		}
+		if (act.startsWith("onlyne.bootstrap.policy.")) {
+			const value = act.slice("onlyne.bootstrap.policy.".length);
+			const known = POLICIES.find(item => item.value === value);
+			if (known === undefined) return;
+			this.active = "policy";
+			this.fields.policy.editor.setText(known.value);
+			this.changed();
 			return;
 		}
 		if (act.startsWith("onlyne.bootstrap.field.")) {

@@ -3,8 +3,8 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { refreshMailCards, renderMailMessage, type OnlyneMessageDetails } from "./ui/mail-message.ts";
 import type { InboundDecision, JudgeDecider } from "./decider.ts";
-import type { ContextRegistry } from "./store.ts";
-import type { ContextRecord } from "./types.ts";
+import type { ContextRegistry } from "@onlyne/node-host/store";
+import type { ContextRecord } from "@onlyne/node-host/types";
 import { AWAIT_CONSUMED, pendingAwaitResults } from "./tool.ts";
 import { applyMessageTodo, type TodoPlanner } from "./todo.ts";
 import { getRuntime } from "./runtime.ts";
@@ -96,8 +96,16 @@ export function createRuntimeBridge(deps: BridgeDeps): Runtime {
 			const fields = { ...event } as Record<string, unknown>;
 			const name = String(fields.event);
 			delete fields.event;
-			const thread = fields.thread as { owner?: unknown; id?: unknown } | undefined;
-			if (thread !== undefined) fields.thread = `${String(thread.owner)}/${String(thread.id)}`;
+			// `reconcile.failed` is the one event that names its thread as a bare id beside the
+			// owner, so formatting it as a reference logged `undefined/undefined` and dropped the
+			// id entirely. Every other event carries a real ThreadRef.
+			if (name === "reconcile.failed") {
+				fields.thread = `${String(fields.owner)}/${String(fields.thread)}`;
+				delete fields.owner;
+			} else {
+				const thread = fields.thread as { owner?: unknown; id?: unknown } | undefined;
+				if (thread !== undefined) fields.thread = `${String(thread.owner)}/${String(thread.id)}`;
+			}
 			if (TRACE_DEBUG.has(name)) deps.pi.logger.debug(`onlyne.${name}`, fields);
 			else deps.pi.logger.info(`onlyne.${name}`, fields);
 		},
