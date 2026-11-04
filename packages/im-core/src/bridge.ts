@@ -65,6 +65,7 @@ export interface DriverBridgeOptions {
   storage: { transaction<T>(work: (tx: {
     get<T>(key: string): Promise<T | undefined>;
     put<T>(key: string, value: T): Promise<void>;
+    delete(key: string): Promise<void>;
   }) => Promise<T>): Promise<T> };
   connectors: Array<{ platform: string; connector: Connector }>;
   /**
@@ -141,6 +142,13 @@ export function createDriverBridge(options: DriverBridgeOptions): ResourceDriver
   receive: (event: ImEvent) => Promise<ResourceEvent>;
   resolve: (platform: string, conversation: string) => Promise<ResourceRef>;
   platformHandle: (ref: ResourceRef, eventId: string) => Promise<{ message_id: string; ref_handle: string } | undefined>;
+  /**
+   * The library announces the events that just left retention (`ResourceService.recover`); the
+   * handles recorded for them answer for nothing and go with them. Handles of retained events are
+   * never touched, so a reply to a live event still quotes it — this reads event state, never a
+   * clock of the bridge's own.
+   */
+  retire: (events: ResourceEvent[]) => Promise<void>;
 } {
   const { node, storage, connectors } = options;
   const resources = () => options.resources();
@@ -159,6 +167,27 @@ export function createDriverBridge(options: DriverBridgeOptions): ResourceDriver
 
   async function handleOf(ref: ResourceRef, eventId: string): Promise<HandleRow | undefined> {
     return storage.transaction(async tx => tx.get<HandleRow>(handleKey(ref, eventId)));
+  }
+
+  /**
+   * The handle rows are an index over the event log, so they end with the event they point at:
+   * one row per inbound message would otherwise accumulate for the life of the store. The ids
+   * arrive from retention, so a retained event always keeps its reply target.
+   */
+  async function retire(events: ResourceEvent[]): Promise<void> {
+    const grouped = new Map<string, { ref: ResourceRef; ids: string[] }>();
+    for (const event of events) {
+      const scope = `${event.resource_ref.owner}/${event.resource_ref.id}`;
+      const entry = grouped.get(scope) ?? { ref: event.resource_ref, ids: [] };
+      entry.ids.push(event.event_id);
+      grouped.set(scope, entry);
+    }
+    if (grouped.size === 0) return;
+    await storage.transaction(async tx => {
+      for (const { ref, ids } of grouped.values()) {
+        for (const id of ids) await tx.delete(handleKey(ref, id));
+      }
+    });
   }
 
   /**
@@ -343,6 +372,7 @@ export function createDriverBridge(options: DriverBridgeOptions): ResourceDriver
 
     receive,
     resolve,
+    retire,
 
     /** The platform handles recorded for one inbound event, so a later reply can quote it. */
     async platformHandle(ref: ResourceRef, eventId: string): Promise<{ message_id: string; ref_handle: string } | undefined> {

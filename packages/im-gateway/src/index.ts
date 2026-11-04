@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   OnlyneNode, OnlyneError, MemoryStorage, type Auth, type Json, type MaintenanceClock, type NodeId,
   type KeyHook, type OperationRequest, type Plugins, type Resource, type ResourceRef, type Storage,
-  type ThreadRef, type TraceEvent, type Transport,
+  type Thread, type ThreadRef, type TraceEvent, type Transport,
 } from '@onlyne/lib';
 import { coordinateOf, createDriverBridge, resourceIdOf, type Connector, type ImEvent, type SendOutcome } from '@onlyne/im-core';
 import { leveled, type LeveledLog, type LogLine, type LogSink } from '@onlyne/node-host';
@@ -197,11 +197,16 @@ function definitionOf(owner: NodeId, channel: ChannelConfig, ref: ResourceRef, c
 /**
  * RFC 0012 §1: the gateway owns one thread per platform conversation. The id is derived from
  * the resource, so a restart resolves the same thread instead of opening a second one.
+ *
+ * A store can lose the thread row while its entries survive (a whole-file write from an older
+ * snapshot). A fresh thread starts at seq 1, which the next admission would write over entry 1,
+ * so the counters resume past the highest row the store still holds. Returns whether the row
+ * had to be rebuilt.
  */
-async function ensureThread(node: OnlyneNode, ref: ThreadRef, title: string): Promise<void> {
+async function ensureThread(node: OnlyneNode, storage: Storage, ref: ThreadRef, title: string): Promise<boolean> {
   try {
     await node.threads.describe(node.auth, ref);
-    return;
+    return false;
   } catch (error) {
     if (!(error instanceof OnlyneError) || error.error.code !== 'not_found') throw error;
   }
@@ -215,7 +220,29 @@ async function ensureThread(node: OnlyneNode, ref: ThreadRef, title: string): Pr
   } catch (error) {
     // A concurrent registration may have created it first; only that conflict is benign.
     if (!(error instanceof OnlyneError) || error.error.code !== 'id_conflict') throw error;
+    return false;
   }
+  const row = ['thread', ref.owner, ref.id].map(encodeURIComponent).join('/');
+  const prefix = (...parts: string[]): string => `${[...parts].map(encodeURIComponent).join('/')}/`;
+  await storage.transaction(async tx => {
+    const thread = await tx.get<Thread>(row);
+    if (thread === undefined) return;
+    const highest = async (at: string): Promise<bigint> => {
+      let max = 0n;
+      for (const { key } of await tx.scan(at)) {
+        const seq = key.slice(at.length);
+        if (/^[0-9]+$/.test(seq) && BigInt(seq) > max) max = BigInt(seq);
+      }
+      return max;
+    };
+    const next_seq = (await highest(prefix('entry', ref.owner, ref.id)) + 1n).toString();
+    const events = await highest(prefix('event', ref.owner, ref.id));
+    const event_seq = (events > BigInt(thread.event_seq) ? events : BigInt(thread.event_seq)).toString();
+    if (next_seq !== thread.next_seq || event_seq !== thread.event_seq) {
+      await tx.put<Thread>(row, { ...thread, next_seq, event_seq });
+    }
+  });
+  return true;
 }
 
 /** The operation result's own codes, so `platform.send` names the failure the caller is told. */
@@ -429,7 +456,7 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
       throw error;
     });
     const resource = await node.resources.register(node.auth, definitionOf(owner, channel, ref, conversation, connector));
-    await ensureThread(node, threadRefOf(ref), conversation);
+    await ensureThread(node, storage, threadRefOf(ref), conversation);
     if (existing !== undefined) return;
     out.log('resource.binding', {
       action: 'bind', resource: `${ref.owner}/${ref.id}`,
@@ -457,6 +484,24 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
     },
   });
   let node: OnlyneNode;
+  /** The thread a conversation resource already owns; a rebuilt row is a store repair, so it is logged. */
+  const ensureConversationThread = async (ref: ResourceRef, conversation: string): Promise<void> => {
+    const thread = threadRefOf(ref);
+    if (!await ensureThread(node, storage, thread, conversation)) return;
+    out.error('im.thread.repaired', {
+      resource: `${ref.owner}/${ref.id}`, thread: `${thread.owner}/${thread.id}`, conversation,
+    });
+  };
+  /**
+   * RFC 0012 §1: `bridge.resolve` reuses a coordinate row without running `adopt`, so a thread
+   * row lost between starts would never come back on its own. Every resolve the gateway makes
+   * therefore re-checks the thread it owns, which is the repair the first adoption performed.
+   */
+  const resolveConversation = async (platform: string, conversation: string): Promise<ResourceRef> => {
+    const ref = await bridge.resolve(platform, conversation);
+    await ensureConversationThread(ref, conversation);
+    return ref;
+  };
   const base_url = `http://${config.server.bind}:${config.server.port}/onlyne/v3`;
   const resolve = async (id: NodeId) => {
     if (id === owner) return { node_id: id, base_url };
@@ -481,7 +526,7 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
     if (request.operation !== 'send' || ref.owner !== owner) return;
     const coordinate = coordinateOf(ref.id);
     if (coordinate === undefined || coordinate.platform !== channel.platform) return;
-    await bridge.resolve(coordinate.platform, coordinate.conversation);
+    await resolveConversation(coordinate.platform, coordinate.conversation);
   };
   const plugins: Omit<Plugins, 'storage' | 'resources'> = {
     authenticate,
@@ -584,6 +629,9 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
       const ref: ResourceRef = { owner, id: resourceIdOf(event.platform, event.conversation) };
       const seen = await storage.transaction(async tx => tx.get<string>(sourceRow(ref, event.source_id)));
       const stored = await bridge.receive(event);
+      // The inbound path resolves the coordinate inside the bridge too; a reused coordinate skips
+      // adopt, so the thread is re-checked before the push reads it.
+      await ensureConversationThread(stored.resource_ref, event.conversation);
       counters.events += 1;
       counters.last_event_at = event.at;
       log('inbound.event', {
@@ -610,6 +658,12 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
       const before = pusher.stats();
       const resources = await conversationResources();
       await watchBindings(resources);
+      // A coordinate row survives the thread row it names, so this pass repairs the thread each
+      // resource owns before it pushes into one or renders its replies.
+      for (const { resource, conversation } of resources) {
+        await ensureConversationThread(resource.resource_ref, conversation);
+      }
+      await node.resources.recover();
       if (!(builtin && STATE_REPORTING[channel.platform] === true)) {
         const observed = connectorStatus(platformConnector);
         states.observe(observed.state, observed.error);
@@ -699,7 +753,7 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
   };
 
   // RFC 0012 §2: a configured conversation is a pre-binding — the same adopt, run at startup.
-  if (channel.conversation !== undefined) await bridge.resolve(channel.platform, channel.conversation);
+  if (channel.conversation !== undefined) await resolveConversation(channel.platform, channel.conversation);
   // The returned promise is what serializes events per conversation: the connector awaits it
   // before the next event of the same chat, so `receive` calls land in arrival order.
   connector.onEvent(event =>
