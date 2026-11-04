@@ -57,7 +57,7 @@
 | `src/tern.ts` | `TERN_PANE` 与 `tern ls --json` 查询；只用于 bootstrap 的 session 名建议 |
 | `src/ui/` | `/onlyne` 的覆盖界面：`viewer.ts`（四页）、`bootstrap.ts`（首次表单）、`status.ts`（固定状态行）、`format.ts`、`index.ts`（命令注册） |
 
-`decider.ts` 是最大的模块（约 1600 行），因为它同时持有判定输入构造、选择项文案、机械校验和记录。拆分它应当按判定点切，而不是按工具函数切；每个判定点的输入布局在 [systemone-context.md](systemone-context.md) 中有对应小节。
+`decider.ts` 持有判定编排；引用解析在 `resolve.ts`，问题目录在 `questions.ts`，投递计划在 `plan.ts`，机械校验与记录在 `guard.ts`。按判定点分工，不按工具函数切；每个判定点的输入布局在 [systemone-context.md](systemone-context.md) 中有对应小节。
 
 ## 3. 启动与关闭
 
@@ -98,6 +98,10 @@
 | todo 变更 | `judge` 选 `none`/`associate`/`append` 与标题、解释、目标 | todo 模块写 todo-more 或原生 todo，并记录来源 |
 
 明确引用（`op`、`scope`、`thread`、`message`、`resource` 等）走确定性解析，避免把已知事实再问一次模型；只要存在语义选择，就交给判定。子代理会话只读：动作不是 `read` 时直接 `forbidden`。
+
+一次发送在判定前把所有引用解析成一个结果：收件人、thread、mentions、回复引用。别名按已知节点与已登记线程匹配，命中多个即 `ambiguous_target`，没有命中即 `not_found`。`meta.thread` 写成裸字符串时，先在本节点拥有或加入的线程里按 id 或标题找唯一匹配；找不到唯一匹配时，只有 `owner/id` 形式按声明的 owner 接受，裸 id 在发送与读取两条路径上给同一个 `not_found`。`meta.to` 只固定收件人，关系与投递方式仍由判定决定；它不构成跳过判定的理由。
+
+资源操作只有 `meta.resource` 带完整的 owner、id 且 `meta.operation` 是非空字符串时才进入资源分支。判定若在缺少这些字段时仍给出资源意图，而被调用的消息又有明确收件人或回复引用，动作回落为通讯，并记录一次 `onlyne.judge.overridden`；没有收件人的同类调用仍按资源请求报字段错误。
 
 资源读取用 `{ kind: "read", scope: "resources", query }` 表达。`meta.scope = "resources"` 的解析先于 thread 的 `op` 和资源操作，支持清单、详情、事件日志、单条事件、操作记录清单与单条操作状态。资源查询限定主会话，因为上下文登记没有资源授权字段。URL 的解析和枚举使用同一限制。
 

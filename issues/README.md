@@ -4,7 +4,11 @@
 
 `archive/` 放 2026-10-25 到 10-27 的轮次报告（14 份现场证据）。它们是当时能复现、后来未必还在的观察，不是工单；需要考古时再读，平时不要拿它当现状。
 
-## 未修（0）
+## 未修（3）
+
+- `gateway-thread-row-lost-push-refused-forever.md` —— 网关 store 丢失 thread 行后入站永久拒收；启动不自愈（`bridge.resolve` 命中坐标行即返回），拒绝墓碑回放把瞬时故障锁成终态，另有 joined thread 上 `{thread, seq}` 引用不可用。dpdp 于 2026-10-31 在 daily-workbench 现场复现并定位。
+- `outbound-intent-resource-false-positive.md` —— 出站通讯被 O-1 误判为资源操作，缺 `meta.resource` 即硬失败（lazuli，2026-10-31）。
+- `2026-11-01-owner-grant-not-replayed-to-rebuilt-peer-store.md` —— owner 线程的 grant notice 在首次 ack 后不重发；参与方 onlyne 本地 store 一旦被重建（grant/known 丢失、trust 仍在），owner→该参与方的后续消息静默丢失：发送方仍拿到 accepted/durable、notice=acked，对端 joined 无该线程、unread=0。carly→caerulea 现场单向复现（carly，2026-11-01）。
 
 2026-10-28 的五张单（主动发起解析到自己、短名与 urn 双写被拒、手填 UUID、网关上下文目录、信任对端不可寻址）已随「解析与投递收敛」一次修掉，验收判据落在 `packages/lib/tests/verify.ts`（phaseAddressee 跨节点断言、phaseInitiateTrust）与 `packages/omp-onlyne/tests/decider.test.ts`（O-2A 原消息选择、引用归一与冲突预检）的回归里；实施记录见 `docs/2026-10-28-audit-and-restructure.md`。遗留的结构性还债（decider 拆模块、client/http 拆文件、tern vendor→共享包）不是缺陷，走该文档第 6 步。
 

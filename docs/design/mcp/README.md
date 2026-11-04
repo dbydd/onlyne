@@ -65,13 +65,17 @@ packages/mcp-server     反向：把本节点的消息/thread/邻居暴露为 MC
 |---|---|---|
 | 资源 `id` | 配置里的 server 名 | 操作者起名，如 `hindsight` |
 | `operations` | `tools/list` 的 `name` 清单 | 含 inputSchema 缓存 |
-| 操作 `operation` | `tools/call` 的 `name` | 清单外返回 `unsupported_delivery`（RFC 0015 §2） |
+| 操作 `operation` | `tools/call` 的 `name` | 清单外返回 `unsupported_delivery`（RFC 0015 §2）；清单为空或该名字未知时先重连并拉一次 `tools/list`，仍不存在才拒绝 |
 | 操作 `data` | `tools/call` 的 `arguments` | 校验 inputSchema，不过不发送（RFC 0015 §2） |
-| 资源 `data` | server 的 URL、协议版本、能力 | 诊断与路由用 |
+| 资源 `data` | 传输位置、具体工具与资源目录、`allowed_tools`、协商能力 | 诊断与路由用；env 值不写入 |
+
+`allowed_tools` 是每台 server 的本地策略：缺省表示清单里的工具都可用，空数组表示全部拒绝。拒绝在建立连接与发送请求之前完成；挂载配置引用被拒工具时，加载配置就报错。
 
 ## 4. 会话层（mcp-core）
 
-HTTP streamable transport（MCP 2025-03-26）：
+两种传输由同一个连接契约承载：HTTP streamable（MCP 2025-03-26）与 stdio。stdio 的 `command`、`args`、`env`、`cwd` 分开传给子进程，不拼接 shell 字符串。
+
+HTTP 握手：
 
 1. `POST <url>` `initialize` → 从响应头取 `mcp-session-id`。
 2. 后续请求带 `mcp-session-id` 头。响应是 `text/event-stream`，取 `data:` 行的 JSON-RPC 结果。
@@ -79,6 +83,8 @@ HTTP streamable transport（MCP 2025-03-26）：
 4. `notifications/initialized` 完成握手。
 
 会话由连接器持有，断线重连的语义按 RFC 0015 §5：重连后重新 `initialize`；MCP 无事件重放，断开期间的 `tools/list_changed` 丢失，重连后重拉一次清单。工具调用超时（默认 30s，按 server 配置）后发 `notifications/cancelled`、停止等待，操作记 `unknown`（RFC 0015 §3：无法确证未发生副作用的失败必须是 `unknown`）。
+
+资源原语按 SDK 的 schema 处理 `resources/list`、`resources/read`、`resources/subscribe` 与 `resources/unsubscribe`；`notifications/resources/updated` 只表示内容变化，`resources/list_changed` 触发目录重拉并恢复订阅。读取返回数据，不写入消息、thread 或业务状态。server 未声明相应能力时返回 `unsupported_delivery`，不伪造空结果。连接关闭会撤回全部订阅；传输失败后的下一次调用重新连接并恢复订阅，恢复失败通过订阅丢失回调报告。
 
 错误映射（RFC 0015 §3）：
 
@@ -104,6 +110,7 @@ HTTP streamable transport（MCP 2025-03-26）：
     {
       "name": "hindsight",
       "url": "http://localhost:8888/mcp/example-bank/",
+      "allowed_tools": ["recall", "retain"],
       "timeout_ms": 60000
     }
   ]
@@ -120,6 +127,6 @@ HTTP streamable transport（MCP 2025-03-26）：
 
 ## 7. 开放项
 
-- `resources/list`/`resources/read`/`resources/subscribe`（MCP 的资源数据原语）：Hindsight 不用它们，先不接；RFC 0015 §2 的映射表在需要数据源型 server 时再落。
-- stdio transport：本地 CLI 型 MCP server（如 filesystem）用 stdio；网关侧仍先只做 HTTP，stdio 作客户端增量另加。本仓库另有 `@onlyne/mcp-server`，用官方 SDK 的 stdio transport 把 Onlyne 节点暴露给 MCP 客户端，与网关把远程 MCP server 接进来不是同一件事。
-- 工具级授权策略（RFC 0015 §4 的本地策略）：目前节点级允许即全部工具可用，工具过滤是配置增量。
+- 资源原语、stdio 传输与工具级授权已接。多页 `resources/list` 与 HTTP 传输上的资源通知只在单页 stdio 场景实测过。
+- `@onlyne/mcp-server` 仍是反方向：它用 stdio 把 Onlyne 节点暴露给 MCP 客户端，和网关接入远程 MCP server 不冲突。
+- 增删 server 工具后资源行不重新注册，需要重启网关才会反映新的目录。

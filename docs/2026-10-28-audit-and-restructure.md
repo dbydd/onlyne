@@ -4,7 +4,7 @@
 
 ## 实施状态(2026-10-28 当日)
 
-第 1-5 步已落地,第 6 步(还债)未动:
+第 1-6 步已落地:
 
 | 步 | 状态 | 落点 |
 |---|---|---|
@@ -13,7 +13,7 @@
 | 3 O-2A + 引用写法 | ✅ | `DecisionScope` 经 `#replyCandidates` 提供本上下文可见候选,judge 的 `original` 问题选原消息,插件复制 `entry.reply_authority`;`#reply` 已知冲突预检(`error.reply_reference_conflict`);tool-text 示例统一 `{thread,seq}`(en/zh) |
 | 4 网关上下文目录 | ✅ | `createImGateway` 发布 `executionContexts`,配置键 `contexts`,默认 `["main"]`;im-gateway tests 5 条回归 |
 | 5 地址权威收敛 | ✅ | `packages/lib/src/resolve.ts` `composeResolver`:discovery 先答,not_found/unavailable 时信任行 `base_url` 兜底并经 `observe` 写回发现目录(source=`trust-row`);node.ts 组装;四值错误码保持 |
-| 6 还债 | ⬜ | decider 拆 resolve/questions/plan/guard、client/http 拆文件、tern vendor→共享包:未动 |
+| 6 还债 | ✅ | decider 拆 `resolve.ts`/`questions.ts`/`plan.ts`/`guard.ts`；`client.ts` 拆为 delivery/awaited/stream 与 routes；omp 的 node/store/acquire/host-text 移入 `@onlyne/node-host`，tern 删除六个 vendor 文件与检查脚本 |
 
 新增回归(全部通过):`client.msg.peer-inbox`(主动发起真的到对端 inbox)、`client.msg.named`(resolved=对端,即便拼写一致)、`initiate.trust.paired`、`initiate.trust.deleted`(not_found)、`initiate.trust.deleted.no-retry`(无重试记录)、`address.trust-fallback`(+`.written`,信任行兜底并写回);omp 侧 O-2A 四条、引用归一与冲突预检两条。五张缺陷单已按 issues 规则删除,历史在 git。
 
@@ -124,8 +124,8 @@ L5 传输与回执 transmit
 
 ## 五、tern-onlyne 收敛(external-integrations/tern-onlyne)
 
-1. 短期:vendor 文件加头注「拷贝自 omp-onlyne@<提交>」,加一致性检查脚本(diff 不一致即 CI 失败)。
-2. 中期:把 omp-host 层(`node/store/types/host-text`)抽成可发布包(如 `@onlyne/host-bun`),omp 与 tern 同源依赖;`AddressJudge`/`evaluateInbound` 等纯函数上移共享(omp `acquire.ts` 与 tern `acquisition.ts` 已是双胞胎)。
+1. ✅ 已完成:omp-host 层(`node/store/types/host-text`)并入既有 `@onlyne/node-host` 的显式子路径,omp 与 tern 同源依赖,vendor 副本与检查脚本删除。发布时需要带这些子路径的版本;两处清单仍写 `^3.1.0`,发布前要调版本范围。
+2. tern 的 `acquisition.ts` 保持独立:它先解析配置主机名再匹配字面地址,与 omp 的字面地址策略不同,合并会改变本宿主的策略。
 3. 长期:确定性解析(landing、归一、地址回退)全部下沉 lib;各宿主只保留语义判定(judge)。否则 lib 每修一次解析类缺陷都要在 tern 复现一次——本次 carly 两张现场单就是代价实例。
 
 ## 六、实施顺序(每步可独立合并,每步关闭对应缺陷单)

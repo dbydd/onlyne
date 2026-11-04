@@ -1,0 +1,5 @@
+如题，注意到menu界面thread消息列表没做滚动支持。
+
+一个并发问题：当omp正在send时进行tan这类继承上下文的操作会导致遇到死锁，把sqlite锁死，tan出来的是subagent。
+
+这份文件来自user
