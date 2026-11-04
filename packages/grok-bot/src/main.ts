@@ -2,7 +2,7 @@
 import { createLogger, createNodeKey, startNodeHost, type NodeHostOptions } from '@onlyne/node-host';
 import { resolveLocale, setLocale } from '@onlyne/node-host/i18n';
 import { dirname, join } from 'node:path';
-import { loadConfig } from './config.ts';
+import { loadConfig, redactWebhook } from './config.ts';
 import { createGrokBotNode, nodeClock, SERVE_IDLE_TIMEOUT_SEC, type GrokBotNode } from './index.ts';
 import { t } from './node-text.ts';
 
@@ -78,5 +78,5 @@ log('grok.bot.listening', {
   events: config.events_path,
   idleTimeout: SERVE_IDLE_TIMEOUT_SEC,
   pins: config.trust_seeds?.length ?? 0,
-  webhook: config.webhook.url.replace(/\?.*$/, ''),
+  webhook: redactWebhook(config.webhook).url,
 });

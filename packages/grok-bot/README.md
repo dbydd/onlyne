@@ -145,8 +145,9 @@ The body is JSON:
 can fan out without parsing the thread id. They match the landed thread when the id uses the
 stable scheme; a legacy random UUID falls back to `{ "chat_kind": "dm", "chat_id": "<sender>" }`.
 
-The sender key is only in the configured header. Logs name the URL origin and path, never the
-key, never a query string.
+The sender key is only in the configured header. Logs and `/grok/status` name the URL origin
+plus a short hash of the full URL (`https://host#a1b2c3d4`), never the path, query, or key.
+Grok Bot puts the routine id in the path, so the path is half the credential.
 
 ### Failures
 
@@ -220,7 +221,15 @@ Each pin is a node id plus the 16-hex fingerprint of **that peer's current key**
 treats a matching inbound statement as already locally approved. `approvePinned()` (called at
 startup after seed discovery) also calls `trust.accept` for each pin; inspect refuses a live
 key that does not match. Peers **not** in the list stay at `invited` until a human confirms
-them on a TTY.
+them on a TTY. A pin for a peer this node has not discovered yet is not a warning: the node
+logs that the pin will be applied when that peer is first seen.
+
+A pin does **not** override an existing non-revoked trust row. If this node already recorded
+that `node_id` under a different public key, inbound statements and `approvePinned` fail with
+`id_conflict` and the stored row is left as-is. The new-key peer stays at `requested` until
+this node revokes the old row and re-approves, or the peer uses a new node id. A proven
+rotation (`previous_signature` from the old key) keeps the existing local approval and does
+not need a new pin.
 
 This is not auto-accept-all. A missing fingerprint, `*`, or an empty pin is refused at
 config load. A wrong fingerprint is `unauthenticated`. Compare fingerprints out of band

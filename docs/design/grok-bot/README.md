@@ -15,7 +15,7 @@ flowchart LR
 
 入站：消息被本节点 `admit`（或经 grant 注入 inbox）之后立刻 POST 到配置的 webhook，把 Grok Bot 唤醒。出站：Grok Bot 用同一把 sender key 打本进程的 `/grok/reply`，由本节点身份发出 Onlyne 消息。更完整的读/发表面是旁边的 `@onlyne/mcp-server`。
 
-URL 与密钥只来自配置里的 `$VARIABLE` 引用和 `ONLYNE_GROK_*` 环境变量，不进仓库。默认头是 `Authorization: Bearer <key>`。
+URL 与密钥只来自配置里的 `$VARIABLE` 引用和 `ONLYNE_GROK_*` 环境变量，不进仓库。默认头是 `Authorization: Bearer <key>`。日志和 `/grok/status` 只写 origin 加完整 URL 的短哈希，不写 path（Grok Bot 的 path 是 routine id）。
 
 失败处理：先写 owed 行再 POST；超时、网络错误、408/429/5xx 按指数退避重试，次数有上限；其它非 2xx 记为 failed 留在 store。每条消息独立 in-flight，互不阻塞。
 
@@ -76,6 +76,10 @@ flowchart LR
 ## 无 TUI 配对
 
 `ONLYNE_NO_TUI=1` 或非 TTY 时信任终端不能按 `[a]`。配置 `trust_seeds`（或环境变量 `ONLYNE_GROK_TRUST_SEEDS`）钉扎 **具体** 对端：`node_id` + 该对端当前公钥的 16 位 hex fingerprint。指纹一致才本地批准；不一致拒绝；名单外的对端仍保持 invited，需要人在 TTY 上确认。没有“全接受”。指纹要在带外核对后再写入；钉扎强度等于复制指纹的那条通道。
+
+钉扎 **不会** 覆盖已经存在的、未撤销的信任行。对端复用同一个 `node_id` 但换了新钥时，入站陈述和 `approvePinned` 都是 `id_conflict`，本节点存着的仍是旧钥。新钥一侧停在 `requested`，直到本节点 `revoke` 旧行再批准，或对端换一个 node id。带旧钥 `previous_signature` 的正规轮换会保留本地批准，不需要重新钉扎。启动时还没发现的 pin 只记一条 info（peer 首次出现时再生效），不是 warning。
+
+Webhook 的日志和 `/grok/status` 只报 origin 加上完整 URL 的短哈希，不报 path / query。Grok Bot 的 path 里是 routine id，等于半个凭据。
 
 ## `/grok/reply` 如何继续同一会话
 

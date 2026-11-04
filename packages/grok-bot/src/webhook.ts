@@ -1,6 +1,6 @@
 import type { Entry, Json, NodeId, Storage, ThreadRef } from '@onlyne/lib';
 import { leveled, type LeveledLog, type LogSink } from '@onlyne/node-host';
-import { redactWebhook, webhookHeaderValue, type WebhookConfig } from './config.ts';
+import { redactWebhook, redactWebhookUrl, webhookHeaderValue, type WebhookConfig } from './config.ts';
 import { grokBotChatFromThread } from './threads.ts';
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -33,14 +33,9 @@ export function deliveryId(entry: Entry): string {
   return `${entry.message.sender}/${entry.message.id}`;
 }
 
-/** URL shape safe to log: origin and path, never query or fragment. */
+/** URL shape safe to log: origin plus a short hash, never path or query. */
 export function urlForLog(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return `${parsed.origin}${parsed.pathname}`;
-  } catch {
-    return '(invalid url)';
-  }
+  return redactWebhookUrl(url);
 }
 
 function classify(status: number): 'ok' | 'retry' | 'fail' {

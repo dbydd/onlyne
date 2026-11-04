@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { OnlyneError, type Entry } from '@onlyne/lib';
 import {
   createGrokBotNode, expandEnv, grokBotChatFromMessage, grokBotThreadId, GrokBotPullClient,
-  loadConfig, parseGrokBotThreadId, webhookHeaderValue, webhookPayload,
+  loadConfig, parseGrokBotThreadId, redactWebhook, redactWebhookUrl, urlForLog,
+  webhookHeaderValue, webhookPayload,
   type FetchLike, type GrokBotConfig,
 } from '../src/index.ts';
 
@@ -29,6 +30,8 @@ const GROK = 'urn:onlyne:gateway:grok-bot';
 const SENDER = 'urn:onlyne:agent:alice';
 const BOB = 'urn:onlyne:agent:bob';
 const KEY = 'test-sender-key-do-not-commit';
+const WEBHOOK_PATH = '/webhooks/routine-secret-id-xyz';
+const WEBHOOK_URL = `http://127.0.0.1:9${WEBHOOK_PATH}`;
 const aliceDm = grokBotThreadId({ kind: 'dm', chat_id: SENDER });
 const bobDm = grokBotThreadId({ kind: 'dm', chat_id: BOB });
 const rec = (value: unknown): Record<string, unknown> | undefined =>
@@ -91,6 +94,21 @@ ok('ONLYNE_GROK_* and ONLYNE_NODE_ID / PORT override the file',
   && overridden.server.port === 4010);
 
 ok('$$ expands to a literal dollar', expandEnv('cost-$$5', {}, 'x') === 'cost-$5');
+
+const routineUrl = 'https://hooks.example.test/2/webhooks/routine-secret-id-xyz?token=stay-out';
+const redacted = redactWebhookUrl(routineUrl);
+const redactedOther = redactWebhookUrl('https://hooks.example.test/2/webhooks/other-routine');
+ok('redactWebhookUrl keeps origin and drops path and query',
+  redacted.startsWith('https://hooks.example.test#')
+  && !redacted.includes('/2/webhooks')
+  && !redacted.includes('routine-secret-id-xyz')
+  && !redacted.includes('token=')
+  && redacted !== redactedOther
+  && urlForLog(routineUrl) === redacted
+  && redactWebhook({
+    url: routineUrl, key: KEY, header: 'Authorization', scheme: 'Bearer',
+    timeout_ms: 1, max_attempts: 1, retry_base_ms: 1,
+  }).url === redacted);
 
 ok('DM thread id is grokbot:dm:<agent_id>',
   grokBotThreadId({ kind: 'dm', chat_id: SENDER }) === `grokbot:dm:${SENDER}`
@@ -206,7 +224,7 @@ const config = (over: Partial<GrokBotConfig['webhook']> = {}): GrokBotConfig => 
   server: { bind: '127.0.0.1', port: 0 },
   storage_path: join(dir, `store-${crypto.randomUUID()}.json`),
   webhook: {
-    url: 'http://127.0.0.1:9/wake',
+    url: WEBHOOK_URL,
     key: KEY,
     header: 'Authorization',
     scheme: 'Bearer',
@@ -222,6 +240,25 @@ const config = (over: Partial<GrokBotConfig['webhook']> = {}): GrokBotConfig => 
 
 const logs: Array<{ message: string; fields?: Record<string, unknown> }> = [];
 const log = (message: string, fields?: Record<string, unknown>): void => { logs.push({ message, fields }); };
+
+const pinLogs: Array<{ message: string; fields?: Record<string, unknown> }> = [];
+const pinWarns: Array<{ message: string; fields?: Record<string, unknown> }> = [];
+const pinLog = Object.assign((message: string, fields?: Record<string, unknown>) => {
+  pinLogs.push({ message, fields });
+}, {
+  warn: (message: string, fields?: Record<string, unknown>) => { pinWarns.push({ message, fields }); },
+});
+const unseenPin = await createGrokBotNode({
+  ...config(),
+  trust_seeds: [{ node_id: SENDER, fingerprint: '0123456789abcdef' }],
+}, { storage: 'memory', fetch: mockFetch, log: pinLog });
+await unseenPin.approvePinned();
+ok('an unseen pin waits at info instead of warning',
+  pinLogs.some(line => line.message === 'grok.trust.pin_waiting'
+    && line.fields?.node === SENDER
+    && String(line.fields?.note ?? '').includes('first seen'))
+  && pinWarns.every(line => line.message !== 'grok.trust.pin_failed'));
+await unseenPin.stop();
 
 const grok = await createGrokBotNode(config(), { storage: 'memory', fetch: mockFetch, log });
 const mut = () => ({
@@ -254,7 +291,7 @@ ok('an inbound admission POSTs the webhook', await waitFor(() => posts.length >=
 
 const first = posts[0];
 const firstBody = first?.body ?? {};
-ok('the POST targets the configured URL', first?.url === 'http://127.0.0.1:9/wake');
+ok('the POST targets the configured URL', first?.url === WEBHOOK_URL);
 ok('the sender key is an Authorization Bearer header',
   first?.headers.authorization === `Bearer ${KEY}`);
 ok('the JSON body names sender, message id, timestamp, content and thread',
@@ -272,6 +309,13 @@ ok('the webhook meta carries grokbot.chat_kind and grokbot.chat_id',
 
 const logged = JSON.stringify(logs);
 ok('logs never include the sender key', !logged.includes(KEY));
+ok('logs never include the webhook path',
+  !logged.includes(WEBHOOK_PATH) && !logged.includes('routine-secret-id-xyz'));
+ok('queued log names origin plus a hash, not the path',
+  logs.some(line => line.message === 'grok.webhook.queued'
+    && typeof line.fields?.url === 'string'
+    && String(line.fields.url).startsWith('http://127.0.0.1:9#')
+    && !String(line.fields.url).includes(WEBHOOK_PATH)));
 
 await admit('msg-01', 'hello grok');
 const afterDup = posts.length;
@@ -572,6 +616,14 @@ const statusBody = rec(JSON.parse(await statusRes.text()));
 const webhook = rec(statusBody?.webhook);
 ok('GET /grok/status redacts the sender key',
   statusRes.status === 200 && webhook?.key === 'set' && JSON.stringify(statusBody).includes(KEY) === false);
+ok('GET /grok/status never includes the webhook path',
+  typeof webhook?.url === 'string'
+  && webhook.url.startsWith('http://127.0.0.1:9#')
+  && !JSON.stringify(statusBody).includes(WEBHOOK_PATH)
+  && !JSON.stringify(statusBody).includes('routine-secret-id-xyz'));
+const statusLines = await replyNode.statusLines();
+ok('status lines never include the webhook path',
+  statusLines.every(line => !line.includes(WEBHOOK_PATH) && !line.includes('routine-secret-id-xyz')));
 
 // --- outbound-only pull / ack ------------------------------------------------
 

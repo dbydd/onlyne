@@ -1,5 +1,6 @@
 import { OnlyneError, type Json, type NodeId, type TrustSeed } from '@onlyne/lib';
 import type { Locale } from '@onlyne/node-host/i18n';
+import { createHash } from 'node:crypto';
 import { t } from './node-text.ts';
 
 export const DEFAULT_HEADER = 'Authorization';
@@ -282,17 +283,24 @@ export function webhookHeaderValue(webhook: Pick<WebhookConfig, 'key' | 'scheme'
   return webhook.scheme.length === 0 ? webhook.key : `${webhook.scheme} ${webhook.key}`;
 }
 
-/** A status view of the webhook that never includes the sender key. */
-export function redactWebhook(webhook: WebhookConfig): { url: string; header: string; scheme: string; timeout_ms: number; max_attempts: number; key: 'set' } {
-  let url = webhook.url;
+/**
+ * Log/status form of a webhook URL: origin plus an 8-hex hash of the full URL.
+ * Grok Bot puts the routine id in the path, so path and query must never appear.
+ */
+export function redactWebhookUrl(url: string): string {
   try {
-    const parsed = new URL(webhook.url);
-    parsed.search = '';
-    parsed.hash = '';
-    url = `${parsed.origin}${parsed.pathname}`;
-  } catch { /* keep the original; loadConfig already validated it */ }
+    const parsed = new URL(url);
+    const digest = createHash('sha256').update(url).digest('hex').slice(0, 8);
+    return `${parsed.origin}#${digest}`;
+  } catch {
+    return '(invalid url)';
+  }
+}
+
+/** A status view of the webhook that never includes the sender key, path, or query. */
+export function redactWebhook(webhook: WebhookConfig): { url: string; header: string; scheme: string; timeout_ms: number; max_attempts: number; key: 'set' } {
   return {
-    url,
+    url: redactWebhookUrl(webhook.url),
     header: webhook.header,
     scheme: webhook.scheme,
     timeout_ms: webhook.timeout_ms,

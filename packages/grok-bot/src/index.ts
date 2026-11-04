@@ -16,7 +16,7 @@ export type { GrokBotConfig, WebhookConfig } from './config.ts';
 export {
   DEFAULT_ACK_PATH, DEFAULT_EVENTS_PATH, DEFAULT_HEADER, DEFAULT_MAX_ATTEMPTS, DEFAULT_NODE_ID,
   DEFAULT_REPLY_PATH, DEFAULT_RETRY_BASE_MS, DEFAULT_SCHEME, DEFAULT_STATUS_PATH, DEFAULT_TIMEOUT_MS,
-  expandEnv, loadConfig, redactWebhook, webhookHeaderValue, parseTrustSeeds,
+  expandEnv, loadConfig, redactWebhook, redactWebhookUrl, webhookHeaderValue, parseTrustSeeds,
 } from './config.ts';
 export { deliveryId, urlForLog, webhookPayload, WebhookDispatcher, type FetchLike } from './webhook.ts';
 export {
@@ -315,6 +315,16 @@ export async function createGrokBotNode(config: GrokBotConfig, options: GrokBotO
           await node.trust.accept(node.auth, seed.node_id, seed.fingerprint);
           out.log('grok.trust.pinned', { node: seed.node_id, fingerprint: seed.fingerprint });
         } catch (error) {
+          const unseen = error instanceof OnlyneError && error.error.code === 'not_found'
+            && error.error.message.includes('No discovery record');
+          if (unseen) {
+            out.log('grok.trust.pin_waiting', {
+              node: seed.node_id,
+              fingerprint: seed.fingerprint,
+              note: 'The pin will be applied when this peer is first seen.',
+            });
+            continue;
+          }
           out.warn('grok.trust.pin_failed', {
             node: seed.node_id, fingerprint: seed.fingerprint, error: String(error),
           });
