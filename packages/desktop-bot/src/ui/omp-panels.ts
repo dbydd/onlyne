@@ -29,7 +29,7 @@ const COLOR = {
 } as const;
 
 const STYLE = {
-  panel: `display:flex;flex-direction:column;gap:12px;padding:14px;box-sizing:border-box;width:100%;height:100%;overflow:auto;font:13px/1.45 var(--font),sans-serif;color:${COLOR.fg};`,
+  panel: `display:flex;flex-direction:column;gap:16px;padding:0;box-sizing:border-box;width:100%;height:100%;overflow:auto;font:13px/1.45 var(--font),sans-serif;color:${COLOR.fg};`,
   section: `display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid ${COLOR.border};border-radius:10px;background:${COLOR.surface};`,
   row: 'display:flex;flex-wrap:wrap;gap:6px;align-items:center;',
   stack: 'display:flex;flex-direction:column;gap:8px;',
@@ -121,25 +121,50 @@ function sectionHead(title: string, actions: HTMLElement[]): HTMLElement {
   return head;
 }
 
+const OMP_LAUNCH = 'omp --mode rpc-ui';
+
 interface StatusLine {
   node: HTMLElement;
-  show(message: string | undefined, tone?: 'muted' | 'error'): void;
+  show(message: string | undefined, tone?: 'muted' | 'error', missing?: boolean): void;
 }
 
 function createStatus(): StatusLine {
-  const node = el('div', 'font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;');
+  const node = el('div', '');
+  node.className = 'desk-status';
   node.setAttribute('aria-live', 'polite');
   return {
     node,
-    show(message, tone = 'muted') {
+    show(message, tone = 'muted', missing = false) {
+      node.replaceChildren();
       if (message === undefined) {
-        node.textContent = '';
-        node.style.display = 'none';
+        node.hidden = true;
         return;
       }
-      node.style.display = '';
-      node.textContent = message;
-      node.style.color = tone === 'error' ? COLOR.danger : COLOR.muted;
+      node.hidden = false;
+      if (!missing) {
+        node.className = tone === 'error' ? 'desk-status err' : 'desk-status';
+        node.textContent = message;
+        return;
+      }
+      node.className = 'runtime-notice';
+      node.setAttribute('role', 'note');
+      const copy = el('button', '', 'Copy command');
+      copy.type = 'button';
+      copy.className = 'btn sm';
+      copy.addEventListener('click', () => {
+        void navigator.clipboard?.writeText(OMP_LAUNCH).then(
+          () => { copy.textContent = 'Copied'; },
+          () => { copy.textContent = 'Copy failed'; },
+        );
+      });
+      const command = el('code', '', OMP_LAUNCH);
+      command.className = 'runtime-command';
+      node.append(
+        el('strong', '', 'No model runtime'),
+        el('p', '', 'Install OMP so the command below is on PATH, then refresh this panel. The controls stay off until a runtime can start.'),
+        command,
+        copy,
+      );
     },
   };
 }
@@ -163,7 +188,14 @@ function panelStatus(state: { busy?: string; error?: string; notice?: string; lo
 function lockRuntime(root: HTMLElement, missing: boolean): void {
   if (!missing) return;
   for (const control of root.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('button, input, textarea, select')) {
+    if (control.closest('.runtime-notice')) continue;
     control.disabled = true;
+    control.style.setProperty('color', 'var(--muted)', 'important');
+    control.style.setProperty('background', 'var(--surface-3)', 'important');
+    control.style.setProperty('border-color', 'var(--line)', 'important');
+    control.style.setProperty('opacity', '0.55', 'important');
+    control.style.setProperty('cursor', 'not-allowed', 'important');
+    control.style.setProperty('box-shadow', 'none', 'important');
   }
 }
 
@@ -571,7 +603,13 @@ function createHistoryPanel(api: DesktopUiApi): OmpPanel {
     const sessionActionSection = el('section', STYLE.section);
     sessionActionSection.append(el('div', STYLE.title, 'Session actions'), sessionActionBody);
 
-    element.append(sessionSection, historySection, treeSection, entrySection, draftSection, sessionActionSection, status.node);
+    element.classList.add('session-layout');
+    const sessionAside = el('aside', STYLE.section);
+    sessionAside.append(
+      el('div', STYLE.title, 'Desk transcript'),
+      el('p', STYLE.muted, 'This column is the conversation already on the desk. A model session, with its tree, starts when OMP can run. Navigation does not send a message.'),
+    );
+    element.append(status.node, sessionSection, historySection, sessionAside, treeSection, entrySection, draftSection, sessionActionSection);
 
     function paint(): void {
       summarizeInput.checked = state.summarize;
@@ -642,7 +680,7 @@ function createHistoryPanel(api: DesktopUiApi): OmpPanel {
       refreshButton.disabled = busy || state.loading;
 
       const line = panelStatus(state);
-      status.show(line.text, line.error ? 'error' : 'muted');
+      status.show(line.text, line.error ? 'error' : 'muted', line.missing);
       const runtimeHost = status.node.parentElement;
       if (runtimeHost) lockRuntime(runtimeHost, line.missing);
     }
@@ -997,7 +1035,8 @@ function createSubagentsPanel(api: DesktopUiApi): OmpPanel {
     detailBody.append(detailTitle, detailMeta, steerInput, steerRow, transcriptBody);
     detailSection.append(detailBody);
 
-    element.append(listSection, detailSection, status.node);
+    element.classList.add('session-layout');
+    element.append(status.node, listSection, detailSection);
 
     let transcriptSignature = '';
 
@@ -1070,7 +1109,7 @@ function createSubagentsPanel(api: DesktopUiApi): OmpPanel {
       refreshButton.disabled = state.busy !== undefined || state.loading;
 
       const line = panelStatus(state);
-      status.show(line.text, line.error ? 'error' : 'muted');
+      status.show(line.text, line.error ? 'error' : 'muted', line.missing);
       const runtimeHost = status.node.parentElement;
       if (runtimeHost) lockRuntime(runtimeHost, line.missing);
     }
@@ -1328,7 +1367,13 @@ function createGoalPanel(api: DesktopUiApi): OmpPanel {
     const formSection = el('section', STYLE.section);
     formSection.append(el('div', STYLE.title, 'Goal controls'), formBody);
 
-    element.append(summarySection, formSection, status.node);
+    element.classList.add('goal-layout');
+    const goalAside = el('aside', STYLE.section);
+    goalAside.append(
+      el('div', STYLE.title, 'How a goal is used'),
+      el('p', STYLE.muted, 'A goal is the objective this session keeps working toward. Create one after OMP is running. Dropping a goal removes its journal.'),
+    );
+    element.append(status.node, summarySection, formSection, goalAside);
 
     function paint(): void {
       const value = goalStatus(state);
@@ -1363,7 +1408,7 @@ function createGoalPanel(api: DesktopUiApi): OmpPanel {
       dropButton.setAttribute('style', state.armedDrop ? STYLE.danger : STYLE.button);
 
       const line = panelStatus(state);
-      status.show(line.text, line.error ? 'error' : 'muted');
+      status.show(line.text, line.error ? 'error' : 'muted', line.missing);
       const runtimeHost = status.node.parentElement;
       if (runtimeHost) lockRuntime(runtimeHost, line.missing);
     }
@@ -1538,7 +1583,8 @@ function createQueuePanel(api: DesktopUiApi): OmpPanel {
     const restoredSection = el('section', STYLE.section);
     restoredSection.append(el('div', STYLE.title, 'Restored drafts'), restoredBody);
 
-    element.append(queueSection, composerSection, restoredSection, status.node);
+    element.classList.add('goal-layout');
+    element.append(status.node, queueSection, composerSection, restoredSection);
 
     let restoredSignature = '';
 
@@ -1576,7 +1622,7 @@ function createQueuePanel(api: DesktopUiApi): OmpPanel {
       restoredSection.style.display = state.restored.length > 0 ? '' : 'none';
 
       const line = panelStatus(state);
-      status.show(line.text, line.error ? 'error' : 'muted');
+      status.show(line.text, line.error ? 'error' : 'muted', line.missing);
       const runtimeHost = status.node.parentElement;
       if (runtimeHost) lockRuntime(runtimeHost, line.missing);
     }
@@ -2328,7 +2374,7 @@ function createConfigPanel(api: DesktopUiApi): OmpPanel {
     const editorSection = el('section', STYLE.section);
     editorSection.append(editorBody);
 
-    element.append(browserSection, editorSection, status.node);
+    element.append(status.node, browserSection, editorSection);
 
     function paint(): void {
       const busy = state.busy !== undefined;
@@ -2362,7 +2408,7 @@ function createConfigPanel(api: DesktopUiApi): OmpPanel {
       hindsightButton.disabled = busy;
 
       const line = panelStatus(state);
-      status.show(line.text, line.error ? 'error' : 'muted');
+      status.show(line.text, line.error ? 'error' : 'muted', line.missing);
       const runtimeHost = status.node.parentElement;
       if (runtimeHost) lockRuntime(runtimeHost, line.missing);
     }

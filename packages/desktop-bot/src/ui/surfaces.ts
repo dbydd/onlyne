@@ -5,11 +5,17 @@
 
 import type { Bot, Capability, DesktopState } from '../contracts.ts';
 import type { DesktopUiApi } from './api.ts';
-import { fingerprintGroups, fingerprintHint, fingerprintMarks, formatWhen, middleEllipsis, parsePeerUrl, peerPhaseLabel } from '../desk-format.ts';
+import { fingerprintGroups, fingerprintHint, fingerprintMarks, formatWhen, middleEllipsis, parsePeerUrl, peerPhaseLabel, revokePress } from '../desk-format.ts';
 import { formatFingerprint } from './layout.ts';
 
+export interface DeskNotice {
+  label: string;
+  run: () => void;
+  ms?: number;
+}
+
 export interface DeskHooks {
-  notify(message: string, level?: string): void;
+  notify(message: string, level?: string, action?: DeskNotice): void;
   open(id: string): void;
   createBot(): void;
 }
@@ -290,16 +296,20 @@ function inboxPanel(api: DesktopUiApi): (state: DesktopState) => HTMLElement {
 
 function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState) => HTMLElement {
   return state => {
-    const body = h('div', { class: 'desk-stack' });
+    const results = h('div', { class: 'neighbors-results' });
     const url = h('input', { type: 'url', placeholder: 'Peer URL', 'aria-label': 'Peer URL', autocomplete: 'off', spellcheck: 'false' });
     const errorLine = h('p', { class: 'field-error', hidden: true });
     const connect = h('button', { class: 'btn primary', type: 'button' }, 'Observe');
     const query = h('input', { type: 'text', placeholder: 'Filter peers', 'aria-label': 'Filter peers', autocomplete: 'off' });
     const clearFilter = h('button', { class: 'btn sm', type: 'button' }, 'Clear filter');
     const filterMeta = h('p', { class: 'filter-meta' });
+    const filterRow = h('div', { class: 'filter-row' }, query, clearFilter);
     let rows: Record<string, unknown>[] = [];
     let pinned = '';
+    let armedRevoke = '';
     const tools = [botSelect(state, () => { void load(); })];
+    const side = h('div', { class: 'neighbors-side' });
+    const body = h('div', { class: 'neighbors-layout' }, side, results);
     const root = page('Network', 'Neighbors', 'Peers this node has seen. Observing records an address. It does not approve a fingerprint.', tools, body, 'grid');
     const runConnect = (): void => {
       const parsed = parsePeerUrl(url.value);
@@ -334,7 +344,7 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
     query.addEventListener('input', () => paint(rows));
     clearFilter.addEventListener('click', () => { query.value = ''; pinned = ''; paint(rows); });
     const load = async (): Promise<void> => {
-      body.replaceChildren(skeleton());
+      results.replaceChildren(skeleton());
       try {
         const status = await loadStatus(api.command, api.state());
         const demo = await knowDemo(api.command);
@@ -342,7 +352,7 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
         rows = asArray(status.neighbors);
         paint(rows);
       } catch (error) {
-        body.replaceChildren(errorBlock(errorText(error), () => { void load(); }));
+        results.replaceChildren(errorBlock(errorText(error), () => { void load(); }));
       }
     };
     const paint = (all: Record<string, unknown>[]): void => {
@@ -367,7 +377,7 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
             : h('button', { class: 'btn primary', type: 'button', onclick: () => { query.value = ''; pinned = ''; paint(all); } }, 'Clear filter'),
         )
         : false;
-      body.replaceChildren(connectBar(), h('div', { class: 'filter-row' }, query, clearFilter), filterMeta, empty === false ? grid : empty);
+      results.replaceChildren(empty === false ? grid : empty);
     };
     const neighborCard = (row: Record<string, unknown>, fresh = false): HTMLElement => {
       const nodeId = pick(row, ['nodeId', 'node_id']);
@@ -381,16 +391,39 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
           .then(() => { hooks.notify(`A fingerprint for ${shortNode(nodeId)} is waiting on Trust.`, 'ok'); hooks.open('trust'); })
           .catch(error => hooks.notify(errorText(error), 'error'));
       });
-      const revoke = h('button', { class: 'btn sm', type: 'button' }, 'Revoke');
+      const revoke = h('button', { class: 'btn sm', type: 'button' }, armedRevoke === nodeId ? 'Revoke trust' : 'Revoke');
       revoke.addEventListener('click', () => {
+        if (revokePress(armedRevoke === nodeId ? 'armed' : 'idle') === 'armed') {
+          armedRevoke = nodeId;
+          paint(rows);
+          return;
+        }
+        armedRevoke = '';
         void api.command('onlyne.action', { action: 'trust.revoke', args: { nodeId }, ...scopePayload(api.state()) })
           .then(() => { hooks.notify(`Revoked ${shortNode(nodeId)}.`, 'ok'); return load(); })
           .catch(error => hooks.notify(errorText(error), 'error'));
       });
+      const cancelRevoke = h('button', { class: 'btn sm', type: 'button' }, 'Cancel');
+      cancelRevoke.addEventListener('click', () => { armedRevoke = ''; paint(rows); });
       const forget = h('button', { class: 'btn sm', type: 'button' }, 'Forget');
       forget.addEventListener('click', () => {
         void api.command('onlyne.action', { action: 'peer.forget', args: { nodeId }, ...scopePayload(api.state()) })
-          .then(() => { hooks.notify(`Forgot ${shortNode(nodeId)}.`, 'ok'); return load(); })
+          .then(() => {
+            hooks.notify(`Forgot ${shortNode(nodeId)}.`, 'ok', {
+              label: 'Undo',
+              ms: 8_000,
+              run: () => {
+                if (endpoint.length === 0) {
+                  hooks.notify('That peer had no endpoint to restore.', 'warn');
+                  return;
+                }
+                void api.command('onlyne.action', { action: 'connect', args: { url: endpoint }, ...scopePayload(api.state()) })
+                  .then(() => load())
+                  .catch(error => hooks.notify(errorText(error), 'error'));
+              },
+            });
+            return load();
+          })
           .catch(error => hooks.notify(errorText(error), 'error'));
       });
       const copy = h('button', { class: 'btn sm', type: 'button' }, 'Copy endpoint');
@@ -404,7 +437,8 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
           ['Last seen', whenView(pick(row, ['lastSeen', 'last_seen']))],
           ['Verified', row.verified === true ? 'Yes' : 'No'],
         ]),
-        h('div', { class: 'row-actions' }, trust, phase === 'exchanged' ? revoke : forget, endpoint.length > 0 ? copy : false));
+        armedRevoke === nodeId ? h('p', { class: 'confirm-note', text: 'Revoke drops the exchanged fingerprint. The peer stays listed until you forget it.' }) : false,
+        h('div', { class: 'row-actions' }, trust, phase === 'exchanged' ? revoke : forget, armedRevoke === nodeId ? cancelRevoke : false, endpoint.length > 0 ? copy : false));
     };
     const connectBar = (): HTMLElement => h('form', { class: 'inline-form', onsubmit: (event: Event) => { event.preventDefault(); runConnect(); } },
       h('label', { class: 'field' },
@@ -413,6 +447,7 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
         h('span', { class: 'field-hint', text: 'Example: http://127.0.0.1:3992/onlyne/v3. A partial string is rejected and no card is created.' }),
         errorLine),
       connect);
+    side.append(connectBar(), filterRow, filterMeta);
     void load();
     return root;
   };
@@ -423,6 +458,7 @@ function trustPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState) 
     const body = h('div', { class: 'desk-stack' });
     const tools = [botSelect(state, () => { void load(); })];
     const root = page('Network', 'Trust', 'Approval sends the fingerprint you type. It has to match the one already on screen.', tools, body);
+    let armedRevoke = '';
     const load = async (): Promise<void> => {
       body.replaceChildren(skeleton());
       try {
@@ -502,18 +538,28 @@ function trustPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState) 
         h('h2', { class: 'section-title', text: 'Exchanged' }),
         h('div', { class: 'card-grid' }, ...trusted.map(row => {
           const nodeId = pick(row, ['nodeId', 'node_id']);
-          const revoke = h('button', { class: 'btn', type: 'button' }, 'Revoke');
+          const armed = armedRevoke === nodeId;
+          const revoke = h('button', { class: 'btn', type: 'button' }, armed ? 'Revoke trust' : 'Revoke');
+          const cancel = h('button', { class: 'btn', type: 'button' }, 'Cancel');
           revoke.addEventListener('click', () => {
+            if (revokePress(armed ? 'armed' : 'idle') === 'armed') {
+              armedRevoke = nodeId;
+              void load();
+              return;
+            }
+            armedRevoke = '';
             revoke.disabled = true;
             void api.command('onlyne.action', { action: 'trust.revoke', args: { nodeId }, ...scopePayload(api.state()) })
               .then(() => { hooks.notify(`Revoked ${shortNode(nodeId)}.`, 'ok'); return load(); })
               .catch(error => { hooks.notify(errorText(error), 'error'); revoke.disabled = false; });
           });
+          cancel.addEventListener('click', () => { armedRevoke = ''; void load(); });
           return h('article', { class: 'peer-card' },
             h('div', { class: 'peer-top' }, h('h3', { text: shortNode(nodeId) }), chip(pick(row, ['phase']) || 'exchanged', 'ok')),
             h('p', { class: 'mono break', text: nodeId }),
             kv([['Fingerprint', formatFingerprint(pick(row, ['fingerprint']))]]),
-            revoke);
+            armed ? h('p', { class: 'confirm-note', text: 'Revoke drops the exchanged fingerprint. You can approve it again from the fingerprint on screen.' }) : false,
+            h('div', { class: 'row-actions' }, revoke, armed ? cancel : false));
         })));
     };
     void load();
@@ -762,7 +808,7 @@ function healthPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState)
 
 function integrationsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState) => HTMLElement {
   return state => {
-    const body = h('div', { class: 'desk-stack' });
+    const body = h('div', { class: 'desk-stack section-grid' });
     const tools = [botSelect(state, () => { void load(); })];
     const root = page('Desk', 'Integrations', 'Grok Bot threads and MCP servers visible from this node. Secrets stay in the process environment.', tools, body, 'grid');
     const load = async (): Promise<void> => {

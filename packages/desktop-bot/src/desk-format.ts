@@ -131,3 +131,145 @@ export function fingerprintHint(marks: FingerprintMark[]): string {
   const next = marks.findIndex(mark => mark !== 'match');
   return next >= 0 ? `Group ${next + 1} is still incomplete.` : 'Keep going.';
 }
+
+/** True for a focused field. Shortcuts must not see those keystrokes. */
+export function isTextControl(tag: string, editable = false): boolean {
+  const name = tag.toLowerCase();
+  return editable || name === 'input' || name === 'textarea' || name === 'select';
+}
+
+const GO_SCREENS: Record<string, string> = {
+  c: 'chat',
+  i: 'inbox',
+  p: 'neighbors',
+  t: 'trust',
+  d: 'threads',
+  r: 'resources',
+  h: 'health',
+  x: 'integrations',
+  m: 'team',
+  s: 'settings',
+};
+
+export interface ChordClock { armed: number }
+
+export interface DeskKey {
+  key: string;
+  /** `text` while an input, textarea, select, or contenteditable is focused. */
+  target: 'text' | 'other';
+  meta: boolean;
+  ctrl: boolean;
+  alt: boolean;
+  now: number;
+}
+
+/**
+ * G-chords navigate only when the key is not aimed at a text control.
+ * A text control returns the typed character and clears any armed chord.
+ */
+export function navigationFromKey(clock: ChordClock, event: DeskKey, screens: Record<string, string> = GO_SCREENS): { clock: ChordClock; screen: string | null; typed: string | null } {
+  if (event.target === 'text') {
+    const printable = event.key.length === 1 && !event.meta && !event.ctrl && !event.alt;
+    return { clock: { armed: 0 }, screen: null, typed: printable ? event.key : null };
+  }
+  if (event.meta || event.ctrl || event.alt) return { clock, screen: null, typed: null };
+  if (event.key === 'g') return { clock: { armed: event.now }, screen: null, typed: null };
+  if (clock.armed !== 0 && event.now - clock.armed < 900) {
+    return { clock: { armed: 0 }, screen: screens[event.key.toLowerCase()] ?? null, typed: null };
+  }
+  return { clock: { armed: 0 }, screen: null, typed: null };
+}
+
+/** Type into a text control. G and C stay in the field; they do not change screens. */
+export function typeInField(keys: string, now = 0): { text: string; screens: string[] } {
+  let clock: ChordClock = { armed: 0 };
+  let text = '';
+  const screens: string[] = [];
+  for (const key of keys) {
+    const step = navigationFromKey(clock, { key, target: 'text', meta: false, ctrl: false, alt: false, now });
+    clock = step.clock;
+    now += 30;
+    if (step.typed !== null) text += step.typed;
+    if (step.screen !== null) screens.push(step.screen);
+  }
+  return { text, screens };
+}
+
+/** The side column is a drawer only below the desktop breakpoint. */
+export function drawerWanted(viewportWidth: number): boolean {
+  return viewportWidth <= 900;
+}
+
+export type RevokePhase = 'idle' | 'armed';
+
+/** First press asks. Second press commits. */
+export function revokePress(phase: RevokePhase): 'armed' | 'commit' {
+  return phase === 'idle' ? 'armed' : 'commit';
+}
+
+export interface DeskTrack { name: string; min: number; fr: boolean }
+
+/** Grid tracks for rail + side + stage + optional members + optional dock. Stage is the only flexible column and its minimum is 0. */
+export function deskTracks(options: { dock: boolean; members: boolean }): DeskTrack[] {
+  const rail: DeskTrack = { name: 'rail', min: 56, fr: false };
+  const stage: DeskTrack = { name: 'stage', min: 0, fr: true };
+  if (options.dock && options.members) {
+    return [rail, { name: 'nav', min: 180, fr: false }, stage, { name: 'members', min: 200, fr: false }, { name: 'dock', min: 220, fr: false }];
+  }
+  if (options.dock) return [rail, { name: 'nav', min: 160, fr: false }, stage, { name: 'dock', min: 220, fr: false }];
+  if (options.members) return [rail, { name: 'nav', min: 200, fr: false }, stage, { name: 'members', min: 220, fr: false }];
+  return [rail, { name: 'nav', min: 200, fr: false }, stage];
+}
+
+/** True when the fixed columns fit and the stage can shrink instead of being covered. */
+export function tracksFit(width: number, tracks: DeskTrack[]): boolean {
+  const stage = tracks.find(track => track.name === 'stage');
+  if (stage === undefined || !stage.fr || stage.min !== 0) return false;
+  const fixed = tracks.reduce((sum, track) => sum + (track.fr ? 0 : track.min), 0);
+  return fixed <= width && tracks.every(track => track.min >= 0);
+}
+
+export interface DeliveryRow { id: string; role: string; conversationId: string; createdAt: number }
+export interface DeliveryNote { text: string; at: number }
+
+/**
+ * Keep a failed send’s Retry until that message is followed by an assistant reply,
+ * or the user dismisses it. A later failure binds to a newer user message.
+ */
+export function assignDeliveryErrors(
+  messages: readonly DeliveryRow[],
+  conversationId: string,
+  failures: ReadonlyMap<string, string>,
+  dismissed: ReadonlySet<string>,
+  queued: readonly DeliveryNote[],
+): { failures: Map<string, string>; queued: DeliveryNote[] } {
+  const list = messages.filter(item => item.conversationId === conversationId);
+  const next = new Map<string, string>();
+  for (const [id, text] of failures) {
+    const index = list.findIndex(item => item.id === id);
+    if (index < 0 || dismissed.has(id)) continue;
+    if (list[index + 1]?.role === 'assistant') continue;
+    next.set(id, text);
+  }
+  const rest: DeliveryNote[] = [];
+  for (const note of queued) {
+    const open = list.filter((item, index) => {
+      if (item.role !== 'user' || dismissed.has(item.id) || next.has(item.id)) return false;
+      if (list[index + 1]?.role === 'assistant') return false;
+      return item.createdAt >= note.at - 1_500;
+    });
+    const target = open.at(-1);
+    if (target !== undefined) {
+      next.set(target.id, note.text);
+      continue;
+    }
+    const newerUser = list.some(item => item.role === 'user' && item.createdAt >= note.at - 200);
+    const lastFailed = [...list].reverse().find(item => item.role === 'user' && next.has(item.id));
+    if (!newerUser && lastFailed !== undefined) {
+      next.set(lastFailed.id, note.text);
+      continue;
+    }
+    rest.push(note);
+  }
+  return { failures: next, queued: rest };
+}

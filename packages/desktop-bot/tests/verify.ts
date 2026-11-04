@@ -1,10 +1,10 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDesktopApp } from '../src/app.ts';
 import { createDemoOnlyne, demoFingerprint, ensureDemoTeam, resetDemoWorld } from '../src/demo.ts';
 import { fingerprintsMatch, formatFingerprint, moveInRail, normalizeLayout } from '../src/ui/layout.ts';
-import { commandKey, filterByQuery, fingerprintHint, fingerprintMarks, formatDeskHash, formatWhen, friendlyRuntimeError, middleEllipsis, parseDeskHash, parsePeerUrl, peerPhaseLabel } from '../src/desk-format.ts';
+import { assignDeliveryErrors, commandKey, deskTracks, drawerWanted, filterByQuery, fingerprintHint, fingerprintMarks, formatDeskHash, formatWhen, friendlyRuntimeError, middleEllipsis, navigationFromKey, parseDeskHash, parsePeerUrl, peerPhaseLabel, revokePress, tracksFit, typeInField } from '../src/desk-format.ts';
 import { openDesktopStore } from '../src/store.ts';
 import { startDesktopServer } from '../src/server.ts';
 import type { OnlyneBridgeOptions } from '../src/contracts.ts';
@@ -54,6 +54,38 @@ ok('a missing runtime is explained without the raw spawn text', (() => {
   const text = friendlyRuntimeError('Executable not found in $PATH: "omp"');
   return text !== undefined && !text.includes('$PATH') && text.includes('OMP');
 })());
+ok('typing mcgro in a field keeps every letter and does not navigate', (() => {
+  const typed = typeInField('mcgro');
+  return typed.text === 'mcgro' && typed.screens.length === 0 && typed.text.includes('g') && typed.text.includes('c');
+})());
+ok('g then c still opens conversations when nothing is being typed', (() => {
+  const armed = navigationFromKey({ armed: 0 }, { key: 'g', target: 'other', meta: false, ctrl: false, alt: false, now: 1_000 });
+  const next = navigationFromKey(armed.clock, { key: 'c', target: 'other', meta: false, ctrl: false, alt: false, now: 1_200 });
+  return armed.screen === null && next.screen === 'chat';
+})());
+ok('the drawer is only for a narrow viewport', !drawerWanted(1280) && !drawerWanted(1920) && drawerWanted(800));
+ok('revoke asks once and commits on the second press', revokePress('idle') === 'armed' && revokePress('armed') === 'commit');
+ok('rail, side, stage and dock fit at wide widths', [1280, 1600, 1920, 2560].every(width =>
+  tracksFit(width, deskTracks({ dock: true, members: true }))
+  && tracksFit(width, deskTracks({ dock: true, members: false }))
+  && tracksFit(width, deskTracks({ dock: false, members: false }))));
+ok('a second failure keeps the first retry until that send succeeds', (() => {
+  const rows = [
+    { id: 'u1', role: 'user', conversationId: 'c', createdAt: 10 },
+    { id: 'u2', role: 'user', conversationId: 'c', createdAt: 20 },
+  ];
+  const first = assignDeliveryErrors(rows, 'c', new Map([['u1', 'missing runtime']]), new Set(), [{ text: 'missing runtime', at: 20 }]);
+  const kept = first.failures.get('u1') === 'missing runtime' && first.failures.get('u2') === 'missing runtime';
+  const solved = assignDeliveryErrors(
+    [...rows, { id: 'a2', role: 'assistant', conversationId: 'c', createdAt: 30 }],
+    'c', first.failures, new Set(), [],
+  );
+  const dismissed = assignDeliveryErrors(rows, 'c', first.failures, new Set(['u1']), []);
+  return kept && !solved.failures.has('u2') && solved.failures.has('u1') && !dismissed.failures.has('u1') && dismissed.failures.has('u2');
+})());
+const deskCss = await readFile(new URL('../src/ui/style.css', import.meta.url), 'utf8');
+ok('the stage track can shrink and the desktop nav fills its column', deskCss.includes('minmax(0, 1fr)') && /@media \(min-width: 901px\)[\s\S]*width:\s*auto/.test(deskCss));
+ok('the navigation button is hidden while the side column is on the grid', deskCss.includes('.btn.only-mobile') && deskCss.includes('display: none'));
 
 const directory = await mkdtemp(join(tmpdir(), 'onlyne-desk-'));
 try {
@@ -61,8 +93,15 @@ try {
   const store = await openDesktopStore(directory);
   ok('demo seed writes the team once', (await ensureDemoTeam(store, directory)) === 'seeded');
   ok('demo seed is kept on the next open', (await ensureDemoTeam(store, directory)) === 'kept');
+  await store.update(state => {
+    state.messages = state.messages.filter(item => item.id !== 'msg-desk-4');
+    const first = state.messages[0];
+    if (first !== undefined) first.text = 'Continue the scene as the character described above.';
+  });
+  ok('an old demo transcript is reseeded', (await ensureDemoTeam(store, directory)) === 'seeded');
   const seeded = store.read();
   ok('demo team has three bots and a transcript', seeded.bots.length === 3 && seeded.messages.length >= 8 && seeded.teamAdminId === 'mira');
+  ok('seeded messages are natural prose', seeded.messages.every(item => !item.text.includes('Continue the scene') && !/\S{40,}/.test(item.text)));
   ok('demo character and capabilities are present', seeded.bots[0]?.character?.name === 'Mira' && seeded.capabilities.some(item => item.kind === 'mcp'));
   await store.close();
 
@@ -99,7 +138,12 @@ try {
     await app.command('message.send', { conversationId: 'c-desk', text: 'Leave the north fingerprint on the trust screen.' });
     await new Promise(resolve => setTimeout(resolve, 700));
     const reply = app.snapshot().messages.find(item => item.role === 'assistant' && item.text.includes('north fingerprint'));
-    ok('a demo reply quotes the user, not the scene prompt', reply !== undefined && !reply.text.includes('Continue the scene'));
+    ok('a demo reply quotes the user, not the scene prompt', reply !== undefined && !reply.text.includes('Continue the scene') && !reply.text.includes('I will not pair a peer from a sentence'));
+    await app.command('message.send', { conversationId: 'c-notes', text: 'Where does the filesystem server live?' });
+    await new Promise(resolve => setTimeout(resolve, 700));
+    const jun = app.snapshot().messages.find(item => item.role === 'assistant' && item.botId === 'jun' && item.text.includes('filesystem server'));
+    const lark = app.snapshot().messages.find(item => item.botId === 'lark');
+    ok('each persona answers in its own short voice', jun !== undefined && jun.text.includes('source') && lark !== undefined && lark.text.includes('gateway') && jun.text !== lark.text);
   } finally {
     await app.close();
   }

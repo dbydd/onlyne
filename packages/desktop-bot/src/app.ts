@@ -35,11 +35,11 @@ const identifier = (value: unknown): string => {
 };
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 function demoLine(bot: { id: string; name: string }, spoken: string): string {
-  const line = spoken.length > 0 ? spoken.slice(0, 180) : 'nothing yet';
-  if (bot.id === 'mira') return `Demo reply. I heard “${line}”. I will not pair a peer from a sentence. The trust screen is where a fingerprint is read back.`;
-  if (bot.id === 'jun') return `Demo reply. About “${line}”: I keep the claim next to its source, and I will not add a tool from this chat.`;
-  if (bot.id === 'lark') return `Demo reply. “${line}” does not put a credential on this desk. I only report what the gateway already shows.`;
-  return `Demo reply from ${bot.name}. You wrote “${line}”. No model is running; this answer is simulated.`;
+  const line = spoken.length > 0 ? spoken.slice(0, 80) : 'that';
+  if (bot.id === 'mira') return `“${line}” stays on Trust. I will not type a fingerprint for you.`;
+  if (bot.id === 'jun') return `“${line}” needs a source. I will not add a tool from this chat.`;
+  if (bot.id === 'lark') return `“${line}” is not a credential. I only report the gateway card.`;
+  return `${bot.name}: “${line}”. This is a short demo reply.`;
 }
 const contentText = (value: unknown): string => {
   if (!Array.isArray(value)) return '';

@@ -39,7 +39,7 @@ import {
 	type WorkspaceSpec,
 } from "./layout.ts";
 import type { WorkspaceContribution } from "./api.ts";
-import { chord, commandKey, formatDeskHash, formatWhen, middleEllipsis, parseDeskHash } from "../desk-format.ts";
+import { assignDeliveryErrors, chord, commandKey, formatDeskHash, formatWhen, isTextControl, middleEllipsis, navigationFromKey, parseDeskHash, type DeliveryNote } from "../desk-format.ts";
 
 const MOD = commandKey(navigator.platform, navigator.userAgent);
 
@@ -427,8 +427,9 @@ function openWorkspace(spec: WorkspaceSpec): void {
 
 function isTypingTarget(target: EventTarget | null): boolean {
 	if (!(target instanceof HTMLElement)) return false;
-	const tag = target.tagName;
-	return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+	if (isTextControl(target.tagName, target.isContentEditable)) return true;
+	const host = target.closest("input, textarea, select, [contenteditable='true']");
+	return host instanceof HTMLElement && isTextControl(host.tagName, host.isContentEditable);
 }
 
 function registerWorkspaceEntry(botId: string | undefined, entry: WorkspaceContribution): () => void {
@@ -1150,8 +1151,10 @@ function handleEvent(event: DesktopEvent): void {
 		const message = humanRuntimeError(raw);
 		const conversationId = typeof event.conversationId === "string" ? event.conversationId : "";
 		if (conversationId) {
-			const last = [...messagesOf(conversationId)].reverse().find(item => item.role === "user");
-			if (last) failedDelivery.set(last.id, message);
+			const queued = queuedErrors.get(conversationId) ?? [];
+			queued.push({ text: message, at: Date.now() });
+			queuedErrors.set(conversationId, queued);
+			flushDelivery(conversationId);
 			messageSignature = "";
 			if (selectedConversationId === conversationId) renderMessages();
 		}
@@ -1162,6 +1165,22 @@ function handleEvent(event: DesktopEvent): void {
 }
 
 const failedDelivery = new Map<string, string>();
+const dismissedFailures = new Set<string>();
+const queuedErrors = new Map<string, DeliveryNote[]>();
+let errorListOpen = false;
+
+function flushDelivery(conversationId: string): void {
+	const mine = new Map<string, string>();
+	for (const [id, text] of failedDelivery) {
+		const message = state.messages.find(item => item.id === id);
+		if (message?.conversationId === conversationId) mine.set(id, text);
+	}
+	const result = assignDeliveryErrors(state.messages, conversationId, mine, dismissedFailures, queuedErrors.get(conversationId) ?? []);
+	for (const id of mine.keys()) if (!result.failures.has(id)) failedDelivery.delete(id);
+	for (const [id, text] of result.failures) failedDelivery.set(id, text);
+	if (result.queued.length > 0) queuedErrors.set(conversationId, result.queued);
+	else queuedErrors.delete(conversationId);
+}
 const typingBots = new Map<string, { botId: string; demo: boolean }>();
 
 function humanRuntimeError(message: string): string {
@@ -1605,6 +1624,15 @@ function wireStaticEvents(): void {
 	});
 	refs.backdrop.addEventListener("click", closeDrawers);
 	document.addEventListener("keydown", (event) => {
+		if (refs.app.classList.contains("nav-open")) {
+			if (event.key === "Escape") {
+				event.preventDefault();
+				closeDrawers();
+				return;
+			}
+			if (event.key === "Tab") trapDrawerFocus(event);
+		}
+		if (isTypingTarget(event.target)) return;
 		if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
 			event.preventDefault();
 			openPalette();
@@ -1625,27 +1653,30 @@ function wireStaticEvents(): void {
 			openPanel("character");
 			return;
 		}
-		if (isTypingTarget(event.target)) return;
 		if (event.metaKey || event.ctrlKey || event.altKey) return;
 		if (event.key === "?") {
 			event.preventDefault();
 			openShortcuts();
 			return;
 		}
-		if (event.key === "g") {
-			goChord = Date.now();
-			return;
+		const screens: Record<string, string> = {};
+		for (const spec of [...BUILTIN_WORKSPACES, ...extraWorkspaces]) {
+			if (spec.shortcut.length > 0) screens[spec.shortcut] = spec.panel ?? "chat";
 		}
-		if (goChord !== 0 && Date.now() - goChord < 900) {
-			goChord = 0;
-			const spec = [...BUILTIN_WORKSPACES, ...extraWorkspaces].find((item) => item.shortcut === event.key.toLowerCase());
-			if (spec) {
-				event.preventDefault();
-				openWorkspace(spec);
-			}
-			return;
-		}
-		goChord = 0;
+		const step = navigationFromKey({ armed: goChord }, {
+			key: event.key,
+			target: "other",
+			meta: event.metaKey,
+			ctrl: event.ctrlKey,
+			alt: event.altKey,
+			now: Date.now(),
+		}, screens);
+		goChord = step.clock.armed;
+		if (step.screen === null) return;
+		const spec = [...BUILTIN_WORKSPACES, ...extraWorkspaces].find((item) => (item.panel ?? "chat") === step.screen);
+		if (!spec) return;
+		event.preventDefault();
+		openWorkspace(spec);
 	});
 	window.addEventListener("online", () => {
 		reconnectDelay = 1000;
@@ -2010,7 +2041,7 @@ function renderTopbar(): void {
 	actions.push(
 		h(
 			"button",
-			{ class: "btn icon ghost only-mobile", type: "button", "aria-label": "Open navigation", title: "Navigation", onclick: toggleNav },
+			{ class: "btn icon ghost only-mobile", type: "button", "aria-label": "Open navigation", "aria-controls": "nav", "aria-expanded": refs.app.classList.contains("nav-open") ? "true" : "false", title: "Navigation", onclick: toggleNav },
 			icon("menu"),
 		),
 	);
@@ -2172,12 +2203,28 @@ function renderStatusbar(): void {
 		items.push(
 			h(
 				"button",
-				{ class: "status-error", type: "button", title: "Open the activity view", onclick: () => openPanel("activity") },
+				{
+					class: "status-error",
+					type: "button",
+					title: "Show recent errors",
+					"aria-expanded": errorListOpen ? "true" : "false",
+					onclick: () => { errorListOpen = !errorListOpen; renderStatusbar(); },
+				},
 				`${errors.length} error${errors.length === 1 ? "" : "s"}`,
 			),
 		);
-	}
+	} else errorListOpen = false;
+	const popover = errorListOpen
+		? h("div", { class: "error-popover", role: "dialog", "aria-label": "Recent errors" },
+			h("div", { class: "error-popover-head" },
+				h("strong", { text: "Recent errors" }),
+				h("button", { class: "btn sm", type: "button", onclick: () => { errors.length = 0; errorListOpen = false; renderStatusbar(); } }, "Clear"),
+			),
+			...errors.slice(-8).reverse().map(entry => h("p", { text: entry.message })),
+		)
+		: false;
 	refs.statusbar.replaceChildren(h("div", { class: "statusbar-items" }, ...items), refs.widgetStatus);
+	if (popover) refs.statusbar.append(popover);
 }
 
 function toggleMembers(): void {
@@ -2187,15 +2234,50 @@ function toggleMembers(): void {
 	renderTopbar();
 }
 
+let drawerReturn: HTMLElement | null = null;
+
+function drawerFocusable(): HTMLElement[] {
+	return [...refs.nav.querySelectorAll<HTMLElement>("a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])")]
+		.filter(element => element.offsetParent !== null || element === document.activeElement);
+}
+
+function trapDrawerFocus(event: KeyboardEvent): void {
+	const focusable = drawerFocusable();
+	if (focusable.length === 0) return;
+	const first = focusable[0];
+	const last = focusable[focusable.length - 1];
+	if (!first || !last) return;
+	if (event.shiftKey && document.activeElement === first) {
+		event.preventDefault();
+		last.focus();
+	} else if (!event.shiftKey && document.activeElement === last) {
+		event.preventDefault();
+		first.focus();
+	}
+}
+
 function toggleNav(): void {
 	const open = !refs.app.classList.contains("nav-open");
 	refs.app.classList.toggle("nav-open", open);
 	refs.backdrop.hidden = !open;
+	if (open) {
+		drawerReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		window.requestAnimationFrame(() => focusFirst(refs.nav));
+		return;
+	}
+	const back = drawerReturn;
+	drawerReturn = null;
+	back?.focus();
 }
 
 function closeDrawers(): void {
+	const wasOpen = refs.app.classList.contains("nav-open");
 	refs.app.classList.remove("nav-open");
 	refs.backdrop.hidden = true;
+	if (!wasOpen) return;
+	const back = drawerReturn;
+	drawerReturn = null;
+	back?.focus();
 }
 
 /* ------------------------------------------------------------------ */
@@ -2302,11 +2384,7 @@ function renderMessages(): void {
 	if (!messages.length) {
 		refs.messageList.append(emptyTranscript());
 	} else {
-		for (const id of [...failedDelivery.keys()]) {
-			const message = messages.find(item => item.id === id);
-			if (message === undefined) failedDelivery.delete(id);
-			else if (messages.some(item => item.conversationId === message.conversationId && item.role === "assistant" && item.createdAt >= message.createdAt)) failedDelivery.delete(id);
-		}
+		if (selectedConversationId) flushDelivery(selectedConversationId);
 		for (const message of messages) refs.messageList.append(renderMessage(message));
 		const typing = selectedConversationId ? typingBots.get(selectedConversationId) : undefined;
 		if (typing) {
@@ -2375,7 +2453,10 @@ function renderMessage(message: ChatMessage): HTMLElement {
 	if (failure) {
 		body.append(h("div", { class: "send-failed" },
 			h("p", { text: failure }),
-			h("button", { class: "btn sm", type: "button", onclick: () => void retrySend(message.conversationId) }, "Retry"),
+			h("div", { class: "row-actions" },
+				h("button", { class: "btn sm", type: "button", onclick: () => void retrySend(message.conversationId) }, "Retry"),
+				h("button", { class: "btn sm", type: "button", onclick: () => dismissFailure(message.id) }, "Dismiss"),
+			),
 		));
 	}
 	const lastAssistant = message.role === "assistant" && currentMessages().filter((item) => item.role === "assistant").at(-1)?.id === message.id;
@@ -2964,14 +3045,22 @@ async function sendMessage(): Promise<void> {
 	}
 }
 
+function dismissFailure(messageId: string): void {
+	dismissedFailures.add(messageId);
+	failedDelivery.delete(messageId);
+	messageSignature = "";
+	renderMessages();
+}
+
 async function retrySend(conversationId: string): Promise<void> {
 	const conversation = conversationOf(conversationId);
 	try {
 		await command("message.retry", { conversationId, botId: conversation?.adminBotId });
-		const last = [...messagesOf(conversationId)].reverse().find(item => item.role === "user");
-		if (last) failedDelivery.delete(last.id);
 		messageSignature = "";
 		await refresh().catch(() => undefined);
+		flushDelivery(conversationId);
+		messageSignature = "";
+		renderMessages();
 	} catch (error) {
 		notify(humanRuntimeError(errText(error)), "error");
 	}
@@ -5091,6 +5180,43 @@ function settingsPanel(): HTMLElement {
 		themeOptions.push({ value: settings.theme, label: `${settings.theme} (theme not loaded)` });
 	}
 	const theme = selectEl(themeOptions, settings.theme);
+	theme.hidden = themeOptions.length <= 3;
+	const themePicker = h("div", { class: "theme-picker", role: "radiogroup", "aria-label": "Theme" });
+	const paintTheme = (): void => {
+		for (const button of themePicker.querySelectorAll<HTMLButtonElement>("[data-theme]")) {
+			const on = button.dataset["theme"] === theme.value;
+			button.classList.toggle("on", on);
+			button.setAttribute("aria-checked", on ? "true" : "false");
+		}
+	};
+	for (const option of [
+		{ value: "light", label: "Light", hint: "Paper" },
+		{ value: "dark", label: "Dark", hint: "Ink" },
+		{ value: "system", label: "System", hint: "Match" },
+	]) {
+		const button = h("button", {
+			class: `theme-swatch swatch-${option.value}`,
+			type: "button",
+			role: "radio",
+			"data-theme": option.value,
+			onclick: () => {
+				theme.value = option.value;
+				themeDirty = true;
+				applyTheme(option.value);
+				paintTheme();
+			},
+		},
+		h("span", { class: "swatch-face", "aria-hidden": "true" }),
+		h("span", { class: "swatch-label", text: option.label }),
+		h("span", { class: "swatch-hint", text: option.hint }));
+		themePicker.append(button);
+	}
+	paintTheme();
+	const accentPreview = h("div", { class: "accent-preview", "aria-hidden": "true" },
+		h("span", { class: "accent-sample" }, "Accent"),
+		h("span", { class: "btn primary sm", text: "Primary" }),
+		h("span", { class: "accent-mono", text: "urn:onlyne:agent" }),
+	);
 	const locale = selectEl(
 		[
 			{ value: "en", label: "English" },
@@ -5108,6 +5234,7 @@ function settingsPanel(): HTMLElement {
 	theme.onchange = () => {
 		themeDirty = true;
 		applyTheme(theme.value);
+		paintTheme();
 	};
 	customCss.addEventListener("input", () => {
 		customCssPreview = customCss.value;
@@ -5159,12 +5286,15 @@ function settingsPanel(): HTMLElement {
 		h(
 			"div",
 			{ class: "card" },
-			h("div", { class: "card-head", text: "Appearance" }),
+			h("div", { class: "card-head" }, h("span", { text: "Appearance" })),
 			h(
 				"div",
 				{ class: "card-body" },
-				h("div", { class: "grid-2" }, field("Theme", theme), field("Locale", locale, "Stored for host plugins; the built-in shell is English.")),
-				field("Custom CSS", customCss, "Applied immediately as a preview; saved with the button below."),
+				h("p", { class: "field-hint", text: "The shell uses the swatch you pick. Custom themes from a plugin stay in the list below." }),
+				h("div", { class: "field" }, h("span", { class: "field-label", text: "Theme" }), themePicker, themeOptions.length > 3 ? theme : false),
+				accentPreview,
+				field("Locale", locale, "Stored for host plugins. The built-in shell stays in English."),
+				field("Custom CSS", customCss, "Applied immediately as a preview. It is saved with the button below."),
 			),
 		),
 		layoutCard(),
@@ -5193,22 +5323,20 @@ function settingsPanel(): HTMLElement {
 		formError,
 		h("div", { class: "form-actions" }, reset, save),
 	);
-	const wrap = h(
-		"div",
-		{ class: "panel-inner" },
-		h(
-			"div",
-			{ class: "panel-note", text: "These are application and window preferences. Each bot's models, plugins, MCP servers, Onlyne identity and memory live in its own configuration root." },
+	return h("div", { class: "desk-page settings-page" },
+		h("header", { class: "desk-page-head" },
+			h("div", { class: "desk-page-copy" },
+				h("p", { class: "eyebrow", text: "Desk" }),
+				h("h1", { text: "Settings" }),
+				h("p", { class: "lede", text: "Application and window preferences. Each bot’s models, plugins, identity and memory stay in that bot’s own configuration." }),
+			),
 		),
-		h(
-			"div",
-			{ class: "panel-actions" },
+		h("div", { class: "settings-links" },
 			h("button", { class: "btn", type: "button", onclick: () => openPanel("node") }, icon("node"), "Node record"),
 			h("button", { class: "btn", type: "button", onclick: () => openPanel("capabilities") }, "Capabilities"),
 		),
 		form,
 	);
-	return wrap;
 }
 
 /* ------------------------------------------------------------------ */
@@ -6116,7 +6244,7 @@ async function runPaletteRespond(conversationId: string, botId: string, frameInp
 /* notifications                                                       */
 /* ------------------------------------------------------------------ */
 
-function notify(message: string, level: Level = "info", action?: { label: string; run: () => void }): void {
+function notify(message: string, level: Level = "info", action?: { label: string; run: () => void; ms?: number }): void {
 	const text = message.trim() || "(empty message)";
 	if (level === "error") {
 		errors.push({ message: text, at: Date.now() });
@@ -6143,7 +6271,7 @@ function notify(message: string, level: Level = "info", action?: { label: string
 	);
 	let paused = false;
 	let started = Date.now();
-	const life = level === "error" ? 12_000 : 6_000;
+	const life = action?.ms ?? 4_000;
 	let remaining = life;
 	const tick = (): void => {
 		if (!toast.isConnected || paused) return;
@@ -6518,7 +6646,7 @@ function boot(): void {
 	const disposeOmpPanels = registerOmpPanels(window.onlyne);
 	const disposeCharacterPanel = registerCharacterPanel(window.onlyne);
 	const disposeSurfaces = registerDeskSurfaces(window.onlyne, {
-		notify: (message, level) => notify(message, level === "error" || level === "warn" || level === "ok" ? level : "info"),
+		notify: (message, level, action) => notify(message, level === "error" || level === "warn" || level === "ok" ? level : "info", action),
 		open: (id) => { if (id === "chat") showChat(); else openPanel(id); },
 		createBot: () => openBotEditor(),
 	});

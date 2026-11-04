@@ -504,7 +504,8 @@ export function demoState(dataDir: string): DesktopState {
   const messages: ChatMessage[] = [
     { id: 'msg-desk-1', conversationId: 'c-desk', role: 'assistant', botId: 'mira', text: miraCharacter.firstMessage ?? '', createdAt: now - 86_000_000 },
     { id: 'msg-desk-2', conversationId: 'c-desk', role: 'user', text: 'North showed a fingerprint on their screen. I have not typed it here yet.', createdAt: now - 80_000_000 },
-    { id: 'msg-desk-3', conversationId: 'c-desk', role: 'assistant', botId: 'mira', text: 'Leave the request pending. The trust screen accepts the fingerprint only if it matches the one already displayed.', createdAt: now - 79_000_000 },
+    { id: 'msg-desk-3', conversationId: 'c-desk', role: 'assistant', botId: 'mira', text: 'Leave it pending. Type that fingerprint on Trust, and only if it matches the one already on screen.', createdAt: now - 79_000_000 },
+    { id: 'msg-desk-4', conversationId: 'c-desk', role: 'user', text: 'I will read it on their screen and type it there.', createdAt: now - 78_000_000 },
     { id: 'msg-studio-1', conversationId: 'c-studio', role: 'user', text: 'Jun, keep the filesystem server on your bot. Mira stays the controller.', createdAt: now - 3_000_000 },
     { id: 'msg-studio-2', conversationId: 'c-studio', role: 'assistant', botId: 'jun', text: 'Stdio only. The allow-list is read_file and list_directory. I will not add a write tool from this chat.', createdAt: now - 2_400_000 },
     { id: 'msg-studio-3', conversationId: 'c-studio', role: 'assistant', botId: 'mira', text: 'Noted. The mount resource is heartbeat, and it runs the command already in the gateway configuration.', createdAt: now - 1_800_000 },
@@ -537,7 +538,7 @@ export function demoState(dataDir: string): DesktopState {
 }
 
 export async function ensureDemoTeam(store: DesktopStore, dataDir: string): Promise<'seeded' | 'kept'> {
-  if (store.read().bots.some(item => item.id === 'mira')) return 'kept';
+  if (store.read().messages.some(item => item.id === 'msg-desk-4')) return 'kept';
   const next = demoState(dataDir);
   for (const item of next.bots) await mkdir(item.workspace, { recursive: true });
   await store.update(state => {
