@@ -66,7 +66,7 @@ const COLOR = {
 
 const STYLE = {
   panel: 'display:flex;flex-direction:column;gap:16px;width:100%;box-sizing:border-box;font:13px/1.5 var(--font);color:var(--fg);',
-  section: 'display:flex;flex-direction:column;gap:12px;padding:16px;border:1px solid var(--glass-border-strong);border-radius:var(--radius-lg);background:var(--glass-surface);backdrop-filter:var(--glass-blur-sm);-webkit-backdrop-filter:var(--glass-blur-sm);box-shadow:var(--shadow-sm),var(--glass-specular);',
+  section: 'display:flex;flex-direction:column;gap:12px;padding:16px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);',
   row: 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;',
   stack: 'display:flex;flex-direction:column;gap:8px;',
   fieldRow: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;',
@@ -75,16 +75,16 @@ const STYLE = {
   title: 'font-size:14px;font-weight:650;letter-spacing:-0.01em;',
   muted: 'font-size:12px;color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere;',
   mono: 'font:12px/1.45 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;',
-  button: 'font:12px/1.2 var(--font);padding:6px 12px;border-radius:var(--radius-sm);border:1px solid var(--glass-border-strong);background:var(--glass-surface);color:inherit;cursor:pointer;box-shadow:var(--glass-specular);transition:all 140ms ease;',
-  primary: 'font:12px/1.2 var(--font);padding:6px 12px;border-radius:var(--radius-sm);border:1px solid transparent;background:var(--accent);color:var(--accent-fg);font-weight:600;cursor:pointer;box-shadow:var(--accent-glow);transition:all 140ms ease;',
-  danger: 'font:12px/1.2 var(--font);padding:6px 12px;border-radius:var(--radius-sm);border:1px solid var(--err);background:var(--err-soft);color:var(--err);cursor:pointer;transition:all 140ms ease;',
-  input: 'font:12px/1.45 var(--mono);padding:7px 10px;border-radius:var(--radius-sm);border:1px solid var(--glass-border-strong);background:rgba(12,16,26,0.55);color:inherit;width:100%;box-sizing:border-box;resize:vertical;outline:none;box-shadow:inset 0 1px 2px rgba(0,0,0,0.35);',
-  number: 'font:12px/1.45 var(--mono);padding:7px 10px;border-radius:var(--radius-sm);border:1px solid var(--glass-border-strong);background:rgba(12,16,26,0.55);color:inherit;width:96px;box-sizing:border-box;outline:none;box-shadow:inset 0 1px 2px rgba(0,0,0,0.35);',
-  card: 'display:flex;flex-direction:column;gap:8px;padding:12px;border:1px solid var(--glass-border);border-radius:var(--radius-sm);background:var(--glass-surface);box-shadow:var(--shadow-sm);',
+  button: 'font:12px/1.2 var(--font);padding:6px 12px;border-radius:var(--radius-sm);border:1px solid var(--line-strong);background:var(--surface-2);color:inherit;cursor:pointer;',
+  primary: 'font:12px/1.2 var(--font);padding:6px 12px;border-radius:var(--radius-sm);border:1px solid transparent;background:var(--accent);color:var(--accent-fg);font-weight:600;cursor:pointer;',
+  danger: 'font:12px/1.2 var(--font);padding:6px 12px;border-radius:var(--radius-sm);border:1px solid var(--err);background:var(--err-soft);color:var(--err);cursor:pointer;',
+  input: 'font:12px/1.45 var(--mono);padding:7px 10px;border-radius:var(--radius-sm);border:1px solid var(--line-strong);background:var(--field);color:inherit;width:100%;box-sizing:border-box;resize:vertical;outline:none;',
+  number: 'font:12px/1.45 var(--mono);padding:7px 10px;border-radius:var(--radius-sm);border:1px solid var(--line-strong);background:var(--field);color:inherit;width:96px;box-sizing:border-box;outline:none;',
+  card: 'display:flex;flex-direction:column;gap:8px;padding:12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface-2);',
   check: 'display:inline-flex;align-items:center;gap:6px;font-size:12px;',
-  chip: 'font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--glass-border);color:var(--muted);background:var(--panel-3);',
-  badge: 'font-size:11px;padding:2px 9px;border-radius:999px;border:1px solid var(--glass-border);background:var(--panel-3);color:var(--fg-soft);',
-  pre: 'margin:0;padding:12px;border:1px solid var(--glass-border-strong);border-radius:var(--radius-sm);background:rgba(10,14,24,0.65);font:12px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;',
+  chip: 'font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted);background:var(--surface-3);',
+  badge: 'font-size:11px;padding:2px 9px;border-radius:999px;border:1px solid var(--line);background:var(--surface-3);color:var(--fg-soft);',
+  pre: 'margin:0;padding:12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--field);font:12px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;',
 } as const;
 
 /* ------------------------------------------------------------------ */

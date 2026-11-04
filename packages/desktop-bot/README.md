@@ -27,6 +27,25 @@ bun packages/desktop-bot/src/main.ts --serve --data-dir /path/to/team --port 0
 
 The backend emits a private `desktop.ready` handshake with a one-use launch URL. The native launcher consumes this URL. Each backend holds an exclusive lock on its data directory.
 
+## Demo desk
+
+`--demo` serves the same window with a seeded team and a local node. No OMP process, account, or peer is required. The data directory defaults to a sibling of the live desk (`…/onlyne/desktop-demo`) so it does not overwrite a real team.
+
+```sh
+bun install
+bun run desktop:demo
+```
+
+The process prints a one-use URL on stderr, `Open http://127.0.0.1:4173/launch/…`. Open that URL. The redirect sets the session cookie; a later visit to `/` without it is refused. Port 4173 is the demo default. Pass `--port 0` to take a free port.
+
+The demo team is Mira, Jun and Lark. Inbox, neighbors, trust, threads, resources, health and the Grok Bot / MCP integration screen all have records. Trust still requires the fingerprint on screen to be typed back. Sending a message records it locally and does not call a model.
+
+## Desk
+
+The window is a rail of places, a side column, a stage and an optional dock. Drag a rail icon to reorder it. Right-click one to dock it beside the stage, or press Ctrl+\ (⌘\ on macOS). Ctrl+K opens the jump palette. `?` lists shortcuts. `G` then a letter jumps: C conversations, I inbox, P neighbors, T trust, D threads, R resources, H health, X integrations, M team, S settings.
+
+Panels, themes and message renderers are plugins. See [UI.md](./UI.md).
+
 ## A bot owns its configuration
 
 Each bot owns `bots/<bot-id>/.omp/` under the team directory. Its private chat and group sessions share this configuration. Each bot and conversation pair has a separate OMP session directory.

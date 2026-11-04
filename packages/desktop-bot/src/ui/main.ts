@@ -28,6 +28,17 @@ import { createWidgetHost, createWidgetRegistry } from "./widgets.ts";
 import { registerBuiltinViews } from "./views.ts";
 import { registerOmpPanels } from "./omp-panels.ts";
 import { registerCharacterPanel } from "./character-panel.ts";
+import { registerDeskSurfaces } from "./surfaces.ts";
+import {
+	BUILTIN_WORKSPACES,
+	LAYOUT_STORAGE_KEY,
+	defaultLayout,
+	moveInRail,
+	normalizeLayout,
+	type DeskLayout,
+	type WorkspaceSpec,
+} from "./layout.ts";
+import type { WorkspaceContribution } from "./api.ts";
 
 /* ------------------------------------------------------------------ */
 /* small DOM helpers                                                   */
@@ -97,7 +108,20 @@ type IconName =
 	| "reply"
 	| "refresh"
 	| "attach"
-	| "sticker";
+	| "sticker"
+	| "chat"
+	| "inbox"
+	| "peers"
+	| "trust"
+	| "threads"
+	| "box"
+	| "pulse"
+	| "plug"
+	| "team"
+	| "sun"
+	| "moon"
+	| "search"
+	| "dock";
 
 const ICON_PATHS: Record<IconName, string> = {
 	plus: "M12 5v14M5 12h14",
@@ -113,6 +137,32 @@ const ICON_PATHS: Record<IconName, string> = {
 	refresh: "M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5",
 	attach: "M20.5 11.5 12 20a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8",
 	sticker: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM8.6 14.2a4.6 4.6 0 0 0 6.8 0M9.2 9.4v.6M14.8 9.4v.6",
+	chat: "M5 6.5h14a2 2 0 0 1 2 2V16a2 2 0 0 1-2 2H9l-4 3v-3H5a2 2 0 0 1-2-2V8.5a2 2 0 0 1 2-2Z",
+	inbox: "M4 13h4.5a3.5 3.5 0 0 0 7 0H20v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-5Zm0 0 2.2-6.2A2 2 0 0 1 8.1 5.5h7.8a2 2 0 0 1 1.9 1.3L20 13",
+	peers: "M8 10.5a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2Zm8 .6a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2ZM3.5 18.5a4.6 4.6 0 0 1 9 0M13 18.5a4.6 4.6 0 0 1 7.5-1.2",
+	trust: "M12 3.2 19 6.2v5.6c0 4.2-2.8 6.8-7 8.5-4.2-1.7-7-4.3-7-8.5V6.2l7-3Z",
+	threads: "M8 6.5h12M8 12h12M8 17.5H14M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01",
+	box: "M3.5 8 12 3.5 20.5 8v8.5L12 21 3.5 16.5V8Zm8.5 4.2 8.5-4.2M12 12.2V21",
+	pulse: "M3 12h4l2.2-5.5 4.2 11 2.3-5.5H21",
+	plug: "M9 7v4M15 7v4M8 11h8v3a4 4 0 0 1-8 0v-3ZM12 18v3",
+	team: "M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM5.5 19a6.5 6.5 0 0 1 13 0",
+	sun: "M12 16.2a4.2 4.2 0 1 0 0-8.4 4.2 4.2 0 0 0 0 8.4ZM12 2.6v2.1M12 19.3v2.1M2.6 12h2.1M19.3 12h2.1M5.1 5.1l1.5 1.5M17.4 17.4l1.5 1.5M18.9 5.1l-1.5 1.5M6.6 17.4l-1.5 1.5",
+	moon: "M20 14.6A7.6 7.6 0 1 1 9.4 4 6.2 6.2 0 0 0 20 14.6Z",
+	search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM16.5 16.5 21 21",
+	dock: "M4 5h16v14H4V5Zm10 0v14",
+};
+
+const WORKSPACE_ICONS: Record<string, IconName> = {
+	chat: "chat",
+	inbox: "inbox",
+	neighbors: "peers",
+	trust: "trust",
+	threads: "threads",
+	resources: "box",
+	health: "pulse",
+	integrations: "plug",
+	team: "team",
+	settings: "settings",
 };
 
 function icon(name: IconName, size = 16): SVGSVGElement {
@@ -228,8 +278,15 @@ interface ThemeEntry {
 
 interface Refs {
 	app: HTMLElement;
+	mast: HTMLElement;
+	demoChip: HTMLElement;
+	themeButton: HTMLButtonElement;
 	railBots: HTMLElement;
 	railFoot: HTMLElement;
+	botSwitch: HTMLElement;
+	dock: HTMLElement;
+	dockTitle: HTMLElement;
+	dockBody: HTMLElement;
 	nav: HTMLElement;
 	navTitle: HTMLElement;
 	navSub: HTMLElement;
@@ -294,6 +351,110 @@ let runtimeStatusList: HTMLElement | null = null;
 let runtimeFramesBox: HTMLElement | null = null;
 let runtimeModelChip: HTMLElement | null = null;
 let membersOpen = window.matchMedia("(min-width: 1081px)").matches;
+let shellReady = false;
+let layout: DeskLayout = defaultLayout(BUILTIN_WORKSPACES.map((item) => item.id));
+let extraWorkspaces: WorkspaceSpec[] = [];
+let dockKey = "";
+let goChord = 0;
+
+function railCatalog(): WorkspaceSpec[] {
+	return [...BUILTIN_WORKSPACES, ...extraWorkspaces].filter((item) => item.group !== "studio");
+}
+
+function catalogIds(): string[] {
+	return railCatalog().map((item) => item.id);
+}
+
+function workspaceById(id: string): WorkspaceSpec | undefined {
+	return [...BUILTIN_WORKSPACES, ...extraWorkspaces].find((item) => item.id === id);
+}
+
+function loadLayout(): void {
+	try {
+		layout = normalizeLayout(JSON.parse(localStorage.getItem(LAYOUT_STORAGE_KEY) ?? "null"), catalogIds());
+	} catch {
+		layout = defaultLayout(catalogIds());
+	}
+}
+
+function visibleRail(): WorkspaceSpec[] {
+	const byId = new Map(railCatalog().map((item) => [item.id, item]));
+	return layout.rail.flatMap((id) => {
+		if (layout.hidden.includes(id)) return [];
+		const spec = byId.get(id);
+		return spec === undefined ? [] : [spec];
+	});
+}
+
+function persistLayout(): void {
+	layout = normalizeLayout(layout, catalogIds());
+	localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layout));
+	if (refs) {
+		refs.app.classList.toggle("has-dock", layout.dock !== null);
+		renderRail();
+		renderDock();
+	}
+}
+
+function setDock(id: string | null): void {
+	dockKey = "";
+	layout = { ...layout, dock: id };
+	persistLayout();
+}
+
+function toggleDock(): void {
+	if (layout.dock) {
+		setDock(null);
+		return;
+	}
+	const pin = activePanel ?? "inbox";
+	setDock(pin);
+	if (activePanel === pin) showChat();
+}
+
+function resetLayout(): void {
+	dockKey = "";
+	layout = defaultLayout(catalogIds());
+	localStorage.removeItem(LAYOUT_STORAGE_KEY);
+	persistLayout();
+}
+
+function openWorkspace(spec: WorkspaceSpec): void {
+	if (spec.panel === null) showChat();
+	else openPanel(spec.panel);
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+	if (!(target instanceof HTMLElement)) return false;
+	const tag = target.tagName;
+	return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+}
+
+function registerWorkspaceEntry(botId: string | undefined, entry: WorkspaceContribution): () => void {
+	const id = botId ? `${botId}:${entry.id}` : entry.id;
+	const spec: WorkspaceSpec = {
+		id,
+		title: entry.title,
+		hint: entry.hint ?? "",
+		shortcut: entry.shortcut ?? "",
+		group: entry.group ?? "studio",
+		panel: id,
+	};
+	extraWorkspaces = extraWorkspaces.filter((item) => item.id !== id);
+	extraWorkspaces.push(spec);
+	layout = normalizeLayout(layout, catalogIds());
+	if (shellReady) renderRail();
+	return () => {
+		extraWorkspaces = extraWorkspaces.filter((item) => item.id !== id);
+		if (layout.dock === id) layout = { ...layout, dock: null };
+		layout = normalizeLayout(layout, catalogIds());
+		dockKey = "";
+		if (shellReady) {
+			renderRail();
+			renderDock();
+		}
+	};
+}
 
 const drafts = new Map<string, string>();
 const attachmentsByConversation = new Map<string, AttachmentEntry[]>();
@@ -1093,17 +1254,37 @@ function buildShell(): void {
 	app.replaceChildren();
 	app.className = "app";
 	app.classList.toggle("members-hidden", !membersOpen);
+	app.classList.toggle("has-dock", layout.dock !== null);
+
+	const mac = navigator.userAgent.includes("Mac");
+	const demoChip = h("span", { class: "demo-chip", hidden: true, text: "Demo" });
+	const themeButton = h("button", {
+		class: "btn ghost icon",
+		type: "button",
+		"aria-label": "Toggle color theme",
+		title: "Toggle theme",
+		onclick: () => void toggleTheme(),
+	}, icon("sun", 16));
+	const commandButton = h("button", { class: "command-trigger", type: "button", onclick: openPalette },
+		icon("search", 15),
+		h("span", { class: "command-label", text: "Search or jump" }),
+		h("kbd", { text: mac ? "⌘K" : "Ctrl K" }),
+	);
+	const mast = h("header", { class: "mast" },
+		h("div", { class: "mast-brand" }, h("span", { class: "wordmark", text: "Onlyne" }), demoChip),
+		commandButton,
+		h("div", { class: "mast-tools" }, themeButton),
+	);
 
 	const railBots = h("div", { class: "rail-top", id: "rail-bots" });
 	const railFoot = h(
 		"div",
 		{ class: "rail-foot" },
-		h("button", { class: "rail-btn", type: "button", title: "Command palette (⌘K)", "aria-label": "Open command palette", onclick: openPalette }, icon("command")),
-		h("button", { class: "rail-btn", type: "button", title: "Node and peers", "aria-label": "Open node and peers", onclick: () => openPanel("node") }, icon("node")),
-		h("button", { class: "rail-btn", type: "button", title: "Settings", "aria-label": "Open settings", onclick: () => openPanel("settings") }, icon("settings")),
+		h("button", { class: "rail-link", type: "button", title: "Keyboard shortcuts", "aria-label": "Keyboard shortcuts", onclick: openShortcuts }, icon("command")),
 	);
 	const rail = h("nav", { class: "rail", id: "rail", "aria-label": "Bots" }, railBots, railFoot);
 
+	const botSwitch = h("div", { class: "bot-switch", id: "bot-switch", role: "tablist", "aria-label": "Bots" });
 	const navTitle = h("div", { class: "nav-title", id: "nav-title" });
 	const navSub = h("div", { class: "nav-sub", id: "nav-sub" });
 	const navSearch = h("input", {
@@ -1120,7 +1301,7 @@ function buildShell(): void {
 	const nav = h(
 		"aside",
 		{ class: "nav", id: "nav", "aria-label": "Conversations" },
-		h("div", { class: "nav-head" }, navTitle, navSub),
+		h("div", { class: "nav-head" }, botSwitch, navTitle, navSub),
 		h("div", { class: "nav-search" }, navSearch),
 		navSections,
 		navViews,
@@ -1251,12 +1432,39 @@ function buildShell(): void {
 	const dialogs = h("div", { class: "dialog-layer", id: "dialogs" });
 	const modals = h("div", { class: "modal-layer", id: "modals", hidden: true });
 	const backdrop = h("div", { class: "drawer-backdrop", id: "drawer-backdrop", hidden: true });
+	const dockTitle = h("span", { id: "dock-title", text: "Dock" });
+	const dockBody = h("div", { class: "dock-body" });
+	const dock = h("aside", { class: "dock", id: "dock", hidden: layout.dock === null, "aria-label": "Docked panel" },
+		h("div", { class: "dock-head" }, dockTitle, h("button", { class: "btn ghost sm", type: "button", onclick: () => setDock(null) }, "Close")),
+		dockBody,
+	);
+	dock.addEventListener("dragover", (event) => {
+		event.preventDefault();
+		dock.classList.add("drop");
+	});
+	dock.addEventListener("dragleave", () => dock.classList.remove("drop"));
+	dock.addEventListener("drop", (event) => {
+		event.preventDefault();
+		dock.classList.remove("drop");
+		const id = event.dataTransfer?.getData("text/plain") ?? "";
+		const spec = workspaceById(id);
+		if (!spec || spec.panel === null) return;
+		setDock(spec.panel);
+		if (activePanel === spec.panel) showChat();
+	});
 
-	app.append(rail, nav, main, aside, toasts, dialogs, modals, backdrop);
+	app.append(mast, rail, nav, main, aside, dock, toasts, dialogs, modals, backdrop);
 
 	refs = {
 		app,
+		mast,
+		demoChip,
+		themeButton,
 		railBots,
+		botSwitch,
+		dock,
+		dockTitle,
+		dockBody,
 		railFoot,
 		nav,
 		navTitle,
@@ -1298,6 +1506,7 @@ function buildShell(): void {
 		modals,
 		backdrop,
 	};
+	shellReady = true;
 }
 
 function wireStaticEvents(): void {
@@ -1365,6 +1574,11 @@ function wireStaticEvents(): void {
 			openPalette();
 			return;
 		}
+		if ((event.metaKey || event.ctrlKey) && event.key === "\\") {
+			event.preventDefault();
+			toggleDock();
+			return;
+		}
 		if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "n") {
 			event.preventDefault();
 			openConversationEditor();
@@ -1373,7 +1587,29 @@ function wireStaticEvents(): void {
 		if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "c") {
 			event.preventDefault();
 			openPanel("character");
+			return;
 		}
+		if (isTypingTarget(event.target)) return;
+		if (event.metaKey || event.ctrlKey || event.altKey) return;
+		if (event.key === "?") {
+			event.preventDefault();
+			openShortcuts();
+			return;
+		}
+		if (event.key === "g") {
+			goChord = Date.now();
+			return;
+		}
+		if (goChord !== 0 && Date.now() - goChord < 900) {
+			goChord = 0;
+			const spec = [...BUILTIN_WORKSPACES, ...extraWorkspaces].find((item) => item.shortcut === event.key.toLowerCase());
+			if (spec) {
+				event.preventDefault();
+				openWorkspace(spec);
+			}
+			return;
+		}
+		goChord = 0;
 	});
 	window.addEventListener("online", () => {
 		reconnectDelay = 1000;
@@ -1401,58 +1637,129 @@ function wireStaticEvents(): void {
 function renderAll(): void {
 	ensureSelection();
 	applyAppearance();
+	renderMast();
 	renderRail();
 	renderNav();
 	renderTopbar();
 	renderView();
 	renderChat();
 	renderAside();
+	renderDock();
 	renderStatusbar();
 	renderBanner();
 }
 
+function renderMast(): void {
+	const light = document.documentElement.dataset["theme"] === "light";
+	refs.themeButton.replaceChildren(icon(light ? "moon" : "sun", 16));
+	refs.themeButton.title = light ? "Use the dark theme" : "Use the light theme";
+	refs.themeButton.setAttribute("aria-label", refs.themeButton.title);
+}
+
+async function toggleTheme(): Promise<void> {
+	const next = document.documentElement.dataset["theme"] === "light" ? "dark" : "light";
+	applyTheme(next);
+	themeDirty = false;
+	renderMast();
+	try {
+		await command("settings.save", { settings: { ...currentSettings(), theme: next } });
+		await refresh().catch(() => undefined);
+	} catch (error) {
+		notify(errText(error), "error");
+	}
+}
+
+async function markDemo(): Promise<void> {
+	try {
+		const health = await command<{ demo?: boolean }>("desktop.health");
+		refs.demoChip.hidden = health?.demo !== true;
+	} catch {
+		refs.demoChip.hidden = true;
+	}
+}
+
+function renderDock(): void {
+	const id = layout.dock;
+	refs.app.classList.toggle("has-dock", id !== null);
+	refs.dock.hidden = id === null;
+	if (id === null) {
+		dockKey = "";
+		return;
+	}
+	const panel = panels.get(id);
+	refs.dockTitle.textContent = panel?.title ?? "Dock";
+	if (id === activePanel) {
+		if (dockKey === "stage") return;
+		dockKey = "stage";
+		refs.dockBody.replaceChildren(
+			h("div", { class: "desk-empty" },
+				h("h2", { text: "Already on stage" }),
+				h("p", { text: "This panel is the main view. Dock a different one to keep it beside the conversation." })),
+		);
+		return;
+	}
+	if (dockKey === id && refs.dockBody.childElementCount > 0) return;
+	dockKey = id;
+	if (!panel) {
+		refs.dockBody.replaceChildren(h("p", { class: "lede", text: "That panel is no longer registered." }));
+		return;
+	}
+	try {
+		refs.dockBody.replaceChildren(panel.render(state));
+	} catch (error) {
+		refs.dockBody.replaceChildren(h("div", { class: "invalid", text: errText(error) }));
+	}
+}
+
 function renderRail(): void {
 	refs.railBots.replaceChildren();
-	const all = h(
-		"button",
-		{
-			class: `rail-bot all${selectedBotId === null ? " on" : ""}`,
-			type: "button",
-			title: "All bots",
-			"aria-label": "All bots",
-			"aria-pressed": String(selectedBotId === null),
-			onclick: () => selectBot(null),
-		},
-		"ALL",
-	);
-	refs.railBots.append(all);
-	for (const bot of state.bots) {
-		const busy = state.conversations.some(
-			(conversation) => conversation.botIds.includes(bot.id) && hasActiveStream(conversation.id),
-		);
-		const avatar = botAvatarOf(bot);
+	let previousGroup = "";
+	for (const spec of visibleRail()) {
+		if (previousGroup.length > 0 && previousGroup !== spec.group) refs.railBots.append(h("span", { class: "rail-sep", "aria-hidden": "true" }));
+		previousGroup = spec.group;
+		const active = spec.panel === null ? activePanel === null : activePanel === spec.panel;
+		const glyph = WORKSPACE_ICONS[spec.id] ?? "node";
 		const button = h(
 			"button",
 			{
-				class: `rail-bot${selectedBotId === bot.id ? " on" : ""}`,
+				class: `rail-link${active ? " on" : ""}`,
 				type: "button",
-				title: bot.name,
-				"aria-label": `Show conversations with ${bot.name}`,
-				"aria-pressed": String(selectedBotId === bot.id),
-				onclick: () => selectBot(bot.id),
+				title: `${spec.title}. ${spec.hint}. Drag to reorder. Right-click to dock.`,
+				"aria-label": spec.title,
+				"aria-current": active ? "page" : undefined,
+				draggable: "true",
+				onclick: () => openWorkspace(spec),
 			},
-			avatar ? h("img", { class: "rail-avatar", src: mediaUrl(avatar), alt: "", loading: "lazy", decoding: "async" }) : initials(bot.name),
-			busy ? h("span", { class: "dot run", "aria-hidden": "true" }) : null,
+			icon(glyph, 18),
 		);
+		button.addEventListener("dragstart", (event) => {
+			event.dataTransfer?.setData("text/plain", spec.id);
+			if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+			button.classList.add("dragging");
+		});
+		button.addEventListener("dragend", () => button.classList.remove("dragging"));
+		button.addEventListener("dragover", (event) => {
+			event.preventDefault();
+			button.classList.add("drop");
+		});
+		button.addEventListener("dragleave", () => button.classList.remove("drop"));
+		button.addEventListener("drop", (event) => {
+			event.preventDefault();
+			button.classList.remove("drop");
+			const id = event.dataTransfer?.getData("text/plain") ?? "";
+			if (id.length === 0 || id === spec.id) return;
+			const to = layout.rail.indexOf(spec.id);
+			layout = moveInRail(layout, id, to);
+			persistLayout();
+		});
+		button.addEventListener("contextmenu", (event) => {
+			if (spec.panel === null) return;
+			event.preventDefault();
+			setDock(spec.panel);
+			if (activePanel === spec.panel) showChat();
+		});
 		refs.railBots.append(button);
 	}
-	refs.railBots.append(
-		h(
-			"button",
-			{ class: "rail-add", type: "button", title: "Create a bot", "aria-label": "Create a bot", onclick: () => openBotEditor() },
-			icon("plus", 18),
-		),
-	);
 }
 
 function selectBot(id: string | null): void {
@@ -1470,7 +1777,60 @@ function selectBot(id: string | null): void {
 	activateBotPlugins();
 }
 
+function renderBotSwitch(): void {
+	refs.botSwitch.replaceChildren();
+	const all = h("button", {
+		class: `bot-chip${selectedBotId === null ? " on" : ""}`,
+		type: "button",
+		role: "tab",
+		"aria-selected": selectedBotId === null ? "true" : "false",
+		onclick: () => selectBot(null),
+	}, "All");
+	refs.botSwitch.append(all);
+	for (const bot of state.bots) {
+		const busy = state.conversations.some((conversation) => conversation.botIds.includes(bot.id) && hasActiveStream(conversation.id));
+		refs.botSwitch.append(h("button", {
+			class: `bot-chip${selectedBotId === bot.id ? " on" : ""}`,
+			type: "button",
+			role: "tab",
+			title: bot.name,
+			"aria-selected": selectedBotId === bot.id ? "true" : "false",
+			onclick: () => selectBot(bot.id),
+		}, initials(bot.name), busy ? h("span", { class: "dot run", "aria-hidden": "true" }) : false));
+	}
+	refs.botSwitch.append(h("button", {
+		class: "bot-chip add",
+		type: "button",
+		title: "Create a bot",
+		"aria-label": "Create a bot",
+		onclick: () => openBotEditor(),
+	}, icon("plus", 14)));
+}
+
 function renderNav(): void {
+	renderBotSwitch();
+	const place = activePanel === null ? workspaceById("chat") : [...BUILTIN_WORKSPACES, ...extraWorkspaces].find((item) => item.panel === activePanel);
+	if (activePanel !== null && place) {
+		refs.navTitle.textContent = place.title;
+		refs.navSub.textContent = place.hint;
+		refs.navSections.replaceChildren();
+		const siblings = [...BUILTIN_WORKSPACES, ...extraWorkspaces].filter((item) => item.group === place.group);
+		if (siblings.length > 1) {
+			refs.navSections.append(h("div", { class: "section" }, h("span", { text: "In this group" })));
+			for (const spec of siblings) {
+				const active = spec.panel === activePanel || (spec.panel === null && activePanel === null);
+				refs.navSections.append(h("button", {
+					class: `view-link${active ? " on" : ""}`,
+					type: "button",
+					"aria-current": active ? "page" : undefined,
+					onclick: () => openWorkspace(spec),
+				}, spec.title));
+			}
+		}
+		renderNavViews();
+		syncChrome();
+		return;
+	}
 	refs.navTitle.textContent = selectedBotId ? botName(selectedBotId) : "All bots";
 	const nodeId = currentSettings().nodeId;
 	const shortNode = nodeId ? nodeId.split(":").filter(Boolean).slice(-1)[0] : "node not configured";
@@ -1534,7 +1894,7 @@ function renderNav(): void {
 					title: `${conversation.title} — ${memberLabel}`,
 					onclick: () => selectConversation(conversation.id),
 				},
-				h("span", { class: "chan-icon", text: conversation.kind === "group" ? "#" : "@" }),
+				h("span", { class: "chan-icon", text: conversation.kind === "group" ? "G" : "D" }),
 				h("span", { class: "chan-title", text: conversation.title }),
 				busy ? h("span", { class: "chan-dot", title: "A bot is responding" }) : h("span", { class: "chan-meta", text: relativeTime(last) }),
 			);
@@ -1542,41 +1902,45 @@ function renderNav(): void {
 		}
 	}
 	renderNavViews();
+	syncChrome();
+}
+
+const DESK_PANELS = new Set(["inbox", "neighbors", "trust", "threads", "resources", "health", "integrations", "team"]);
+
+function syncChrome(): void {
+	const docked = layout.dock !== null;
+	refs.app.classList.toggle("members-hidden", docked || activePanel !== null || !membersOpen);
+	const search = refs.navSearch.closest(".nav-search");
+	if (search instanceof HTMLElement) search.hidden = activePanel !== null;
 }
 
 function renderNavViews(): void {
 	refs.navViews.replaceChildren();
-	refs.navViews.append(h("div", { class: "section" }, h("span", { text: "Views" })));
-	const entries: Array<{ id: string | null; title: string }> = [{ id: null, title: "Chat" }];
+	const railPanels = new Set(visibleRail().flatMap((item) => item.panel === null ? [] : [item.panel]));
 	const activeBots = uiActiveBotIds();
-	for (const panel of panels.values()) {
-		if (panel.botId && !activeBots.has(panel.botId)) continue;
-		entries.push({ id: panel.id, title: panel.title });
-	}
+	const entries = [...panels.values()].filter((panel) => !railPanels.has(panel.id) && (!panel.botId || activeBots.has(panel.botId)));
+	if (entries.length === 0) return;
+	refs.navViews.append(h("div", { class: "section" }, h("span", { text: "Library" })));
 	for (const entry of entries) {
-		const active = entry.id === null ? activePanel === null : activePanel === entry.id;
-		refs.navViews.append(
-			h(
-				"button",
-				{
-					class: `view-link${active ? " on" : ""}`,
-					type: "button",
-					"aria-current": active ? "page" : undefined,
-					onclick: () => (entry.id === null ? showChat() : openPanel(entry.id)),
-				},
-				h("span", { class: "chan-icon", text: "▸" }),
-				entry.title,
-			),
-		);
+		const active = activePanel === entry.id;
+		refs.navViews.append(h("button", {
+			class: `view-link${active ? " on" : ""}`,
+			type: "button",
+			"aria-current": active ? "page" : undefined,
+			onclick: () => openPanel(entry.id),
+		}, entry.title));
 	}
 }
 
 function renderTopbar(): void {
 	const panel = activePanel ? panels.get(activePanel) : null;
+	const bar = refs.topTitle.closest(".topbar");
+	bar?.classList.toggle("quiet", panel !== null && DESK_PANELS.has(activePanel ?? ""));
 	renderCover(panel ? undefined : selectedConversation());
 	if (panel) {
+		const place = [...BUILTIN_WORKSPACES, ...extraWorkspaces].find((item) => item.panel === activePanel);
 		refs.topTitle.textContent = panel.title;
-		refs.topSub.textContent = "View";
+		refs.topSub.textContent = place?.hint || "Panel";
 	} else {
 		const conversation = selectedConversation();
 		refs.topTitle.textContent = conversation?.title ?? "No conversation";
@@ -1598,7 +1962,7 @@ function renderTopbar(): void {
 		),
 	);
 	if (panel) {
-		actions.push(h("button", { class: "btn ghost", type: "button", onclick: showChat }, "← Chat"));
+		actions.push(h("button", { class: "btn ghost", type: "button", onclick: showChat }, "Conversations"));
 		actions.push(
 			h("button", { class: "btn", type: "button", title: "Refresh this view", onclick: () => renderPanel() }, icon("refresh"), "Refresh"),
 		);
@@ -4418,19 +4782,23 @@ function openPanel(id: string): void {
 	if (activePanel === "settings" && id !== "settings") resetSettingsPreview();
 	activePanel = id;
 	closeDrawers();
+	renderRail();
 	renderNav();
 	renderTopbar();
 	renderView();
 	renderPanel();
+	renderDock();
 }
 
 function showChat(): void {
 	if (activePanel === "settings") resetSettingsPreview();
 	activePanel = null;
 	closeDrawers();
+	renderRail();
 	renderNav();
 	renderTopbar();
 	renderView();
+	renderDock();
 	refs.composerInput.focus();
 }
 
@@ -4492,6 +4860,38 @@ function capabilitiesPanel(): HTMLElement {
 		);
 	}
 	return wrap;
+}
+
+function layoutCard(): HTMLElement {
+	const box = h("div", { class: "check-grid" });
+	for (const spec of railCatalog()) {
+		if (spec.id === "chat") continue;
+		const input = h("input", { type: "checkbox" }) as HTMLInputElement;
+		input.checked = !layout.hidden.includes(spec.id);
+		input.addEventListener("change", () => {
+			const hidden = new Set(layout.hidden);
+			if (input.checked) hidden.delete(spec.id);
+			else hidden.add(spec.id);
+			layout = { ...layout, hidden: [...hidden] };
+			persistLayout();
+		});
+		box.append(h("label", { class: "check" }, input, ` ${spec.title}`));
+	}
+	const dock = h("select", { "aria-label": "Docked panel" });
+	dock.append(h("option", { value: "", text: "Nothing docked" }));
+	for (const panel of panels.values()) {
+		if (panel.botId) continue;
+		dock.append(h("option", { value: panel.id, text: panel.title }));
+	}
+	dock.value = layout.dock ?? "";
+	dock.addEventListener("change", () => setDock(dock.value.length === 0 ? null : dock.value));
+	return h("div", { class: "card" },
+		h("div", { class: "card-head", text: "Layout" }),
+		h("div", { class: "card-body" },
+			h("p", { class: "field-hint", text: "Drag a rail icon to reorder it. Right-click a rail icon to dock that panel. Hidden places stay in the command palette." }),
+			box,
+			field("Dock", dock, "Pins a second panel beside the stage."),
+			h("button", { class: "btn", type: "button", onclick: () => { resetLayout(); renderPanel(); } }, "Reset layout")));
 }
 
 function settingsPanel(): HTMLElement {
@@ -4593,6 +4993,7 @@ function settingsPanel(): HTMLElement {
 				field("Custom CSS", customCss, "Applied immediately as a preview; saved with the button below."),
 			),
 		),
+		layoutCard(),
 		h(
 			"div",
 			{ class: "card" },
@@ -4628,7 +5029,7 @@ function settingsPanel(): HTMLElement {
 		h(
 			"div",
 			{ class: "panel-actions" },
-			h("button", { class: "btn", type: "button", onclick: () => openPanel("node") }, icon("node"), "Node and peers"),
+			h("button", { class: "btn", type: "button", onclick: () => openPanel("node") }, icon("node"), "Node record"),
 			h("button", { class: "btn", type: "button", onclick: () => openPanel("capabilities") }, "Capabilities"),
 		),
 		form,
@@ -5258,6 +5659,33 @@ const RESPONSE_PRESETS: Array<{ label: string; frame: RpcFrame }> = [
 	{ label: "value response", frame: { type: "extension_ui_response", id: "", value: "" } },
 ];
 
+function openShortcuts(): void {
+	const mac = navigator.userAgent.includes("Mac");
+	const rows: Array<[string, string]> = [
+		["⌘K", "Command palette"],
+		["⌘\\", "Dock the current panel, or close the dock"],
+		["?", "Shortcut list"],
+		["⌘⇧N", "New conversation"],
+		["⌘⇧C", "Character and scene"],
+		["⌘ Enter", "Send the draft"],
+		["G then C", "Conversations"],
+		["G then I", "Inbox"],
+		["G then P", "Neighbors"],
+		["G then T", "Trust"],
+		["G then D", "Threads"],
+		["G then R", "Resources"],
+		["G then H", "Health"],
+		["G then X", "Integrations"],
+		["G then M", "Team"],
+		["G then S", "Settings"],
+	];
+	const body = h("div", { class: "shortcut-list" }, ...rows.map(([keys, label]) => h("div", { class: "shortcut-row" },
+		h("kbd", { text: mac ? keys : keys.replaceAll("⌘", "Ctrl+") }),
+		h("span", { text: label }))));
+	const modal = openModal({ title: "Keyboard", body });
+	modal.footer.append(h("button", { class: "btn", type: "button", onclick: () => modal.close() }, "Close"));
+}
+
 function openPalette(): void {
 	const actions = paletteActions();
 	const conversation = selectedConversation();
@@ -5332,34 +5760,59 @@ function openPalette(): void {
 	rpcTab.onclick = () => setMode("rpc");
 	respondTab.onclick = () => setMode("respond");
 
+	let closePalette = (): void => undefined;
+	type PaletteRow =
+		| { kind: "jump"; title: string; description: string; kbd?: string; run: () => void }
+		| { kind: "action"; action: PaletteAction };
+	const paletteRows = (): PaletteRow[] => {
+		const jumps: PaletteRow[] = [...BUILTIN_WORKSPACES, ...extraWorkspaces].map((spec) => ({
+			kind: "jump",
+			title: spec.title,
+			description: spec.hint || "Open",
+			...(spec.shortcut ? { kbd: `G ${spec.shortcut.toUpperCase()}` } : {}),
+			run: () => { openWorkspace(spec); closePalette(); },
+		}));
+		jumps.push(
+			{ kind: "jump", title: "Toggle theme", description: "Switch the dark and light themes", run: () => { void toggleTheme(); closePalette(); } },
+			{ kind: "jump", title: layout.dock ? "Close dock" : "Dock this panel", description: "Pin a panel beside the stage", kbd: "⌘\\", run: () => { toggleDock(); closePalette(); } },
+			{ kind: "jump", title: "Keyboard shortcuts", description: "Show the shortcut list", kbd: "?", run: () => { closePalette(); openShortcuts(); } },
+		);
+		return [...jumps, ...actions.map((action) => ({ kind: "action" as const, action }))];
+	};
+	const matches = (row: PaletteRow, needle: string): boolean => {
+		if (!needle) return true;
+		if (row.kind === "jump") return row.title.toLowerCase().includes(needle) || row.description.toLowerCase().includes(needle);
+		return row.action.name.toLowerCase().includes(needle) || row.action.description.toLowerCase().includes(needle);
+	};
 	const paintList = (): void => {
 		const needle = search.value.trim().toLowerCase();
 		list.replaceChildren();
-		const filtered = actions.filter((action) => !needle || action.name.toLowerCase().includes(needle) || action.description.toLowerCase().includes(needle));
+		const filtered = paletteRows().filter((row) => matches(row, needle));
 		if (!filtered.length) {
-			list.append(h("div", { class: "panel-note", text: "No matching actions." }));
+			list.append(h("div", { class: "panel-note", text: "Nothing matches." }));
 			return;
 		}
 		if (selectedIndex >= filtered.length) selectedIndex = filtered.length - 1;
-		filtered.forEach((action, index) => {
-			list.append(
-				h(
-					"button",
-					{
-						class: `palette-item${index === selectedIndex ? " on" : ""}`,
-						type: "button",
-						onclick: () => {
-							selectedIndex = index;
-							actionName.value = action.name;
-							actionPayload.value = safeJson(action.payload());
-							setMode("action");
-							paintList();
-						},
-					},
-					h("div", { class: "palette-main", text: action.name }),
-					h("div", { class: "palette-desc", text: action.description }),
-				),
-			);
+		filtered.forEach((row, index) => {
+			const title = row.kind === "jump" ? row.title : row.action.name;
+			const description = row.kind === "jump" ? row.description : row.action.description;
+			list.append(h("button", {
+				class: `palette-item${index === selectedIndex ? " on" : ""}`,
+				type: "button",
+				onclick: () => {
+					selectedIndex = index;
+					if (row.kind === "jump") {
+						row.run();
+						return;
+					}
+					actionName.value = row.action.name;
+					actionPayload.value = safeJson(row.action.payload());
+					setMode("action");
+					paintList();
+				},
+			},
+			h("div", { class: "palette-main" }, h("span", { text: title }), row.kind === "jump" && row.kbd ? h("kbd", { class: "palette-kbd", text: row.kbd }) : false),
+			h("div", { class: "palette-desc", text: description })));
 		});
 	};
 	search.addEventListener("input", () => {
@@ -5367,13 +5820,11 @@ function openPalette(): void {
 		paintList();
 	});
 	search.addEventListener("keydown", (event) => {
-		const filtered = actions.filter((action) => {
-			const needle = search.value.trim().toLowerCase();
-			return !needle || action.name.toLowerCase().includes(needle) || action.description.toLowerCase().includes(needle);
-		});
+		const needle = search.value.trim().toLowerCase();
+		const filtered = paletteRows().filter((row) => matches(row, needle));
 		if (event.key === "ArrowDown") {
 			event.preventDefault();
-			selectedIndex = Math.min(selectedIndex + 1, filtered.length - 1);
+			selectedIndex = Math.min(selectedIndex + 1, Math.max(filtered.length - 1, 0));
 			paintList();
 		} else if (event.key === "ArrowUp") {
 			event.preventDefault();
@@ -5383,15 +5834,20 @@ function openPalette(): void {
 			const chosen = filtered[selectedIndex];
 			if (!chosen) return;
 			event.preventDefault();
-			actionName.value = chosen.name;
-			actionPayload.value = safeJson(chosen.payload());
+			if (chosen.kind === "jump") {
+				chosen.run();
+				return;
+			}
+			actionName.value = chosen.action.name;
+			actionPayload.value = safeJson(chosen.action.payload());
 			setMode("action");
+			paintList();
 		}
 	});
 	paintList();
 
 	const modal = openModal({
-		title: "Command palette",
+		title: "Jump",
 		wide: true,
 		body: h(
 			"div",
@@ -5400,6 +5856,7 @@ function openPalette(): void {
 			h("div", { class: "palette-right" }, h("div", { class: "palette-tabs" }, actionTab, rpcTab, respondTab), actionPane, rpcPane, respondPane),
 		),
 	});
+	closePalette = () => modal.close();
 	modal.footer.append(h("button", { class: "btn ghost", type: "button", onclick: () => modal.close() }, "Close"));
 	if (!conversation) {
 		actionResult.textContent = "No conversation is selected; runtime actions need a conversation and bot.";
@@ -5686,6 +6143,15 @@ function createUiApi(): DesktopUiApi {
 		activeContext,
 		widgets: registry,
 		registerPanel: (id, title, render) => registerPanelEntry(undefined, id, title, render),
+		registerWorkspace: (entry) => registerWorkspaceEntry(undefined, entry),
+		layout: {
+			get: () => layout,
+			update: (change) => {
+				layout = normalizeLayout(change(layout), catalogIds());
+				persistLayout();
+			},
+			reset: () => resetLayout(),
+		},
 		registerMessageRenderer: (role, render) => registerRendererEntry(undefined, role, render),
 		registerTheme: (id, css) => registerThemeEntry(undefined, id, css),
 		setTheme: (id) => {
@@ -5734,6 +6200,15 @@ function createScopedUiApi(botId: string, app: DesktopUiApi): DesktopUiApi {
 		},
 		widgets: registryForBot(botId),
 		registerPanel: (id, title, render) => registerPanelEntry(botId, id, title, render),
+		registerWorkspace: (entry) => registerWorkspaceEntry(botId, entry),
+		layout: {
+			get: () => layout,
+			update: (change) => {
+				layout = normalizeLayout(change(layout), catalogIds());
+				persistLayout();
+			},
+			reset: () => resetLayout(),
+		},
 		registerMessageRenderer: (role, render) => registerRendererEntry(botId, role, render),
 		registerTheme: (id, css) => registerThemeEntry(botId, id, css),
 		setTheme: (id) => {
@@ -5755,6 +6230,7 @@ async function hydrate(): Promise<void> {
 		notify(`Cannot read desktop state: ${errText(error)}`, "error");
 	}
 	applyAppearance();
+	await markDemo();
 	await loadRendererPlugins();
 	renderAll();
 	syncHostSelection();
@@ -5762,6 +6238,7 @@ async function hydrate(): Promise<void> {
 }
 
 function boot(): void {
+	loadLayout();
 	buildShell();
 	wireStaticEvents();
 
@@ -5815,9 +6292,14 @@ function boot(): void {
 	window.onlyne = createUiApi();
 	const disposeOmpPanels = registerOmpPanels(window.onlyne);
 	const disposeCharacterPanel = registerCharacterPanel(window.onlyne);
-	window.addEventListener("pagehide", () => { disposeOmpPanels(); disposeCharacterPanel(); }, { once: true });
+	const disposeSurfaces = registerDeskSurfaces(window.onlyne, {
+		notify: (message, level) => notify(message, level === "error" || level === "warn" || level === "ok" ? level : "info"),
+		open: (id) => openPanel(id),
+		createBot: () => openBotEditor(),
+	});
+	window.addEventListener("pagehide", () => { disposeOmpPanels(); disposeCharacterPanel(); disposeSurfaces(); }, { once: true });
 
-	registerPanelInternal("node", "Node & peers", nodePanel);
+	registerPanelInternal("node", "Node record", nodePanel);
 	registerPanelInternal("capabilities", "Capabilities", capabilitiesPanel);
 	registerPanelInternal("settings", "Settings", settingsPanel);
 	registerPanelInternal("activity", "Activity", activityPanel);

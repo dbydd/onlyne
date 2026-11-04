@@ -29,7 +29,7 @@ const COLOR = {
 } as const;
 
 const STYLE = {
-  panel: `display:flex;flex-direction:column;gap:12px;padding:14px;box-sizing:border-box;width:100%;height:100%;overflow:auto;font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;color:${COLOR.fg};`,
+  panel: `display:flex;flex-direction:column;gap:12px;padding:14px;box-sizing:border-box;width:100%;height:100%;overflow:auto;font:13px/1.45 var(--font),sans-serif;color:${COLOR.fg};`,
   section: `display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid ${COLOR.border};border-radius:10px;background:${COLOR.surface};`,
   row: 'display:flex;flex-wrap:wrap;gap:6px;align-items:center;',
   stack: 'display:flex;flex-direction:column;gap:8px;',

@@ -51,6 +51,8 @@ export interface DesktopAppOptions {
   drivers?: RuntimeDriver[];
   plugins?: DesktopPlugin[];
   onlyne?: (options: OnlyneBridgeOptions) => Promise<OnlyneBridge>;
+  /** When set, health reports a local demo node and no live cluster is required. */
+  demo?: boolean;
 }
 
 interface LiveRuntime {
@@ -106,6 +108,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       bots: state.bots.length, conversations: state.conversations.length, messages: state.messages.length,
       media: state.media.length, runtimes: runtimeEntries(), bridges: bridges.size,
       teamAdminId: state.teamAdminId ?? null,
+      demo: options.demo === true,
       errors: [...runtimes.values()].flatMap(runtime => runtime.lastError === undefined ? [] : [{ botId: runtime.bot.id, conversationId: runtime.conversation.id, message: runtime.lastError }]),
     };
   };
