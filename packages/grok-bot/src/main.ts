@@ -69,5 +69,6 @@ log('grok.bot.listening', {
   node: config.node.id,
   endpoint,
   reply: config.reply_path,
+  events: config.events_path,
   webhook: config.webhook.url.replace(/\?.*$/, ''),
 });

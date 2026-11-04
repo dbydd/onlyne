@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OnlyneError, type Entry } from '@onlyne/lib';
 import {
-  createGrokBotNode, expandEnv, grokBotChatFromMessage, grokBotThreadId, loadConfig,
-  parseGrokBotThreadId, webhookHeaderValue, webhookPayload,
+  createGrokBotNode, expandEnv, grokBotChatFromMessage, grokBotThreadId, GrokBotPullClient,
+  loadConfig, parseGrokBotThreadId, webhookHeaderValue, webhookPayload,
   type FetchLike, type GrokBotConfig,
 } from '../src/index.ts';
 
@@ -164,6 +164,8 @@ const config = (over: Partial<GrokBotConfig['webhook']> = {}): GrokBotConfig => 
     ...over,
   },
   reply_path: '/grok/reply',
+  events_path: '/grok/events',
+  ack_path: '/grok/events/ack',
 });
 
 const logs: Array<{ message: string; fields?: Record<string, unknown> }> = [];
@@ -508,6 +510,103 @@ const webhook = rec(statusBody?.webhook);
 ok('GET /grok/status redacts the sender key',
   statusRes.status === 200 && webhook?.key === 'set' && JSON.stringify(statusBody).includes(KEY) === false);
 
+// --- outbound-only pull / ack ------------------------------------------------
+
+posts.length = 0;
+webhookCalls = 0;
+webhookStatus = 204;
+let clock = Date.now();
+const pullNode = await createGrokBotNode(config(), { storage: 'memory', fetch: mockFetch, log, now: () => clock });
+const eventsUrl = 'http://127.0.0.1/grok/events';
+const eventsHeaders = { Authorization: `Bearer ${KEY}` };
+const deniedEvents = await pullNode.fetch(new Request(eventsUrl));
+ok('GET /grok/events refuses a missing sender key', deniedEvents.status === 401);
+
+await admitOn(pullNode, SENDER, 'pull-offline', 'queued while the device is gone');
+ok('an inbound while no puller is connected still POSTs the webhook',
+  await waitFor(() => posts.some(post => post.body.message_id === 'pull-offline')));
+
+const pulled = rec(JSON.parse(await (await pullNode.fetch(new Request(`${eventsUrl}?wait_ms=0&lease_ms=50`, {
+  headers: eventsHeaders,
+}))).text()));
+const pulledItems = Array.isArray(pulled?.items) ? pulled.items : [];
+const firstPull = rec(pulledItems[0]);
+const firstPayload = rec(firstPull?.payload);
+ok('a reconnecting device pulls the offline message',
+  pulledItems.length >= 1 && firstPayload?.message_id === 'pull-offline'
+  && rec(rec(firstPayload?.meta)?.grokbot)?.chat_kind === 'dm'
+  && rec(firstPayload?.thread)?.id === aliceDm);
+
+const leasedEmpty = rec(JSON.parse(await (await pullNode.fetch(new Request(`${eventsUrl}?wait_ms=0`, {
+  headers: eventsHeaders,
+}))).text()));
+ok('a leased row is not offered again until the lease expires',
+  Array.isArray(leasedEmpty?.items) && leasedEmpty.items.length === 0);
+
+clock += 51;
+const redelivered = rec(JSON.parse(await (await pullNode.fetch(new Request(`${eventsUrl}?wait_ms=0&lease_ms=5000`, {
+  headers: eventsHeaders,
+}))).text()));
+const redeliveredItems = Array.isArray(redelivered?.items) ? redelivered.items : [];
+ok('an unacked lease expires and the same delivery id is offered again',
+  redeliveredItems.some(item => rec(item)?.id === firstPull?.id));
+
+const acked = rec(JSON.parse(await (await pullNode.fetch(new Request('http://127.0.0.1/grok/events/ack', {
+  method: 'POST',
+  headers: { ...eventsHeaders, 'content-type': 'application/json' },
+  body: JSON.stringify({ ids: [firstPull?.id] }),
+}))).text()));
+ok('ack records the pulled delivery',
+  Array.isArray(acked?.acked) && acked.acked.includes(String(firstPull?.id)));
+
+clock += 10_000;
+const afterAck = rec(JSON.parse(await (await pullNode.fetch(new Request(`${eventsUrl}?wait_ms=0`, {
+  headers: eventsHeaders,
+}))).text()));
+ok('an acked delivery is not redelivered',
+  Array.isArray(afterAck?.items) && afterAck.items.length === 0);
+
+const waiting = pullNode.fetch(new Request(`${eventsUrl}?wait_ms=1500&lease_ms=5000`, {
+  headers: eventsHeaders,
+}));
+await settle(40);
+await admitOn(pullNode, SENDER, 'pull-live', 'arrived during long-poll');
+const liveBody = rec(JSON.parse(await (await waiting).text()));
+const liveItems = Array.isArray(liveBody?.items) ? liveBody.items : [];
+ok('a long-poll returns when a new inbound is queued',
+  liveItems.some(item => rec(rec(item)?.payload)?.message_id === 'pull-live'));
+
+const client = new GrokBotPullClient({
+  origin: 'http://127.0.0.1',
+  webhook: pullNode.config.webhook,
+  fetch: (input, init) => pullNode.fetch(new Request(input, init)),
+  wait_ms: 0,
+  lease_ms: 5_000,
+});
+await admitOn(pullNode, SENDER, 'pull-client', 'via helper');
+const clientItems = await client.pull({ wait_ms: 1_000 });
+const clientHit = clientItems.find(item => rec(item.payload)?.message_id === 'pull-client');
+ok('GrokBotPullClient pulls the webhook-equivalent payload', clientHit !== undefined);
+if (clientHit !== undefined) {
+  const ackResult = await client.ack([clientHit.id]);
+  ok('GrokBotPullClient acks the delivery', ackResult.acked.includes(clientHit.id));
+  const inboundThread = rec(clientHit.payload)?.thread;
+  const replied = await client.reply({
+    to: GROK,
+    id: 'pull-client-ack',
+    msg: 'pulled then replied',
+    thread: rec(inboundThread) as { owner: string; id: string } | undefined,
+    in_reply_to: { sender: SENDER, id: 'pull-client' },
+  });
+  ok('GrokBotPullClient posts /grok/reply on the inbound thread',
+    replied.status === 201 && rec(replied.body)?.admission === 'accepted');
+}
+
+const pullStatus = await pullNode.status();
+ok('status reports the pull inbox separately from the webhook queue',
+  pullStatus.pull.acked >= 1 && pullStatus.events_path === '/grok/events');
+
+await pullNode.stop();
 await isolated.stop();
 await replyNode.stop();
 await grok.stop();

@@ -6,9 +6,10 @@ webhook URL and the sender key it requires come from configuration and environme
 they are never hard-coded and must not be committed.
 
 The process is an ordinary Onlyne node: identity keys, DNS-SD discovery, and the trust terminal
-are the same pieces every gateway uses. It does not call a model. Inbound delivery is the
-webhook POST. Outbound replies are a small authenticated HTTP path so Grok Bot can send back
-through this node's identity after it wakes.
+are the same pieces every gateway uses. It does not call a model. Inbound delivery is a webhook
+POST (cloud Grok Bot) and, independently, a pull inbox (a device behind NAT). Outbound replies
+are a small authenticated HTTP path so either consumer can send back through this node's
+identity after it wakes.
 
 ## One account, one node, many threads
 
@@ -150,6 +151,44 @@ retry with exponential backoff up to `max_attempts`. Other non-2xx responses are
 Retries of one message never wait on another: each owed row has its own in-flight slot. After
 the bound is exhausted the row stays as `failed` so it is not silently dropped; `/grok/status`
 shows the queue.
+
+## Outbound-only pull (no public IP)
+
+A Cursor CLI / OMP node behind NAT cannot receive the webhook POST. It opens every connection
+to this grok-bot node, using the **same account sender key**:
+
+| Call | Purpose |
+|---|---|
+| `GET /grok/events?wait_ms=25000&limit=16&lease_ms=30000` | Long-poll owed wakes (empty list if none) |
+| `POST /grok/events/ack` `{"ids":["sender/message-id"]}` | Confirm handling; at-least-once until then |
+| `POST /grok/reply` | Unchanged reply path |
+
+The pull inbox is **independent of the webhook**. Cloud Grok Bot can still be POSTed; a NAT
+device can pull the same payload. An unacked lease expires and the same delivery id is offered
+again. Rows written while the device is offline stay owed until it reconnects.
+
+```ts
+import { GrokBotPullClient } from '@onlyne/grok-bot';
+
+const client = new GrokBotPullClient({
+  origin: 'http://127.0.0.1:3995',
+  webhook: { key: process.env.GROK_BOT_WEBHOOK_KEY!, header: 'Authorization', scheme: 'Bearer' },
+});
+const items = await client.pull();
+for (const item of items) {
+  // item.payload is the same JSON as the webhook body (thread, meta.grokbot, …)
+  await client.ack([item.id]);
+  await client.reply({
+    to: item.payload.node_id as string,
+    msg: 'ack',
+    thread: item.payload.thread as { owner: string; id: string },
+    in_reply_to: { sender: item.payload.sender as string, id: item.payload.message_id as string },
+  });
+}
+```
+
+`wait_ms=0` is a single poll. Default long-poll is 25s. Thread ids and `/grok/reply`
+`thread` / `in_reply_to` rules are unchanged.
 
 ## Outbound replies
 

@@ -86,7 +86,9 @@ port so cluster peers can reach it.
 | `node_status` | Node id, inbox size, thread count, neighbor count |
 
 `send_message` uses `response: none` and `execution: existing` unless you pass `async` / `new`.
-It does not choose a plan itself.
+It does not choose a plan itself. `list_threads` / `list_joined` / `list_resources` /
+`list_messages` / `list_inbox` accept `page_size` and `cursor`. `describe_thread` reads a
+thread this node owns, or the owner's record for a thread this node was invited into.
 
 Handover, resource operations against a remote gateway, and SystemOne `msg()` are left to OMP
 and the existing HTTP/resource path. This server is the read/send surface an MCP client needs

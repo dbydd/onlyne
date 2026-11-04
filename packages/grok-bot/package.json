@@ -23,7 +23,7 @@
   "files": ["src", "README.md", "LICENSE"],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "bun tests/verify.ts"
+    "test": "bun tests/verify.ts && bun tests/http.ts"
   },
   "dependencies": {
     "@onlyne/im-gateway": "^3.1.0",

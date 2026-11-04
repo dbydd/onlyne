@@ -23,7 +23,7 @@
   "files": ["src", "README.md", "LICENSE"],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "bun tests/verify.ts"
+    "test": "bun tests/verify.ts && bun tests/http.ts && bun tests/stdio.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

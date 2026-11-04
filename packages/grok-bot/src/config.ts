@@ -6,6 +6,8 @@ export const DEFAULT_HEADER = 'Authorization';
 export const DEFAULT_SCHEME = 'Bearer';
 export const DEFAULT_REPLY_PATH = '/grok/reply';
 export const DEFAULT_STATUS_PATH = '/grok/status';
+export const DEFAULT_EVENTS_PATH = '/grok/events';
+export const DEFAULT_ACK_PATH = '/grok/events/ack';
 export const DEFAULT_TIMEOUT_MS = 10_000;
 export const DEFAULT_MAX_ATTEMPTS = 8;
 export const DEFAULT_RETRY_BASE_MS = 500;
@@ -34,6 +36,10 @@ export interface GrokBotConfig {
   webhook: WebhookConfig;
   /** HTTP path Grok Bot posts a reply to. Default `/grok/reply`. */
   reply_path: string;
+  /** Long-poll GET for owed wakes. Default `/grok/events`. */
+  events_path: string;
+  /** POST ack path for pulled wakes. Default `/grok/events/ack`. */
+  ack_path: string;
   peers?: string[];
   contexts?: string[];
   language?: Locale;
@@ -204,6 +210,8 @@ export async function loadConfig(path: string, env: Record<string, string | unde
     storage_path: requireString(storage, 'path'),
     webhook: parseWebhook(raw.webhook, env),
     reply_path: parsePath(raw.reply_path, DEFAULT_REPLY_PATH, 'reply_path'),
+    events_path: parsePath(raw.events_path, DEFAULT_EVENTS_PATH, 'events_path'),
+    ack_path: parsePath(raw.ack_path, DEFAULT_ACK_PATH, 'ack_path'),
     ...(Array.isArray(raw.peers)
       ? { peers: raw.peers.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0) }
       : {}),

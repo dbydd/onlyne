@@ -226,7 +226,7 @@ async function dispatch(node: OnlyneNode, name: string, args: Record<string, unk
       if (owner === undefined || id === undefined) {
         throw new OnlyneError('invalid_request', 'describe_thread needs owner and id.');
       }
-      return result(await node.threads.describe(auth, { owner, id }));
+      return result(await node.client.describeThread({ owner, id }));
     }
     case 'list_messages': {
       const owner = str(args.owner);

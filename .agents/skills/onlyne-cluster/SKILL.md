@@ -156,6 +156,10 @@ not provision a keypair per assistant. Each Grok Bot DM is `grokbot:dm:<agent_id
 group is `grokbot:group:<group_id>` under that node. Echo `thread` and `in_reply_to` from the
 webhook on `/grok/reply` to continue the same conversation.
 
+A device behind NAT does not listen. It long-polls `GET /grok/events` with the same sender key,
+acks with `POST /grok/events/ack`, and replies on `/grok/reply`. Delivery is at-least-once:
+unacked leases are offered again after they expire. The cloud webhook POST stays available.
+
 ## Onlyne MCP server
 
 ```json

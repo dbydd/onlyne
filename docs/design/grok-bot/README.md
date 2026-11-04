@@ -52,6 +52,23 @@ Grok Bot 的密钥按 **账户 / 运营方** 发放，**不要**给每个 assist
 
 Webhook JSON 的 `meta.grokbot` 固定带 `chat_kind` 与 `chat_id`，方便同一账户下多 bot 路由。稳定 id 与 thread 一致；遗留随机 UUID 回退为 `{ chat_kind: "dm", chat_id: "<sender>" }`。
 
+## 无公网 IP：设备主动拉取
+
+Webhook POST 要求 Grok Bot 侧有可达 URL。NAT 后的 OMP / Cursor CLI 没有入站监听，改为 **本节点出站**：用同一把账户 sender key 访问 grok-bot 的 host 表面。
+
+```mermaid
+flowchart LR
+    peers[集群其它节点] -->|signed HTTP /onlyne/v3| grok[Grok Bot 节点]
+    grok -->|JSON POST| webhook[云端 Grok Bot webhook]
+    device[NAT 后的设备] -->|GET /grok/events 长轮询| grok
+    device -->|POST /grok/events/ack| grok
+    device -->|POST /grok/reply| grok
+```
+
+`GET /grok/events` 返回与 webhook 相同的 JSON payload（含稳定 `thread` 与 `meta.grokbot`）。未 ack 的行保持 owed；lease 过期后同一 `id` 再投一次（at-least-once）。设备离线期间入站照样入队，重连后拉到。Webhook 队列与 pull 队列独立：云端推送失败不影响 NAT 拉取。
+
+实现：`PullInbox` + `GrokBotPullClient`（`packages/grok-bot`）。设备不需要 Onlyne 身份钥，只需要账户 sender key。
+
 ## `/grok/reply` 如何继续同一会话
 
 支持的做法是把 webhook 里的 `thread` 和 `in_reply_to` 原样带回。`to` 填本节点 id（webhook 的 `node_id`），因为 thread 由 grok-bot 拥有、由本节点接纳。

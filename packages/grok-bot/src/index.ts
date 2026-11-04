@@ -6,27 +6,31 @@ import {
 import { FileStorage } from '@onlyne/im-gateway/storage';
 import { leveled, type LogSink } from '@onlyne/node-host';
 import { timingSafeEqual } from 'node:crypto';
-import {
-  DEFAULT_STATUS_PATH, redactWebhook, webhookHeaderValue, type GrokBotConfig,
-} from './config.ts';
+import { DEFAULT_STATUS_PATH, redactWebhook, webhookHeaderValue, type GrokBotConfig } from './config.ts';
 import { t } from './node-text.ts';
+import { clampLeaseMs, clampLimit, clampWaitMs, PullInbox, type PullStats } from './pull.ts';
 import { installGrokBotAdmit } from './threads.ts';
 import { enqueueNotify, WebhookDispatcher, type FetchLike } from './webhook.ts';
 
 export type { GrokBotConfig, WebhookConfig } from './config.ts';
 export {
-  DEFAULT_HEADER, DEFAULT_MAX_ATTEMPTS, DEFAULT_NODE_ID, DEFAULT_REPLY_PATH, DEFAULT_RETRY_BASE_MS,
-  DEFAULT_SCHEME, DEFAULT_STATUS_PATH, DEFAULT_TIMEOUT_MS, expandEnv, loadConfig, redactWebhook,
-  webhookHeaderValue,
+  DEFAULT_ACK_PATH, DEFAULT_EVENTS_PATH, DEFAULT_HEADER, DEFAULT_MAX_ATTEMPTS, DEFAULT_NODE_ID,
+  DEFAULT_REPLY_PATH, DEFAULT_RETRY_BASE_MS, DEFAULT_SCHEME, DEFAULT_STATUS_PATH, DEFAULT_TIMEOUT_MS,
+  expandEnv, loadConfig, redactWebhook, webhookHeaderValue,
 } from './config.ts';
 export { deliveryId, urlForLog, webhookPayload, WebhookDispatcher, type FetchLike } from './webhook.ts';
+export {
+  GrokBotPullClient, PullInbox, clampLeaseMs, clampLimit, clampWaitMs,
+  DEFAULT_PULL_LEASE_MS, DEFAULT_PULL_LIMIT, DEFAULT_PULL_WAIT_MS,
+  type GrokBotPullClientOptions, type GrokBotReplyBody, type PullItem, type PullRow, type PullStats,
+} from './pull.ts';
 export {
   bindGrokBotInbound, grokBotChatFromMessage, grokBotChatFromThread, grokBotThreadId,
   parseGrokBotThreadId, GROK_BOT_DM_PREFIX, GROK_BOT_GROUP_PREFIX,
   type GrokBotChat, type GrokBotChatKind,
 } from './threads.ts';
 
-export const STATUS_PATH = DEFAULT_STATUS_PATH;
+export { DEFAULT_STATUS_PATH as STATUS_PATH } from './config.ts';
 
 /** The Node-timer MaintenanceClock: one-shot timers, the lib's loop re-arms them. */
 export function nodeClock(): MaintenanceClock {
@@ -40,7 +44,9 @@ export interface GrokBotStatus {
   node: NodeId;
   webhook: ReturnType<typeof redactWebhook>;
   queue: { owed: number; failed: number; delivered: number; attempts: number; in_flight: number; rows: number };
+  pull: PullStats;
   reply_path: string;
+  events_path: string;
 }
 
 export interface GrokBotNode {
@@ -48,7 +54,8 @@ export interface GrokBotNode {
   readonly config: GrokBotConfig;
   readonly storage: Storage;
   readonly dispatcher: WebhookDispatcher;
-  /** The endpoint's HTTP surface: reply and status first, then the library. */
+  readonly pull: PullInbox;
+  /** The endpoint's HTTP surface: reply, events, status first, then the library. */
   fetch(request: Request): Promise<Response>;
   status(): Promise<GrokBotStatus>;
   statusLines(): Promise<string[]>;
@@ -108,6 +115,13 @@ export async function createGrokBotNode(config: GrokBotConfig, options: GrokBotO
     ...(options.now === undefined ? {} : { now: options.now }),
     log: out,
   });
+  const pull = new PullInbox({
+    storage, nodeId: owner, ...(options.now === undefined ? {} : { now: options.now }),
+  });
+  const wake = (entry: Entry): void => {
+    dispatcher.enqueue(entry);
+    void pull.enqueue(entry);
+  };
   const base_url = `http://${config.server.bind}:${config.server.port}/onlyne/v3`;
   let node: OnlyneNode;
   const authenticate = async (request: Request): Promise<Auth | null> => {
@@ -138,11 +152,11 @@ export async function createGrokBotNode(config: GrokBotConfig, options: GrokBotO
           return;
         }
         if (event.event !== 'inbound') return;
-        void enqueueNotify(dispatcher, node.messages, node.auth, event, out);
+        void enqueueNotify(wake, node.messages, node.auth, event, out);
       },
       supports: async plan => plan.response !== 'await',
       inject: async (entry: Entry) => {
-        dispatcher.enqueue(entry);
+        wake(entry);
         return { context: owner, consumed: true, outcome: 'delivered' as const };
       },
     },
@@ -219,17 +233,56 @@ export async function createGrokBotNode(config: GrokBotConfig, options: GrokBotO
     }
   };
 
+  const handleEvents = async (request: Request): Promise<Response> => {
+    if (request.method !== 'GET') return new Response('Method Not Allowed', { status: 405 });
+    if (!replyAuth(request)) {
+      return Response.json({ error: { code: 'unauthenticated', message: t('error.eventsAuth') } }, { status: 401 });
+    }
+    const url = new URL(request.url);
+    const items = await pull.pull({
+      wait_ms: clampWaitMs(url.searchParams.get('wait_ms'), 0),
+      limit: clampLimit(url.searchParams.get('limit')),
+      lease_ms: clampLeaseMs(url.searchParams.get('lease_ms')),
+      signal: request.signal,
+    });
+    return Response.json({ items });
+  };
+
+  const handleAck = async (request: Request): Promise<Response> => {
+    if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+    if (!replyAuth(request)) {
+      return Response.json({ error: { code: 'unauthenticated', message: t('error.eventsAuth') } }, { status: 401 });
+    }
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return Response.json({ error: { code: 'invalid_request', message: t('error.ackBody') } }, { status: 400 });
+    }
+    const object = rec(body);
+    if (object === undefined || !Array.isArray(object.ids)) {
+      return Response.json({ error: { code: 'invalid_request', message: t('error.ackBody') } }, { status: 400 });
+    }
+    const ids = object.ids.filter((id): id is string => typeof id === 'string' && id.length > 0);
+    return Response.json(await pull.ack(ids));
+  };
+
   const statusOf = async (): Promise<GrokBotStatus> => {
     const snap = await dispatcher.snapshot();
-    return { node: owner, webhook: snap.webhook, queue: snap.queue, reply_path: config.reply_path };
+    return {
+      node: owner, webhook: snap.webhook, queue: snap.queue, pull: await pull.snapshot(),
+      reply_path: config.reply_path, events_path: config.events_path,
+    };
   };
 
   return {
-    node, config, storage, dispatcher,
+    node, config, storage, dispatcher, pull,
     async fetch(request: Request): Promise<Response> {
       const pathname = new URL(request.url).pathname;
-      if (pathname === STATUS_PATH) return Response.json(await statusOf());
+      if (pathname === DEFAULT_STATUS_PATH) return Response.json(await statusOf());
       if (pathname === config.reply_path) return handleReply(request);
+      if (pathname === config.events_path) return handleEvents(request);
+      if (pathname === config.ack_path) return handleAck(request);
       return node.fetch(request);
     },
     status: statusOf,
@@ -238,7 +291,9 @@ export async function createGrokBotNode(config: GrokBotConfig, options: GrokBotO
       return [
         `webhook ${report.webhook.url} header=${report.webhook.header}`,
         `queue owed=${report.queue.owed} failed=${report.queue.failed} delivered=${report.queue.delivered} in_flight=${report.queue.in_flight}`,
+        `pull owed=${report.pull.owed} leased=${report.pull.leased} acked=${report.pull.acked}`,
         `reply ${report.reply_path}`,
+        `events ${report.events_path}`,
       ];
     },
     maintain: () => dispatcher.retryOwed(),

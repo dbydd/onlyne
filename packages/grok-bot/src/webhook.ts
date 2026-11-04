@@ -251,9 +251,9 @@ export interface EntryLookup {
   inbox(auth: { actor: NodeId }): Promise<{ items: Array<{ attention: { thread_ref: ThreadRef; seq: string; entry?: Entry } }> }>;
 }
 
-/** Resolves the notify triple (thread, seq, sender) to a stored entry, then enqueues it. */
+/** Resolves the notify triple (thread, seq, sender) to a stored entry, then wakes consumers. */
 export async function enqueueNotify(
-  dispatcher: WebhookDispatcher,
+  wake: (entry: Entry) => void,
   lookup: EntryLookup,
   auth: { actor: NodeId },
   event: { thread: ThreadRef; seq: string; sender: NodeId },
@@ -266,7 +266,7 @@ export async function enqueueNotify(
     });
     const fromList = listed.items.find(entry => entry.seq === event.seq);
     if (fromList !== undefined) {
-      dispatcher.enqueue(fromList);
+      wake(fromList);
       return;
     }
     const inbox = await lookup.inbox(auth);
@@ -275,7 +275,7 @@ export async function enqueueNotify(
       && row.attention.thread_ref.owner === event.thread.owner
       && row.attention.thread_ref.id === event.thread.id)?.attention.entry;
     if (fromInbox !== undefined) {
-      dispatcher.enqueue(fromInbox);
+      wake(fromInbox);
       return;
     }
     log.warn('grok.webhook.missing', { thread: event.thread.id, seq: event.seq, sender: event.sender });
