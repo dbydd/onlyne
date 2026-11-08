@@ -1,4 +1,4 @@
-import { OnlyneError, type DeliveryPlan, type Entry, type Message, type NotifyEvent, type Runtime, type TraceEvent } from "@onlyne/lib";
+import { OnlyneError, type DeliveryPlan, type Entry, type Message, type NotifyEvent, type Runtime, type TraceEvent, type WorkRef } from "@onlyne/lib";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { refreshMailCards, renderMailMessage, type OnlyneMessageDetails } from "./ui/mail-message.ts";
@@ -422,6 +422,7 @@ function payload(entry: Entry, customType: string, token: string): MessagePayloa
 				from: entry.authenticated_author, at: entry.at, subject: entry.message.delivery_kind, body: entry.message.msg,
 				...(entry.message.meta?.relation === undefined ? {} : { relation: entry.message.meta.relation }),
 				...(entry.message.meta?.in_reply_to === undefined ? {} : { in_reply_to: entry.message.meta.in_reply_to }),
+				...(entry.message.meta?.work === undefined ? {} : { work: entry.message.meta.work }),
 			},
 		} };
 }
@@ -431,5 +432,14 @@ export function registerMessageRenderers(pi: ExtensionAPI): void {
 function renderEntry(entry: Entry, customType: string): string {
 	const label = customType === SUPPLEMENT ? t("labelSupplement") : t("labelInbound");
 	const relation = entry.message.meta?.relation === undefined ? "" : ` · ${entry.message.meta.relation}`;
-	return `${entry.thread_ref.id}/${entry.seq} · ${label} · ${entry.authenticated_author}${relation}\n${entry.message.msg.split(/\r?\n/).map(line => `  > ${line}`).join("\n")}`;
+	const work = workLabel(entry.message.meta?.work);
+	return `${entry.thread_ref.id}/${entry.seq} · ${label} · ${entry.authenticated_author}${relation}${work}\n${entry.message.msg.split(/\r?\n/).map(line => `  > ${line}`).join("\n")}`;
+}
+
+/** The work unit a sender named, so the receiver sees the dedupe key its answer belongs to. */
+export function workLabel(work: WorkRef | undefined): string {
+	if (work === undefined) return "";
+	const parent = work.parent === undefined || work.parent === null ? "" : ` · parent ${work.parent}`;
+	const attempt = work.attempt === undefined ? "" : ` · attempt ${work.attempt}`;
+	return ` · work ${work.unit}${parent}${attempt}`;
 }

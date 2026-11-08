@@ -1,4 +1,4 @@
-import type { MessageRef, NodeId, ThreadRef, TrustPhase } from "@onlyne/lib";
+import type { MessageRef, NodeId, ThreadRef, TrustPhase, WorkRef } from "@onlyne/lib";
 import type { AcquirePolicy } from "@onlyne/node-host/acquire";
 import type { ContextRecord } from "@onlyne/node-host/types";
 
@@ -20,6 +20,8 @@ export interface ViewerMessage {
 	at: string;
 	text: string;
 	relation?: string;
+	/** The work unit the sender named (RFC 0003 §1), when the message carries one. */
+	work?: WorkRef;
 }
 
 /** One thread row in the viewer's chat page. */

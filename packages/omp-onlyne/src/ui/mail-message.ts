@@ -1,10 +1,11 @@
 import type { MessageRenderer } from "@oh-my-pi/pi-coding-agent";
 import { getLocale } from "@onlyne/node-host/i18n";
 import { Markdown, Text, getMarkdownTheme, node, span, text, type Component, type NativeNode, type Theme, type TspSpan } from "@oh-my-pi/pi-tui";
-import type { HistoryMessage, MessageRef, ThreadRef } from "@onlyne/lib";
+import type { HistoryMessage, MessageRef, ThreadRef, WorkRef } from "@onlyne/lib";
 import { shortNodeId } from "../config.ts";
 import { getRuntime, type PluginRuntime } from "../runtime.ts";
 import { conversationPath, messagePath } from "../urls.ts";
+import { workValue } from "../work.ts";
 import { t } from "./bootstrap-text.ts";
 
 export interface OnlyneMessageDetails {
@@ -22,6 +23,7 @@ export interface OnlyneMessageDetails {
 		body: string;
 		relation?: "reply" | "followup";
 		in_reply_to?: MessageRef;
+		work?: WorkRef;
 	};
 }
 
@@ -169,6 +171,7 @@ class MailMessage implements Component {
 			...(mail.in_reply_to === undefined
 				? []
 				: [`${this.theme.fg("muted", `${t("mail.inReplyTo")}:`)} ${mail.in_reply_to.sender}/${mail.in_reply_to.id}`]),
+			...(mail.work === undefined ? [] : [`${this.theme.fg("muted", `${t("mail.work")}:`)} ${workValue(mail.work)}`]),
 			`${this.theme.fg("muted", `${t("mail.delivery")}:`)} ${this.status.delivery}${
 				this.status.consumption === undefined ? "" : t("mail.consumed", { state: this.status.consumption })
 			}`,
@@ -215,6 +218,7 @@ class MailMessage implements Component {
 						k: t("mail.inReplyTo"),
 						v: [span(`${mail.in_reply_to.sender}/${mail.in_reply_to.id}`, "link mono", { href: replyHref })],
 					}]),
+			...(mail.work === undefined ? [] : [{ k: t("mail.work"), v: [span(workValue(mail.work), "mono")] }]),
 			{
 				k: t("mail.delivery"),
 				v: [

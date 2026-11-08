@@ -689,7 +689,7 @@ class OmpRuntime implements PluginRuntime {
 			const entries = await allPages(cursor => this.node.messages.list(this.node.auth, ref, { attention: "thread", page_size: 100, cursor }));
 			views.push({ ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: thread.title, state: thread.state,
 				unread: inbox.filter(item => !item.injected && item.attention.thread_ref.owner === ref.owner && item.attention.thread_ref.id === ref.id).length,
-				last_seq: entries.at(-1)?.seq ?? "0", messages: entries.map(entry => ({ ref: { sender: entry.message.sender, id: entry.message.id }, seq: entry.seq, direction: entry.message.sender === this.config.node.id ? "out" : "in", author: entry.authenticated_author, at: entry.at, text: entry.message.msg, relation: entry.message.meta?.relation })),
+				last_seq: entries.at(-1)?.seq ?? "0", messages: entries.map(entry => ({ ref: { sender: entry.message.sender, id: entry.message.id }, seq: entry.seq, direction: entry.message.sender === this.config.node.id ? "out" : "in", author: entry.authenticated_author, at: entry.at, text: entry.message.msg, relation: entry.message.meta?.relation, ...(entry.message.meta?.work === undefined ? {} : { work: entry.message.meta.work }) })),
 			});
 		}
 		// A member's own message never comes back through its inbox, so the message that
@@ -716,7 +716,7 @@ class OmpRuntime implements PluginRuntime {
 			if (!item.injected) view.unread++;
 			const entry = item.attention.entry;
 			if (entry !== undefined) {
-				view.messages.push({ ref: { sender: entry.message.sender, id: entry.message.id }, seq: entry.seq, direction: entry.message.sender === this.config.node.id ? "out" : "in", author: entry.authenticated_author, at: entry.at, text: entry.message.msg, relation: entry.message.meta?.relation });
+				view.messages.push({ ref: { sender: entry.message.sender, id: entry.message.id }, seq: entry.seq, direction: entry.message.sender === this.config.node.id ? "out" : "in", author: entry.authenticated_author, at: entry.at, text: entry.message.msg, relation: entry.message.meta?.relation, ...(entry.message.meta?.work === undefined ? {} : { work: entry.message.meta.work }) });
 				view.last_seq = entry.seq;
 			}
 		}
@@ -729,7 +729,7 @@ class OmpRuntime implements PluginRuntime {
 			const view = seen.get(key) ?? { ref, alias: `${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.id)}`, title: t("thread", { node: shortNodeId(ref.owner) }), state: "open", unread: 0, last_seq: "0", messages: [], read_only: true };
 			seen.set(key, view);
 			const message = row.value.request.message;
-			view.messages.push({ ref: { sender: message.sender, id: message.id }, seq: receipt.seq, direction: "out", author: message.sender, at: row.value.created_at ?? "", text: message.msg, relation: message.meta?.relation });
+			view.messages.push({ ref: { sender: message.sender, id: message.id }, seq: receipt.seq, direction: "out", author: message.sender, at: row.value.created_at ?? "", text: message.msg, relation: message.meta?.relation, ...(message.meta?.work === undefined ? {} : { work: message.meta.work }) });
 			if (Number(receipt.seq) > Number(view.last_seq)) view.last_seq = receipt.seq;
 		}
 		for (const view of seen.values()) view.messages.sort((left, right) => Number(left.seq) - Number(right.seq));

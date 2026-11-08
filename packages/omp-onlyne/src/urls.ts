@@ -19,6 +19,7 @@ import {
 	type ThreadDescription,
 	type ThreadRef,
 	type TrustPhase,
+	type WorkRef,
 } from "@onlyne/lib";
 import { createTranslator } from "@onlyne/node-host/i18n";
 import {
@@ -53,13 +54,15 @@ const TITLE_CHARS = 80;
 
 const handler: ProtocolHandler = {
 	scheme: "onlyne",
-	spec: { backing: "virtual", selectors: "lines", immutable: true },
+	// Every view reads live node state: threads, inbox, neighbors and conversations change
+	// between two reads of the same URL, so OMP must never serve a cached copy.
+	spec: { backing: "virtual", selectors: "lines", immutable: false },
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const runtime = getRuntime();
 		if (runtime === undefined) throw new Error(t("notConfigured"));
 		const rendered = await render(runtime, callerOf(runtime, context), viewOf(url));
-		return { url: url.href, content: rendered.content, contentType: rendered.contentType, immutable: true };
+		return { url: url.href, content: rendered.content, contentType: rendered.contentType };
 	},
 
 	/**
@@ -475,9 +478,21 @@ export async function neighborRows(runtime: PluginRuntime): Promise<NeighborRow[
 			base_url: record.base_url,
 			...(record.membership?.domain_id === undefined ? {} : { region: record.membership.domain_id }),
 			...(record.last_seen === undefined ? {} : { last_seen: record.last_seen }),
-			verified,
+			verified: verified || entry?.state === "trusted",
 			phase: entry === undefined ? "no_exchange" : trustPhase(entry),
 			fingerprint: entry?.fingerprint ?? null,
+		});
+	}
+	// A trust row outlives a discovery record: a peer paired earlier is still a neighbor
+	// before mDNS or a seed refresh brings it back, and the listing says so.
+	for (const entry of trust.values()) {
+		if (entry.node_id === runtime.config.node.id || byNode.has(entry.node_id)) continue;
+		byNode.set(entry.node_id, {
+			node_id: entry.node_id,
+			base_url: entry.base_url,
+			verified: entry.state === "trusted",
+			phase: trustPhase(entry),
+			fingerprint: entry.fingerprint,
 		});
 	}
 	return [...byNode.values()].sort((left, right) => left.node_id.localeCompare(right.node_id));
@@ -587,6 +602,7 @@ function outboundRow(outbound: Outbound): { position: string; lines: string[] } 
 	const at = outbound.created_at ?? null;
 	const status = [outbound.state, outbound.error?.code ?? ""].filter(part => part.length > 0).join(" · ");
 	const reply = related === undefined ? "" : t("suffixReply", { ref: `${related.sender}/${related.id}` });
+	const work = workText(message.meta?.work);
 	const position = `${at ?? ""}\u0000${refKey(ref)}`;
 	const lines = [
 		t("outboundRow", {
@@ -596,6 +612,7 @@ function outboundRow(outbound: Outbound): { position: string; lines: string[] } 
 			status,
 			reply,
 		}),
+		...(work === undefined ? [] : [work]),
 		`  ${firstLine(message.msg, SNIPPET_CHARS)}`,
 		t("outboundLinks", { message: messagePath(ref), conversation: conversationPath(ref) }),
 	];
@@ -1448,6 +1465,8 @@ function renderEntryRow(entry: Entry, nodeId: string): string {
 		}),
 	];
 	if (related !== undefined) lines.push(t("replyTo", { ref: refKey(related), url: messagePath(related) }));
+	const work = workText(entry.message.meta?.work);
+	if (work !== undefined) lines.push(work);
 	lines.push(t("historyLinks", {
 		message: messagePath(ref),
 		conversation: conversationPath(ref),
@@ -1479,10 +1498,23 @@ function renderHistoryRow(row: HistoryMessage, nodeId: string): string {
 	if (related !== undefined) {
 		lines.push(t("replyTo", { ref: `${related.sender}/${related.id}`, url: messagePath(related) }));
 	}
+	const work = workText(row.message.meta?.work);
+	if (work !== undefined) lines.push(work);
 	const entry = thread === undefined || row.seq === undefined || thread.owner !== nodeId
 		? ""
 		: t("suffixEntry", { url: entryPath(thread, row.seq) });
 	lines.push(t("historyLinks", { message: messagePath(ref), conversation: conversationPath(ref), entry }));
 	for (const line of row.message.msg.split(/\r?\n/)) lines.push(`  > ${line}`);
 	return lines.join("\n");
+}
+
+/**
+ * The work unit a message belongs to (RFC 0003 §1), as the reader needs it: the unit a
+ * receiver dedupes on, the enclosing unit, and which attempt this is.
+ */
+function workText(work: WorkRef | undefined): string | undefined {
+	if (work === undefined) return undefined;
+	const parent = work.parent === undefined || work.parent === null ? "" : t("workParent", { unit: work.parent });
+	const attempt = work.attempt === undefined ? "" : t("workAttempt", { attempt: String(work.attempt) });
+	return t("workLine", { unit: work.unit, parent, attempt });
 }

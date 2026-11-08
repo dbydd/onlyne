@@ -8,7 +8,7 @@ import { TRUST_THREAD } from "../src/handshake.ts";
 import { setRuntime, type PluginRuntime } from "../src/runtime.ts";
 import { ContextRegistry } from "@onlyne/node-host/store";
 import type { OnlyneConfig } from "@onlyne/node-host/types";
-import { registerOnlyneUrls } from "../src/urls.ts";
+import { neighborRows, registerOnlyneUrls } from "../src/urls.ts";
 
 const servers: Array<{ stop(force?: boolean): void }> = [];
 afterEach(() => {
@@ -260,5 +260,69 @@ describe("onlyne:// routes", () => {
 		registerOnlyneUrls();
 		const subcaller = { session: { getAgentId: () => "Subagent" } } as unknown as ResolveContext;
 		await expect(InternalUrlRouter.instance().resolve("onlyne://resources", subcaller)).rejects.toThrow(/main OMP session/);
+	});
+});
+
+describe("onlyne:// live state", () => {
+	const main = { session: { getAgentId: () => "Main" } } as unknown as ResolveContext;
+
+	test("every view resolves as mutable, so a later read is not a cached copy", async () => {
+		const x = await exchange();
+		setRuntime(x.a);
+		registerOnlyneUrls();
+		for (const url of ["onlyne://", "onlyne://threads", "onlyne://neighbors", "onlyne://inbox", "onlyne://conversations"]) {
+			const resource = await InternalUrlRouter.instance().resolve(url, main);
+			expect(resource.immutable).toBe(false);
+		}
+	});
+
+	test("a trusted peer with no discovery record is still a neighbor", async () => {
+		const id = "urn:onlyne:agent:home";
+		const peer = serve(id, async () => ({ kind: "send", to: id, response: "none", execution: "new" }));
+		const remote = "urn:onlyne:agent:paired";
+		const entry = {
+			node_id: remote,
+			public_key: "paired-key",
+			fingerprint: "0123456789abcdef",
+			state: "trusted" as const,
+			first_seen: "2026-01-01T00:00:00Z",
+			last_checked: "2026-01-01T00:00:00Z",
+			local_approved: true,
+			remote_approved: true,
+			base_url: "http://127.0.0.1:7802/onlyne/v3",
+		};
+		// The paired row outlives the discovery record: mDNS may not have re-observed it yet.
+		await peer.storage.transaction(tx => tx.put(`trust/${encodeURIComponent(remote)}`, entry));
+		const runtime = pluginFor(peer, id);
+		expect(await neighborRows(runtime)).toEqual([{
+			node_id: remote, base_url: entry.base_url, verified: true, phase: "exchanged", fingerprint: entry.fingerprint,
+		}]);
+		setRuntime(runtime);
+		expect(await readView("onlyne://neighbors")).toContain(remote);
+	});
+
+	test("work metadata survives delivery and renders in the thread and outbound views", async () => {
+		const a = serve("urn:onlyne:agent:a", async () => ({ kind: "send", to: "urn:onlyne:agent:b", response: "none", execution: "new" }));
+		const b = serve("urn:onlyne:agent:b", async () => ({ kind: "send", to: "urn:onlyne:agent:a", response: "none", execution: "new" }));
+		await a.node.discovery.observe(b.endpoint, "test", "urn:onlyne:agent:b");
+		await b.node.discovery.observe(a.endpoint, "test", "urn:onlyne:agent:a");
+		const work = { unit: "unit-7", parent: "unit-root", attempt: 2 };
+		await a.node.client.msg({
+			delivery_kind: "ask b for status", msg: "status?",
+			meta: { to: "urn:onlyne:agent:b", work },
+		});
+		await b.node.client.reconcile();
+		const inbox = await b.node.messages.inbox(b.node.auth, { page_size: 10 });
+		expect(inbox.items[0]?.attention.entry?.message.meta?.work).toEqual(work);
+
+		const runtime = pluginFor(a, "urn:onlyne:agent:a");
+		setRuntime(runtime);
+		const thread = (await a.node.threads.list(a.node.auth, { page_size: 10 })).items[0];
+		if (thread === undefined) throw new Error("the send minted no thread");
+		const page = await readView(`onlyne://threads/${encodeURIComponent(thread.thread_ref.owner)}/${encodeURIComponent(thread.thread_ref.id)}`);
+		expect(page).toContain("work unit-7");
+		expect(page).toContain("parent unit-root");
+		expect(page).toContain("attempt 2");
+		expect(await readView("onlyne://outbound")).toContain("work unit-7");
 	});
 });

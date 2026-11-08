@@ -19,6 +19,7 @@ import { normalizeServiceUrl, shortNodeId } from "../config.ts";
 import { DEFAULT_ACQUISITION, parseAllowBlock, type AcquirePolicy } from "@onlyne/node-host/acquire";
 import { getRuntime, type PluginRuntime } from "../runtime.ts";
 import { runDecision } from "../decider.ts";
+import { workValue } from "../work.ts";
 import type {
 	AcquisitionAuditEntry,
 	AcquisitionSnapshot,
@@ -776,6 +777,9 @@ export class OnlyneViewer implements Component {
 			},
 			[
 				textNode(message.text, { wrap: "word" }),
+				...(message.work === undefined
+					? []
+					: [textNode([span(t("messageDetail.work", { value: workValue(message.work) }), "dim")], { wrap: "word" })]),
 				node(
 					"row",
 					{ gap: "sm", align: "center", wrap: true },

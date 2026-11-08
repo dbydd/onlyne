@@ -4,8 +4,8 @@
  *   bun run devinstall
  *
  * It installs workspace dependencies, registers every package with `bun link` so another project
- * can consume the working tree, exposes the two gateway CLIs on PATH, and links the OMP plugin
- * through OMP itself. Every step is idempotent, so running it again after a pull is safe.
+ * can consume the working tree, exposes the gateway and MCP CLIs on PATH, and links the OMP
+ * plugin through OMP itself. Every step is idempotent, so running it again after a pull is safe.
  */
 import { homedir } from "node:os";
 import { readdir } from "node:fs/promises";
@@ -14,7 +14,7 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dir, "..");
 const PACKAGES = join(ROOT, "packages");
 const BIN_DIR = join(homedir(), ".bun", "bin");
-const BINS = ["onlyne-im-gateway", "onlyne-im-migrate", "onlyne-mcp-gateway", "onlyne-grok-bot", "onlyne-mcp-server"];
+const BINS = ["onlyne-im-gateway", "onlyne-im-migrate", "onlyne-mcp-gateway", "onlyne-grok-bot", "onlyne-mcp-server", "onlyne-compute-broker"];
 
 function run(cmd: string[], cwd: string): boolean {
   const result = Bun.spawnSync({ cmd, cwd, stdout: "pipe", stderr: "pipe" });

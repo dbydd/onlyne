@@ -132,6 +132,9 @@ export const en = {
 	suffixReply: " · reply to {ref}",
 	suffixEntry: " · entry {url}",
 	suffixExpired: " · expired",
+	workLine: "  → work {unit}{parent}{attempt}",
+	workParent: " · parent {unit}",
+	workAttempt: " · attempt {attempt}",
 
 	resourcesTitle: "# Resources · {node}",
 	resourceOwnerError: "- unavailable: {code} · {message}",
@@ -280,6 +283,9 @@ export const zh: Record<keyof typeof en, string> = {
 	suffixReply: " · 回复 {ref}",
 	suffixEntry: " · 条目 {url}",
 	suffixExpired: " · 已过期",
+	workLine: "  → 工作单元 {unit}{parent}{attempt}",
+	workParent: " · 父单元 {unit}",
+	workAttempt: " · 第 {attempt} 次",
 
 	resourcesTitle: "# 资源 · {node}",
 	resourceOwnerError: "- 不可用：{code} · {message}",

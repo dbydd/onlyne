@@ -58,6 +58,7 @@ const en = {
 	"messageDetail.reply.title": "Answer this message",
 	"messageDetail.target": "Use as recipient",
 	"messageDetail.target.title": "Start a new message to this author",
+	"messageDetail.work": "Work: {value}",
 
 	"composer.reply": "Replying to {node} · {id}",
 	"composer.new": "New message to {node}",
@@ -262,6 +263,7 @@ const zh: Record<ViewerTextKey, string> = {
 	"messageDetail.reply.title": "回复这一条",
 	"messageDetail.target": "用作发送目标",
 	"messageDetail.target.title": "给这位作者发一条新消息",
+	"messageDetail.work": "工作单元：{value}",
 
 	"composer.reply": "回复 {node} · {id}",
 	"composer.new": "新消息发送到 {node}",
