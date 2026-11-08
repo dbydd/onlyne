@@ -468,6 +468,19 @@ ok('webhookPayload falls back to a DM keyed by the sender for a legacy thread id
   rec(rec(payload?.meta)?.grokbot)?.chat_kind === 'dm'
   && rec(rec(payload?.meta)?.grokbot)?.chat_id === SENDER);
 
+// PullItem.payload is this same body, so a work ref rides both the webhook POST and GET /grok/events.
+const workSample = {
+  ...sample,
+  message: {
+    ...sample.message,
+    meta: { mentions: [GROK], work: { unit: 'unit-3', attempt: 1, parent: null } },
+  },
+} as Entry;
+const workPayload = rec(webhookPayload(GROK, workSample));
+ok('webhookPayload carries meta.work on the message and on the top-level meta',
+  rec(rec(rec(workPayload?.message)?.meta)?.work)?.unit === 'unit-3'
+  && rec(rec(workPayload?.meta)?.work)?.unit === 'unit-3');
+
 const stableSample = {
   ...sample,
   thread_ref: { owner: GROK, id: 'grokbot:group:room-9' },

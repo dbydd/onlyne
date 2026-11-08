@@ -122,12 +122,16 @@ function rig(node_id: string, base_url: string, extra: Partial<Plugins> = {}, wa
   };
 }
 
-/** Reserves an ephemeral loopback port, then builds the node on the URL it will serve. */
-function serve(node_id: string, make: (base_url: string) => Rig): Rig {
+/**
+ * Reserves an ephemeral loopback port, then builds the node on the URL it will serve.
+ * `mount` puts that URL under a path prefix (`/nodes/<id>/onlyne/v3`) the way a shared
+ * listener does, while the request reaches the node unmodified.
+ */
+function serve(node_id: string, make: (base_url: string) => Rig, mount = ''): Rig {
   let handler: (request: Request) => Promise<Response> = async () => new Response('starting', { status: 503 });
   const server = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: request => handler(request) });
   servers.push(server);
-  const base_url = `http://127.0.0.1:${server.port}/onlyne/v3`;
+  const base_url = `http://127.0.0.1:${server.port}${mount}/onlyne/v3`;
   const rig = make(base_url);
   urls[node_id] = base_url;
   handler = request => rig.node.fetch(request);
@@ -1856,6 +1860,172 @@ async function phasePlanRefusal(): Promise<void> {
     && outcome.error.message.includes('new execution') ? '' : `the refusal read: ${outcome.error?.message ?? 'none'}`);
 }
 
+// =============================================================================
+// 8. RFC 0003 §1: the work unit is a first-class field of the envelope
+// =============================================================================
+
+/**
+ * `meta.work` crosses the HTTP whitelist unchanged, the admission digest covers it, and a
+ * malformed ref is refused at the boundary instead of dropped. The client fills the field
+ * from either the decision or the caller's own meta, and keeps the meta as `data` too.
+ */
+async function phaseWorkRef(): Promise<void> {
+  const work = { unit: 'issue/runner-42', parent: 'batch/7', attempt: 2 };
+  const sender = serve(lazuliNode, base_url => rig(lazuliNode, base_url, {
+    decide: async input => {
+      const to = input.meta?.to;
+      if (typeof to !== 'string') throw new OnlyneError('decision_unavailable', 'The input named no target.');
+      return {
+        kind: 'send' as const, to, response: 'async' as const, execution: 'existing' as const,
+        ...(input.meta?.workFromAction === true ? { work: { unit: 'decision/unit', attempt: 1 } } : {}),
+      };
+    },
+  }));
+  const peer = serve(dpdpNode, base_url => rig(dpdpNode, base_url));
+
+  // The caller's meta names the unit; `prepare` promotes it to the envelope field and still
+  // carries the meta as `data`, so a reader of the old `meta.data.work` spelling keeps working.
+  const draft = await sender.node.client.prepare({ delivery_kind: '任务', msg: '这一份属于 runner-42。', meta: { to: dpdpNode, work } });
+  check('work.prepare.input-meta', JSON.stringify(draft.message.meta?.work) === JSON.stringify(work)
+    && JSON.stringify(draft.message.meta?.data?.work) === JSON.stringify(work)
+    ? '' : `prepare built ${JSON.stringify(draft.message.meta ?? null)}`);
+  check('work.prepare.invalid', await refusal('invalid_request', () => sender.node.client.prepare({
+    delivery_kind: '任务', msg: '没有工作单元。', meta: { to: dpdpNode, work: { unit: '' } },
+  })));
+  const fromAction = await sender.node.client.prepare({ delivery_kind: '任务', msg: '决策带工作单元。', meta: { to: dpdpNode, workFromAction: true } });
+  check('work.prepare.action', fromAction.message.meta?.work?.unit === 'decision/unit' && fromAction.message.meta.work.attempt === 1
+    ? '' : `prepare built ${JSON.stringify(fromAction.message.meta ?? null)}`);
+
+  // Over real HTTP the peer stores the field, and the digest binds it to the message identity.
+  const sent = await sender.node.client.send(dpdpNode, {
+    id: 'work-01', sender: lazuliNode, delivery_kind: '任务', msg: '这一份属于 runner-42。', meta: { work },
+  }, plan);
+  check('work.send.accepted', sent.admission === 'accepted' ? '' : `the send was ${sent.admission}: ${JSON.stringify(sent.error ?? null)}`);
+  await peer.node.client.reconcile();
+  const inbox = await peer.node.messages.inbox({ actor: dpdpNode }, {});
+  const held = inbox.items.find(row => row.attention.message_ref.id === 'work-01');
+  check('work.round-trip', JSON.stringify(held?.attention.entry?.message.meta?.work) === JSON.stringify(work)
+    ? '' : `the peer stored ${JSON.stringify(held?.attention.entry?.message.meta ?? null)}`);
+  check('work.digest.conflict', await refusal('id_conflict', () => sender.node.client.send(dpdpNode, {
+    id: 'work-01', sender: lazuliNode, delivery_kind: '任务', msg: '这一份属于 runner-42。', meta: { work: { unit: 'issue/other' } },
+  }, plan)));
+
+  // The binding itself: a valid ref is admitted, `parent: null` survives as an explicit
+  // value, and every malformed shape is refused before anything is stored.
+  const wireThread = await peer.node.threads.create({ actor: dpdpNode }, { ...mut(), title: '工作单元' });
+  const wire = (meta: unknown, id: string): Promise<Response> => fetch(
+    `${urls[dpdpNode]}/threads/${encodeURIComponent(dpdpNode)}/${encodeURIComponent(wireThread.thread_ref.id)}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-onlyne-actor': dpdpNode },
+      body: JSON.stringify({
+        idempotency_key: crypto.randomUUID(), retry_until: future(), target_endpoint: dpdpNode, plan,
+        message: { id, sender: dpdpNode, delivery_kind: '任务', msg: '工作单元。', meta },
+      }),
+    });
+  const accepted = await wire({ work }, 'work-wire-01');
+  const acceptedBody = await accepted.json() as { seq?: string; message_ref?: { id: string } };
+  check('work.wire.accepted', accepted.status === 201 && acceptedBody.seq === '1' && acceptedBody.message_ref?.id === 'work-wire-01'
+    ? '' : `the wire answered ${accepted.status} ${JSON.stringify(acceptedBody)}`);
+  const stored = await peer.node.messages.getByRef({ actor: dpdpNode }, { sender: dpdpNode, id: 'work-wire-01' });
+  check('work.wire.stored', JSON.stringify(stored?.message.meta?.work) === JSON.stringify(work)
+    ? '' : `the binding stored ${JSON.stringify(stored?.message.meta ?? null)}`);
+
+  const nullable = await wire({ work: { unit: 'issue/7', parent: null } }, 'work-wire-02');
+  const nullableStored = await peer.node.messages.getByRef({ actor: dpdpNode }, { sender: dpdpNode, id: 'work-wire-02' });
+  check('work.wire.parent-null', nullable.status === 201 && nullableStored?.message.meta?.work?.parent === null
+    ? '' : `an explicit null parent answered ${nullable.status} and stored ${JSON.stringify(nullableStored?.message.meta ?? null)}`);
+
+  const malformed: Array<[string, unknown]> = [
+    ['unit-empty', { work: { unit: '' } }],
+    ['unit-missing', { work: { parent: 'batch/1' } }],
+    ['attempt-zero', { work: { unit: 'issue/7', attempt: 0 } }],
+    ['attempt-fraction', { work: { unit: 'issue/7', attempt: 1.5 } }],
+    ['unknown-field', { work: { unit: 'issue/7', owner: 'x' } }],
+  ];
+  for (const [name, meta] of malformed) {
+    const answer = await wire(meta, `work-bad-${name}`);
+    const body = await answer.json() as { error?: { code: string } };
+    check(`work.wire.refused.${name}`, answer.status === 400 && body.error?.code === 'invalid_request'
+      ? '' : `the wire answered ${answer.status} ${JSON.stringify(body)}`);
+  }
+}
+
+// =============================================================================
+// 9. RFC 0017: a node mounted under a path prefix keeps signature-verified routing
+// =============================================================================
+
+/**
+ * A shared listener mounts each node under its own path prefix. Discovery, the exchange, the
+ * grant push and delivery all run over `http://127.0.0.1:PORT/nodes/<id>/onlyne/v3`: the
+ * handler slices only the route segments, and the signature still covers the full pathname
+ * plus search, so a prefixed request authenticates exactly like a root-mounted one.
+ */
+async function phaseMountedPrefix(): Promise<void> {
+  const aliceNode = 'urn:onlyne:agent:mounted-alice';
+  const bobNode = 'urn:onlyne:agent:mounted-bob';
+  const keyed = (node_id: string, base_url: string): Rig => {
+    const storage = new MemoryStorage();
+    const shared: Shared = { injected: [], allow: true };
+    const material = generateKeyMaterial();
+    const plugins: Plugins = {
+      storage,
+      resolve: async (node: string): Promise<Target> => ({ node_id: node, base_url: urls[node] ?? base_url }),
+      authenticate: async (): Promise<Auth | null> => null,
+      decide: async () => { throw new OnlyneError('decision_unavailable', 'No plugin decision.'); },
+      keys: async () => material,
+      mayAdmit: async () => true,
+      inboundThread: async () => true,
+      runtime: {
+        supports: async () => true,
+        notify: event => notified.push({ node: node_id, event }),
+        inject: async (entry: Entry, context?: string) => {
+          shared.injected.push(entry);
+          return { context: context ?? node_id, consumed: shared.allow };
+        },
+        todo: async () => {},
+      },
+    };
+    const options: NodeOptions = { node_id, base_url, plugins, now: () => clock.value, id: () => crypto.randomUUID(), wait_ms: 5_000 };
+    return { node: new OnlyneNode(options), storage, shared, recreate: () => new OnlyneNode({ ...options }) };
+  };
+  const alice = serve(aliceNode, base_url => keyed(aliceNode, base_url), '/nodes/alice');
+  const bob = serve(bobNode, base_url => keyed(bobNode, base_url), '/nodes/bob');
+
+  // Discovery: the public identity route answers under the prefix, and the description
+  // reports the mounted base URL instead of a rewritten one.
+  const identity = (await alice.node.keys.describe())!;
+  const published = await (await fetch(`${urls[aliceNode]}/keys`)).json() as { node_id: string; fingerprint: string };
+  check('mount.discovery.keys', published.node_id === aliceNode && published.fingerprint === identity.fingerprint
+    ? '' : `discovery published ${JSON.stringify(published)}`);
+  const described = await (await fetch(`${urls[aliceNode]}/description`)).json() as { node_id: string; base_url: string };
+  check('mount.discovery.description', described.node_id === aliceNode && described.base_url === urls[aliceNode]
+    ? '' : `description reported ${JSON.stringify(described)}`);
+
+  // The exchange runs over the prefixed addresses: a signature computed over a rewritten
+  // path would answer 401 here instead of recording the statement.
+  const aliceAuth: Auth = { actor: aliceNode };
+  const bobAuth: Auth = { actor: bobNode };
+  const bobIdentity = (await bob.node.keys.describe())!;
+  await alice.node.trust.request(aliceAuth, bobNode, bobIdentity.fingerprint);
+  await alice.node.trust.accept(aliceAuth, bobNode, bobIdentity.fingerprint);
+  await bob.node.trust.accept(bobAuth, aliceNode, identity.fingerprint);
+  check('mount.exchange.trusted', (await alice.node.trust.entry(bobNode))?.state === 'trusted'
+    && (await bob.node.trust.entry(aliceNode))?.state === 'trusted' ? '' : 'the prefixed exchange did not reach trusted');
+
+  // Delivery: the grant push and the entry both cross the prefix, and the member's own
+  // reconcile finds the entry the owner stored.
+  const sent = await alice.node.client.send(bobNode, {
+    id: 'mount-01', sender: aliceNode, delivery_kind: '问候', msg: '挂在路径前缀上。',
+  }, plan);
+  check('mount.send.accepted', sent.admission === 'accepted'
+    ? '' : `the prefixed send was ${sent.admission}: ${JSON.stringify(sent.error ?? null)}`);
+  await bob.node.client.reconcile();
+  const inbox = await bob.node.messages.inbox(bobAuth, {});
+  const held = inbox.items.find(row => row.attention.message_ref.id === 'mount-01');
+  check('mount.delivery', held?.attention.entry?.message.msg === '挂在路径前缀上。'
+    ? '' : `the mounted peer held ${inbox.items.length} inbox rows without the sent message`);
+}
+
 // ---- run --------------------------------------------------------------------
 
 /**
@@ -1865,12 +2035,13 @@ async function phasePlanRefusal(): Promise<void> {
  */
 async function phaseMaintenance(): Promise<void> {
   const live = new Map<number, () => void>();
+  const intervals = new Map<number, number>();
   let seq = 0;
   const clock = {
-    setTimer: (_ms: number, run: () => void): unknown => { const id = ++seq; live.set(id, run); return id; },
-    clearTimer: (handle: unknown): void => { live.delete(handle as number); },
+    setTimer: (ms: number, run: () => void): unknown => { const id = ++seq; live.set(id, run); intervals.set(id, ms); return id; },
+    clearTimer: (handle: unknown): void => { live.delete(handle as number); intervals.delete(handle as number); },
   };
-  const loop = rig('urn:onlyne:agent:loopy', 'http://127.0.0.1:9/onlyne/v3', { maintenanceClock: clock });
+  const loop = rig('urn:onlyne:agent:loopy', 'http://127.0.0.1:9/onlyne/v3', { maintenanceClock: clock, inboundThread: async () => true });
   loop.node.client.runMaintenance();
   check('maintenance.armed', live.size === 1 ? '' : `runMaintenance armed ${live.size} timers`);
   // This clock keeps a fired timer registered until it is cleared, which is where a pass
@@ -1878,6 +2049,20 @@ async function phaseMaintenance(): Promise<void> {
   const fire = [...live.values()][0]!;
   await fire();
   check('maintenance.rearmed', live.size === 1 ? '' : `one pass left ${live.size} timers armed`);
+  const idleMs = [...intervals.values()][0];
+  check('maintenance.idle_cadence', idleMs === 30_000 ? '' : `idle timer armed at ${idleMs}ms`);
+  await loop.node.messages.admit(
+    { actor: 'urn:onlyne:agent:peer' },
+    {
+      idempotency_key: 'wake-1',
+      retry_until: future(),
+      target_endpoint: 'urn:onlyne:agent:loopy',
+      plan: { response: 'none', execution: 'existing' },
+      message: { id: 'msg-wake-1', sender: 'urn:onlyne:agent:peer', delivery_kind: 'message', msg: 'wake' },
+    },
+  );
+  const wokeMs = [...intervals.values()][0];
+  check('maintenance.inbound_wake_immediate', live.size === 1 && wokeMs === 0 ? '' : `inbound admission armed ${live.size} timer(s) at ${wokeMs}ms`);
   loop.node.client.stopMaintenance();
   check('maintenance.stopped', live.size === 0 ? '' : `stopMaintenance left ${live.size} timers armed`);
 }
@@ -1896,6 +2081,8 @@ try {
   await phaseInitiateTrust();
   await phasePendingCopy();
   await phasePlanRefusal();
+  await phaseWorkRef();
+  await phaseMountedPrefix();
   await phaseMaintenance();
 } catch (error) {
   const problem = `unexpected error: ${text(error)}`;

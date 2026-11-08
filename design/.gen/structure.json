@@ -1,0 +1,160 @@
+{
+  "generatedBy": "ssot gen",
+  "elements": [
+    {
+      "fqn": "externalProviders",
+      "kind": "system",
+      "parent": null,
+      "children": [],
+      "tags": [
+        "external"
+      ],
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "onlyne",
+      "kind": "system",
+      "parent": null,
+      "children": [
+        "onlyne.agentNode",
+        "onlyne.computeBroker",
+        "onlyne.imGateway",
+        "onlyne.mcpGateway"
+      ],
+      "tags": [],
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "onlyne.agentNode",
+      "kind": "container",
+      "parent": "onlyne",
+      "children": [],
+      "tags": [],
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "onlyne.computeBroker",
+      "kind": "container",
+      "parent": "onlyne",
+      "children": [],
+      "tags": [
+        "compute",
+        "contract"
+      ],
+      "business": false,
+      "contract": {
+        "module": "onlyne_computeBroker"
+      }
+    },
+    {
+      "fqn": "onlyne.imGateway",
+      "kind": "container",
+      "parent": "onlyne",
+      "children": [],
+      "tags": [],
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "onlyne.mcpGateway",
+      "kind": "container",
+      "parent": "onlyne",
+      "children": [],
+      "tags": [],
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "sandboxContainer",
+      "kind": "system",
+      "parent": null,
+      "children": [],
+      "tags": [
+        "compute",
+        "untrusted"
+      ],
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "user",
+      "kind": "actor",
+      "parent": null,
+      "children": [],
+      "tags": [],
+      "business": false,
+      "contract": null
+    }
+  ],
+  "relations": [
+    {
+      "source": "externalProviders",
+      "target": "sandboxContainer",
+      "title": "驱动并拉起工作负载容器"
+    },
+    {
+      "source": "onlyne.agentNode",
+      "target": "onlyne.computeBroker",
+      "title": "控制面：申领/续期/释放沙箱算力 (Onlyne Message Bus)"
+    },
+    {
+      "source": "onlyne.agentNode",
+      "target": "onlyne.imGateway",
+      "title": "交互与收发"
+    },
+    {
+      "source": "onlyne.agentNode",
+      "target": "onlyne.mcpGateway",
+      "title": "调用外部工具"
+    },
+    {
+      "source": "onlyne.agentNode",
+      "target": "sandboxContainer",
+      "title": "数据面：直连 SSH 命令执行 / 调试通道"
+    },
+    {
+      "source": "onlyne.computeBroker",
+      "target": "externalProviders",
+      "title": "下发容器编排命令与网络端口映射"
+    },
+    {
+      "source": "user",
+      "target": "onlyne.agentNode",
+      "title": "在 OMP 交互式发起任务"
+    },
+    {
+      "source": "user",
+      "target": "sandboxContainer",
+      "title": "数据面：直连 Web Desktop (noVNC 浏览器操作)"
+    }
+  ],
+  "views": [
+    {
+      "id": "index",
+      "of": null,
+      "nodes": [
+        "externalProviders",
+        "onlyne",
+        "sandboxContainer",
+        "user"
+      ]
+    },
+    {
+      "id": "onlyneCluster",
+      "of": "onlyne",
+      "nodes": [
+        "externalProviders",
+        "onlyne",
+        "onlyne.agentNode",
+        "onlyne.computeBroker",
+        "onlyne.imGateway",
+        "onlyne.mcpGateway",
+        "sandboxContainer",
+        "user"
+      ]
+    }
+  ]
+}

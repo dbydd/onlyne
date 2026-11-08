@@ -298,7 +298,7 @@ class OmpRuntime implements PluginRuntime {
 		if (!current || current.domain_id !== this.config.region) {
 			let expected_revision: string | undefined;
 			try { expected_revision = (await this.node.domains.describe(this.node.auth, this.config.region)).revision; }
-			catch (error) { if (!(error instanceof OnlyneError && error.error.code === "not_found")) throw error; }
+			catch (error) { if (!isNotFoundError(error)) throw error; }
 			await this.node.domains.join(this.node.auth, this.config.region, { ...mutation(), expected_revision });
 		}
 		handler = request => this.node.fetch(request);
@@ -445,7 +445,7 @@ class OmpRuntime implements PluginRuntime {
 			await this.node.threads.describe(this.node.auth, ref);
 			return;
 		} catch (error) {
-			if (!(error instanceof OnlyneError && error.error.code === "not_found")) throw error;
+			if (!isNotFoundError(error)) throw error;
 		}
 		await this.node.threads.create(this.node.auth, { title: TRUST_THREAD, id: ref.id, ...mutation() });
 	}
@@ -813,6 +813,17 @@ export async function allPages<T>(read: (cursor?: string) => Promise<Page<T>>): 
 }
 
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+
+/** Check if an error represents an Onlyne not_found condition, independent of instanceof identity. */
+function isNotFoundError(error: unknown): boolean {
+	if (error instanceof OnlyneError) return error.error.code === "not_found";
+	if (typeof error === "object" && error !== null) {
+		const failure = (error as { error?: { code?: string } }).error;
+		if (failure?.code === "not_found") return true;
+		if ((error as { message?: string }).message === "The requested record is unavailable.") return true;
+	}
+	return false;
+}
 
 /**
  * RFC 0018 §2.1–2.2: the address an outbound judgement reads for a peer this host may initiate

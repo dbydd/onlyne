@@ -1,0 +1,57 @@
+-- REQ-5, REQ-6, REQ-7, REQ-8
+-- RFC 0019 沙箱算力代理节点契约
+-- 建模 Compute Broker 节点的外部端口、租约状态与生命周期承诺
+module onlyne_computeBroker
+exports
+  types
+    LeaseId;
+    struct Closed
+  operations
+    acquire : LeaseId * nat ==> ();
+    renew : LeaseId * nat ==> ();
+    release : LeaseId ==> ();
+    destroy : LeaseId ==> Closed
+definitions
+types
+  LeaseId = token;
+  Closed = <Closed>;
+state Ledger of
+  running : map LeaseId to nat
+  stopped : set of LeaseId
+  destroyed : set of LeaseId
+inv s ==
+  dom s.running inter s.stopped = {} and
+  dom s.running inter s.destroyed = {} and
+  s.stopped inter s.destroyed = {}
+init s == s = mk_Ledger({|->}, {}, {})
+end
+operations
+  -- REQ-5, REQ-7：申领沙箱。
+  acquire(lid : LeaseId, ttl : nat)
+  ext wr running
+      rd stopped, destroyed
+  pre lid not in set dom running and lid not in set stopped and lid not in set destroyed and ttl > 0
+  post running = running~ munion {lid |-> ttl};
+
+  -- REQ-7：续约沙箱。
+  renew(lid : LeaseId, add_ms : nat)
+  ext rd stopped, destroyed
+      wr running
+  pre lid in set dom running and add_ms > 0
+  post running = running~ ++ {lid |-> running~(lid) + add_ms};
+
+  -- REQ-7：主动休眠沙箱（停机保盘）。
+  release(lid : LeaseId)
+  ext wr running, stopped
+  pre lid in set dom running
+  post running = {lid} <-: running~ and stopped = stopped~ union {lid};
+
+  -- REQ-7：物理彻底销毁。
+  destroy(lid : LeaseId) r : Closed
+  ext wr running, stopped, destroyed
+  pre lid in set dom running or lid in set stopped
+  post running = {lid} <-: running~ and
+       stopped = stopped~ \ {lid} and
+       destroyed = destroyed~ union {lid} and
+       r = <Closed>;
+end onlyne_computeBroker

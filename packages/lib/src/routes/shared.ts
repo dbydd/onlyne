@@ -2,7 +2,7 @@ import { OnlyneError, fail } from '../core.ts';
 import type { Context } from '../core.ts';
 import type {
   Auth, DeliveryPlan, Event, Grant, HandoverProbe, Json, LogQuery, Member, Message, MessageQuery, Mutation,
-  OperationRequest, PageOptions, ReadScope, Resource, ResourceEvent, SendRequest,
+  OperationRequest, PageOptions, ReadScope, Resource, ResourceEvent, SendRequest, WorkRef,
 } from '../types.ts';
 import type { ThreadService } from '../threads.ts';
 import type { MessageService } from '../messages.ts';
@@ -88,6 +88,21 @@ export function deliveryPlan(value: unknown, field: string): DeliveryPlan {
   return { response, execution, ...(context === undefined ? {} : { context }) };
 }
 
+/** RFC 0003 §1: the work unit a message belongs to. A malformed ref is refused, never dropped. */
+export function workRef(value: unknown, field: string): WorkRef {
+  const raw = shape(value, field, ['unit', 'parent', 'attempt']);
+  const parent = raw.parent === null ? null : optionalString(raw.parent, `${field}.parent`);
+  const attempt = raw.attempt;
+  if (attempt !== undefined && (typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1)) {
+    fail('invalid_request', `${field}.attempt must be a positive integer.`);
+  }
+  return {
+    unit: string(raw.unit, `${field}.unit`),
+    ...(parent === undefined ? {} : { parent }),
+    ...(attempt === undefined ? {} : { attempt }),
+  };
+}
+
 export function readScope(value: unknown, field: string): ReadScope {
   const raw = shape(value, field, ['peers', 'since_seq', 'related_to']);
   const since = optionalString(raw.since_seq, `${field}.since_seq`);
@@ -100,10 +115,11 @@ export function readScope(value: unknown, field: string): ReadScope {
 }
 
 export function messageMeta(value: unknown, field: string): NonNullable<Message['meta']> {
-  const raw = shape(value, field, ['thread', 'in_reply_to', 'relation', 'mentions', 'parts', 'data']);
+  const raw = shape(value, field, ['work', 'thread', 'in_reply_to', 'relation', 'mentions', 'parts', 'data']);
   const relation = optionalString(raw.relation, `${field}.relation`);
   if (relation !== undefined && relation !== 'reply' && relation !== 'followup') fail('invalid_request', `${field}.relation must be reply or followup.`);
   return {
+    ...(raw.work === undefined ? {} : { work: workRef(raw.work, `${field}.work`) }),
     ...(raw.thread === undefined ? {} : { thread: threadRef(raw.thread, `${field}.thread`) }),
     ...(raw.in_reply_to === undefined ? {} : { in_reply_to: messageRef(raw.in_reply_to, `${field}.in_reply_to`) }),
     ...(relation === undefined ? {} : { relation }),

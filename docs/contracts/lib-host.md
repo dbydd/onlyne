@@ -29,6 +29,7 @@
 | `maintenanceClock` | 提供一次性 `setTimer` 与 `clearTimer` | 库不启动维护环，宿主自行调度 |
 | `domainCandidates` | 提供可能声明某域的候选节点 | `domains.discover` 返回 `unsupported_delivery` |
 | `transport` | 用其他网络绑定替换内置 Fetch transport | 使用内置 Fetch transport |
+| `neighbors` | 返回本节点观测到的邻居与信任状态列表（供 `read.scope = "neighbors"` 与 `onlyne://neighbors` 共用） | `read.scope = "neighbors"` 返回 `unsupported_delivery` |
 
 资源驱动、接纳策略、目录等其余插件由各自 RFC 与宿主设计定义，不在本契约展开。
 

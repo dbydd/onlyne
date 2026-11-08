@@ -8,6 +8,7 @@ import {
 } from '@onlyne/mcp-core';
 import type { GatewayConfig, ServerConfig } from './config.js';
 import { FileStorage } from '@onlyne/im-gateway/storage';
+import { neighborRows } from '@onlyne/im-gateway';
 import { createMountService, MOUNTS_RESOURCE_PREFIX, type MountService, type MountTransport } from './mounts.js';
 import { t } from './gateway-text.js';
 
@@ -187,6 +188,7 @@ export async function createMcpGateway(config: GatewayConfig, options: McpGatewa
       inject: async () => { throw new OnlyneError('unsupported_delivery', t('error.noContext')); },
     },
     domainCandidates: async domain_id => node.discovery.candidates(domain_id),
+    neighbors: () => neighborRows(node, owner),
     ...(keys === undefined ? {} : { keys }),
   };
   let node: OnlyneNode;

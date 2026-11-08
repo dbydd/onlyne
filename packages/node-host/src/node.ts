@@ -111,27 +111,47 @@ export function createOnlyneNode(deps: NodeDeps): OnlyneNode {
 			mention: async alias => {
 				const name = alias.replace(/^@/, "");
 				if (name === "self" || name === config.node.id) return config.node.id;
-				const matches = (await node.discovery.listRecords()).filter(record => record.node_id === name || record.node_id.split(":").at(-1) === name);
-				const ids = [...new Set(matches.map(record => record.node_id))];
+				const candidates = [
+					...(await node.discovery.listRecords()).map(record => record.node_id),
+					...(await node.trust.list(node.auth)).map(entry => entry.node_id),
+				];
+				const ids = [...new Set(candidates.filter(id => id === name || id.split(":").at(-1) === name))];
 				if (ids.length !== 1) throw new OnlyneError(ids.length ? "ambiguous_target" : "not_found", t("mentionNotFound", { name }));
 				return ids[0]!;
 			},
 			directory: async () => ({ node: config.node.id, region: config.region, endpoint: deps.endpoint, peers: await node.discovery.listRecords(), contexts: await deps.contexts.list() }) as unknown as Json,
-			// The same rows onlyne://neighbors renders: every observed node with its trust state.
+			// The same rows onlyne://neighbors renders: every observed or trusted node with its trust state.
 			neighbors: async () => {
 				const records = await node.discovery.listRecords();
 				const trust = new Map((await node.trust.list(node.auth)).map(entry => [entry.node_id, entry]));
-				return records.map(record => {
+				const at = Date.now();
+				const byNode = new Map<string, Json>();
+				for (const record of records) {
+					if (record.node_id === config.node.id) continue;
 					const entry = trust.get(record.node_id);
-					return {
+					const verified = record.verified_at !== undefined && Date.parse(record.expires_at) > at;
+					const current = byNode.get(record.node_id) as { verified?: boolean } | undefined;
+					if (current !== undefined && (current.verified || !verified)) continue;
+					byNode.set(record.node_id, {
 						node_id: record.node_id, base_url: record.base_url,
 						...(record.membership?.domain_id === undefined ? {} : { region: record.membership.domain_id }),
 						...(record.last_seen === undefined ? {} : { last_seen: record.last_seen }),
-						verified: record.verified_at !== undefined && Date.parse(record.expires_at) > Date.now(),
+						verified: verified || entry?.state === "trusted",
 						phase: entry === undefined ? "no_exchange" : trustPhase(entry),
 						fingerprint: entry?.fingerprint ?? null,
-					};
-				});
+					});
+				}
+				for (const entry of trust.values()) {
+					if (entry.node_id === config.node.id || byNode.has(entry.node_id)) continue;
+					byNode.set(entry.node_id, {
+						node_id: entry.node_id,
+						base_url: entry.base_url,
+						verified: entry.state === "trusted",
+						phase: trustPhase(entry),
+						fingerprint: entry.fingerprint,
+					});
+				}
+				return [...byNode.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, row]) => row);
 			},
 		},
 	});

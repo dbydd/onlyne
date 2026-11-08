@@ -40,12 +40,23 @@ export interface Storage {
 export interface Page<T> { items: T[]; next_cursor: string | null }
 export interface Mutation { idempotency_key: string; retry_until: string }
 export interface DeliveryPlan { response: 'none' | 'async' | 'await'; execution: 'existing' | 'new'; context?: string }
+/**
+ * RFC 0003 §1: the unit of work a message belongs to. `unit` is the identity a receiver
+ * dedupes on, so a re-delivery of the same unit is recognised across threads, sessions and
+ * restarts; `parent` names the enclosing unit; `attempt` counts retries of one unit.
+ */
+export interface WorkRef {
+  unit: string;
+  parent?: string | null;
+  attempt?: number;
+}
 export interface Message {
   id: string;
   sender: NodeId;
   delivery_kind: string;
   msg: string;
   meta?: {
+    work?: WorkRef;
     thread?: ThreadRef;
     in_reply_to?: MessageRef;
     relation?: 'reply' | 'followup';
@@ -221,7 +232,7 @@ export interface ResourceInventory {
 export type ResourceReadResult = ResourceInventory | Resource | Page<ResourceEvent> | ResourceEvent | Page<OperationRecord> | OperationRecord;
 export type Action =
   | { kind: 'domain'; op: 'create' | 'join' | 'leave' | 'list' | 'describe' | 'discover'; domain_id?: DomainId; expected_revision?: string }
-  | { kind: 'send'; to: NodeId; thread?: ThreadRef; context?: string; in_reply_to?: MessageRef; relation?: 'reply' | 'followup'; mentions?: NodeId[]; response: DeliveryPlan['response']; execution: DeliveryPlan['execution'] }
+  | { kind: 'send'; to: NodeId; work?: WorkRef; thread?: ThreadRef; context?: string; in_reply_to?: MessageRef; relation?: 'reply' | 'followup'; mentions?: NodeId[]; response: DeliveryPlan['response']; execution: DeliveryPlan['execution'] }
   | { kind: 'read'; scope: 'directory' | 'neighbors' | 'threads' | 'inbox' | 'messages' | 'message' | 'evidence'; thread?: ThreadRef; message?: MessageRef; seq?: string; cursor?: string; page_size?: number; attention?: 'inbox' | 'thread' }
   | { kind: 'read'; scope: 'resources'; query: ResourceReadQuery }
   | { kind: 'thread'; op: 'create' | 'close' | 'list' | 'describe' | 'member_add' | 'member_remove'; thread?: ThreadRef; to?: NodeId; title?: string }

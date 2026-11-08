@@ -4,6 +4,7 @@ import {
   type Storage, type ThreadRef, type Transport,
 } from '@onlyne/lib';
 import { FileStorage } from '@onlyne/im-gateway/storage';
+import { neighborRows } from '@onlyne/im-gateway';
 import { leveled, type LogSink } from '@onlyne/node-host';
 import { timingSafeEqual } from 'node:crypto';
 import { DEFAULT_STATUS_PATH, redactWebhook, webhookHeaderValue, type GrokBotConfig } from './config.ts';
@@ -147,6 +148,7 @@ export async function createGrokBotNode(config: GrokBotConfig, options: GrokBotO
       return { ...target, headers: { 'Onlyne-Actor': owner } };
     },
     domainCandidates: domain_id => node.discovery.candidates(domain_id),
+    neighbors: () => neighborRows(node, owner),
     executionContexts: async () => (config.contexts ?? ['main']).map(alias => ({
       alias, summary: t('context.summary'), state: 'idle',
     })) as Json,

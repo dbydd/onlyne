@@ -34,6 +34,11 @@ const toolBody = (result: unknown): Record<string, unknown> | undefined => {
   return rec(JSON.parse(content?.[0]?.text ?? '{}'));
 };
 
+const toolRaw = (result: unknown): unknown => {
+  const content = rec(result)?.content as Array<{ text?: string }> | undefined;
+  return JSON.parse(content?.[0]?.text ?? 'null');
+};
+
 const MCP = 'urn:onlyne:agent:mcp';
 const PEER = 'urn:onlyne:agent:peer';
 const servers: Array<{ stop(closeActiveConnections?: boolean): void }> = [];
@@ -191,6 +196,57 @@ const replyBody = toolBody(reply);
 ok('send_message with thread + in_reply_to and response:async targets the peer thread',
   reply.isError !== true && replyBody?.admission === 'accepted'
   && rec(rec(replyBody?.receipt)?.thread_ref)?.id === thread.thread_ref.id);
+
+// meta.work: an MCP send carries the work ref onto the wire and the peer stores it
+const workSend = await client.callTool({
+  name: 'send_message',
+  arguments: {
+    to: PEER,
+    msg: 'work item via mcp',
+    work: { unit: 'unit-1', attempt: 2, parent: null },
+  },
+});
+const workBody = toolBody(workSend);
+ok('send_message with work is accepted', workSend.isError !== true && workBody?.admission === 'accepted');
+const workId = rec(rec(workBody?.receipt)?.message_ref)?.id;
+ok('the peer stored meta.work from the MCP send', await waitFor(async () => {
+  await peer.client.reconcile();
+  if (typeof workId !== 'string') return false;
+  const inbox = await peer.messages.inbox(peerAuth);
+  const row = inbox.items.find(item => item.attention.message_ref.id === workId);
+  return (rec(rec(rec(row?.attention.entry)?.message)?.meta)?.work as Record<string, unknown> | undefined)?.['unit']
+    === 'unit-1';
+}));
+
+ok('send_message rejects a work ref without a unit', (await client.callTool({
+  name: 'send_message',
+  arguments: { to: PEER, msg: 'bad work', work: { attempt: 1 } },
+})).isError === true);
+
+// A peer message carrying meta.work survives into MCP reads
+const peerWork = await peer.client.send(MCP, {
+  id: 'peer-work-1', sender: PEER, delivery_kind: 'message', msg: 'peer work item',
+  meta: { work: { unit: 'unit-9', attempt: 1, parent: null } },
+}, { response: 'none', execution: 'existing' });
+ok('peer send with work was accepted', peerWork.admission === 'accepted');
+ok('list_inbox preserves meta.work', await waitFor(async () => {
+  await host.node.client.reconcile();
+  const inbox = toolBody(await client.callTool({ name: 'list_inbox', arguments: {} }));
+  const items = Array.isArray(inbox?.items) ? inbox.items : [];
+  const row = items.map(item => rec(item))
+    .find(item => rec(rec(rec(item?.attention)?.entry)?.message)?.id === 'peer-work-1');
+  return (rec(rec(rec(rec(row?.attention)?.entry)?.message)?.meta)?.work as Record<string, unknown> | undefined)?.['unit']
+    === 'unit-9';
+}));
+
+// list_neighbors returns merged discovery + trust rows with trust state attached
+const neighbors = toolRaw(await client.callTool({ name: 'list_neighbors', arguments: {} }));
+const neighborRows = Array.isArray(neighbors) ? neighbors : [];
+const peerRow = neighborRows.map(row => rec(row)).find(row => row?.node_id === PEER);
+ok('list_neighbors merges discovery and trust state for the peer',
+  peerRow?.phase === 'exchanged' && typeof peerRow?.verified === 'boolean'
+  && typeof peerRow?.fingerprint === 'string' && peerRow.fingerprint.length > 0
+  && typeof peerRow?.base_url === 'string');
 
 await client.close();
 await server.close();

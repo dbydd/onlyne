@@ -55,6 +55,8 @@ export class OnlyneNode {
     this.transport = transport;
     this.client = new OnlyneClient(ctx, transport, this.messages, this.threads, this.resources, this.domains, this.trust);
     this.trust.bindLoop(this.client);
+    this.messages.bindLoop(this.client);
+    this.threads.bindLoop(this.client);
     this.fetch = createHttpHandler({
       ctx, threads: this.threads, messages: this.messages, resources: this.resources, domains: this.domains, discovery: this.discovery,
       keys: this.keys, trust: this.trust,

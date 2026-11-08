@@ -1,0 +1,140 @@
+specification {
+  element actor {
+    notation 'Person'
+    style {
+      shape person
+    }
+  }
+  element system {
+    notation 'Software System'
+  }
+  element container {
+    notation 'Container'
+  }
+  element component {
+    notation 'Component'
+  }
+
+  tag external
+  tag datastore
+  tag contract
+  tag untrusted
+  tag compute
+
+  deploymentNode host
+}
+
+model {
+  user = actor 'User / Operator' {
+    description '使用 OMP 或发起自动化批处理任务的工程师'
+  }
+
+  onlyne = system 'Onlyne Cluster' {
+    description '基于点对点认证与消息/资源总线的分布式 Agent 协作网络'
+
+    agentNode = container 'Agent Node (OMP / CLI)' {
+      technology 'TypeScript / OMP Plugin'
+      description '承载具体业务 Agent，发起消息、任务协作与算力申领'
+    }
+
+    imGateway = container 'IM Gateway Node' {
+      technology 'Node.js / Onlyne Daemon'
+      description '对接 Lark、QQ、微信等外部即时通信平台会话资源'
+    }
+
+    mcpGateway = container 'MCP Gateway Node' {
+      technology 'Node.js / Onlyne Daemon'
+      description '对接外部 MCP 服务并将其映射为无状态可调用资源'
+    }
+
+    computeBroker = container 'Compute Broker Node' {
+      #contract #compute
+      technology 'Node.js / Onlyne Daemon'
+      description 'RFC 0019 沙箱算力代理节点，管理容器租约生命周期与直连凭据'
+    }
+  }
+
+  externalProviders = system 'Compute Providers' {
+    #external
+    description '底层实际运行容器的计算基础设施'
+  }
+
+  sandboxContainer = system 'Sandbox Container (Workload)' {
+    #untrusted #compute
+    description '被创建的纯净执行环境，不是 Onlyne 节点，对外暴露 SSH 与 Web Desktop'
+  }
+
+  // 顶层人与系统交互
+  user -> onlyne.agentNode '在 OMP 交互式发起任务'
+  onlyne.agentNode -> onlyne.computeBroker '控制面：申领/续期/释放沙箱算力 (Onlyne Message Bus)'
+  onlyne.agentNode -> sandboxContainer '数据面：直连 SSH 命令执行 / 调试通道'
+  user -> sandboxContainer '数据面：直连 Web Desktop (noVNC 浏览器操作)'
+  onlyne.computeBroker -> externalProviders '下发容器编排命令与网络端口映射'
+  externalProviders -> sandboxContainer '驱动并拉起工作负载容器'
+
+  // 集群内部调用
+  onlyne.agentNode -> onlyne.imGateway '交互与收发'
+  onlyne.agentNode -> onlyne.mcpGateway '调用外部工具'
+}
+
+deployment {
+  host localHost 'Local Developer Machine' {
+    description '运行 OMP 与本地沙箱宿主'
+    instanceOf onlyne.agentNode
+    instanceOf onlyne.computeBroker
+  }
+  host cloudHost 'Remote Cloud Server' {
+    description '按需弹性接入的高性能云服务器'
+    instanceOf externalProviders
+  }
+  host executionSandbox 'Isolated Sandbox Environment' {
+    #untrusted
+    description '不信任的执行环境，防止本地环境被破坏'
+    instanceOf sandboxContainer
+  }
+}
+
+global {
+  styleGroup theme {
+    style element.tag = #external {
+      color muted
+      notation 'External Infrastructure'
+    }
+    style element.tag = #datastore {
+      shape storage
+      notation 'Data Store'
+    }
+    style element.tag = #compute {
+      color secondary
+      notation 'Compute Workload'
+    }
+  }
+}
+
+views {
+  global style theme
+
+  view index {
+    title 'Onlyne 集群总体架构上下文图'
+    description '展示 Agent 节点、计算代理节点与沙箱工作负载的边界'
+    include *
+  }
+
+  view onlyneCluster of onlyne {
+    title 'Onlyne 容器层架构图'
+    description '展示 Agent、网关与 Compute Broker 节点间的交互与边界'
+    include *
+  }
+
+  deployment view deployed {
+    title '沙箱算力部署与信任边界图'
+    description '展示本地宿主、云服务器与隔离沙箱的部署分布与安全隔离'
+    include localHost.**
+    include cloudHost.**
+    include executionSandbox.**
+    style executionSandbox {
+      color red
+      notation 'Untrusted Execution Sandbox'
+    }
+  }
+}

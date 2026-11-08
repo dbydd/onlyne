@@ -1,0 +1,39 @@
+{
+  "name": "@onlyne/compute-core",
+  "version": "3.2.0",
+  "description": "Onlyne compute core: OECP v1 and RFC 0019 elastic sandbox types, lease contracts, and provider SPI",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dbydd/onlyne.git",
+    "directory": "packages/compute-core"
+  },
+  "homepage": "https://github.com/dbydd/onlyne#readme",
+  "bugs": "https://github.com/dbydd/onlyne/issues",
+  "keywords": ["onlyne", "compute", "sandbox", "oecp"],
+  "publishConfig": { "access": "public" },
+  "engines": { "bun": ">=1.4.3" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc && tsc -p tsconfig.tests.json",
+    "test": "bun tests/verify.ts",
+    "prepack": "bun run build"
+  },
+  "dependencies": {
+    "@onlyne/lib": "^3.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path';
 import { DEFAULT_WEBHOOK_PATH, type ChannelConfig, type GatewayConfig } from './config.js';
 import { FileStorage } from './storage.js';
 import { EventPusher } from './pusher.js';
+import { neighborRows } from './neighbors.js';
 import { ThreadRenderer, type RenderTarget } from './render.js';
 import {
   connectorStatus, statusLines,
@@ -23,6 +24,7 @@ export type ConnectorFactory = (config: GatewayConfig, channel: ChannelConfig) =
 
 export type { ChannelConfig, ChannelTransport, GatewayConfig } from './config.js';
 export { gatewayNodeId, DEFAULT_WEBHOOK_PATH } from './config.js';
+export { neighborRows } from './neighbors.js';
 export {
   statusLines,
   type ChannelStatus, type ConnectorStatus, type GatewayResourceStatus, type GatewayStatusReport, type StatusConnector,
@@ -534,6 +536,7 @@ export async function createImGateway(config: GatewayConfig, options: ImGatewayO
     resolve,
     prepareResourceOperation: prepareOperation,
     domainCandidates: domain_id => node.discovery.candidates(domain_id),
+    neighbors: () => neighborRows(node, owner),
     /**
      * The published context directory a sender's draft send reads (RFC 0005): without it the
      * caller must guess `meta.context` or its send fails `contexts_unreadable`. The gateway

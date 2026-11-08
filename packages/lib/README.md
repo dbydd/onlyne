@@ -6,10 +6,11 @@ The protocol is specified by the draft RFCs in [`docs/rfcs`](../../docs/rfcs). T
 
 ## Run
 
-The package exports TypeScript source for a TypeScript-capable host such as Bun.
+The package compiles TypeScript source to standard ESM JavaScript and `.d.ts` declarations under `./dist/`, so Node.js (including inside `node_modules` and Electron ASAR), Bun, and TypeScript consumers load it directly without runtime type-stripping flags.
 
 ```sh
 bun install
+bun run build
 bun run check
 bun run test
 ```
@@ -34,9 +35,9 @@ export function serveOnlyne(options: NodeOptions, port: number) {
 }
 ```
 
-`options.base_url` includes `/onlyne/v3`. `FetchTransport` permits HTTP on loopback and requires HTTPS for remote hosts. The resolver supplies the remote identity, URL, and authentication headers. The authentication plugin maps each inbound request to its verified actor.
+`options.base_url` includes `/onlyne/v3` (and may be mounted under a URL path prefix such as `/nodes/<id>/onlyne/v3` when sharing a single HTTP listener across local identities). `FetchTransport` permits HTTP on loopback and requires HTTPS for remote hosts. The resolver supplies the remote identity, URL, and authentication headers. The authentication plugin maps each inbound request to its verified actor.
 
-The model calls `node.client.msg({ delivery_kind, msg, meta })`. The `decide` plugin returns a typed send, read, thread, resource, or domain action. An unavailable decision returns `decision_unavailable`. Hosts can also call the typed `threads`, `messages`, `resources`, `domains`, and `client.send` interfaces directly.
+The model calls `node.client.msg({ delivery_kind, msg, meta })`. Work-unit correlation travels as first-class `meta.work` (`{ unit, parent?, attempt? }`) on `Message['meta']` and `Action(kind: 'send')`, covered by the message identity digest. The `decide` plugin returns a typed send, read, thread, resource, or domain action. An unavailable decision returns `decision_unavailable`. Hosts can also call the typed `threads`, `messages`, `resources`, `domains`, and `client.send` interfaces directly.
 
 A plan whose `response` is `await` keeps `client.send` on the reply. The outcome reports `wait` as `answered`, `timed_out`, or `cancelled`, and an answered one carries `reply` with `reply_body`. The awaited tool result and the automatic attention fragment share one consumption record per `(context, ThreadRef, seq)`. A body already confirmed in that context comes back as `reply_body: 'withheld'` with the arrival facts and the original MessageRef only; a body this result rendered closes the record, so the fragment does not present it again. `runtime.confirmToolResult` reports the tool result the host observed in that context. A record no path confirmed stays open and is replayed.
 

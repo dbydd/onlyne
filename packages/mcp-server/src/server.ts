@@ -1,4 +1,5 @@
-import { OnlyneError, OnlyneNode, type DeliveryPlan, type Json, type Message, type MessageRef, type ThreadRef } from '@onlyne/lib';
+import { OnlyneError, OnlyneNode, type DeliveryPlan, type Json, type Message, type MessageRef, type ThreadRef, type WorkRef } from '@onlyne/lib';
+import { neighborRows } from '@onlyne/im-gateway';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -41,6 +42,16 @@ export const TOOLS = [
         in_reply_to_id: { type: 'string', description: 'Original message id, with in_reply_to_sender.' },
         response: { type: 'string', enum: ['none', 'async'], description: 'Delivery response plan. Default none.' },
         execution: { type: 'string', enum: ['existing', 'new'], description: 'Delivery execution plan. Default existing.' },
+        work: {
+          type: 'object',
+          description: 'Work unit this message belongs to (meta.work).',
+          required: ['unit'],
+          properties: {
+            unit: { type: 'string', description: 'Work unit id.' },
+            attempt: { type: 'integer', minimum: 1, description: 'Attempt within the unit.' },
+            parent: { type: ['string', 'null'], description: 'Parent work unit id, or null.' },
+          },
+        },
       },
     },
   },
@@ -138,6 +149,29 @@ const pageOptions = (args: Record<string, unknown>): { page_size?: number; curso
   ...(typeof args.cursor === 'string' && args.cursor.length > 0 ? { cursor: args.cursor } : {}),
 });
 
+/** Validates the send_message work argument into a wire-shaped WorkRef, or undefined. */
+function workArg(value: unknown): WorkRef | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new OnlyneError('invalid_request', 'work must be an object with a unit.');
+  }
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.unit !== 'string' || raw.unit.length === 0) {
+    throw new OnlyneError('invalid_request', 'work.unit must be a non-empty string.');
+  }
+  if (raw.attempt !== undefined && (typeof raw.attempt !== 'number' || !Number.isInteger(raw.attempt) || raw.attempt < 1)) {
+    throw new OnlyneError('invalid_request', 'work.attempt must be a positive integer.');
+  }
+  if (raw.parent !== undefined && raw.parent !== null && typeof raw.parent !== 'string') {
+    throw new OnlyneError('invalid_request', 'work.parent must be a string or null.');
+  }
+  return {
+    unit: raw.unit,
+    ...(raw.parent === undefined ? {} : { parent: raw.parent }),
+    ...(raw.attempt === undefined ? {} : { attempt: raw.attempt }),
+  };
+}
+
 function result(data: unknown, isError = false): CallToolResult {
   return {
     content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
@@ -185,16 +219,18 @@ async function dispatch(node: OnlyneNode, name: string, args: Record<string, unk
         ? { sender: replySender, id: replyId } : undefined;
       const response = args.response === 'async' ? 'async' : 'none';
       const execution = args.execution === 'new' ? 'new' : 'existing';
+      const work = workArg(args.work);
       const plan: DeliveryPlan = { response, execution };
       const message: Message = {
         id: crypto.randomUUID(),
         sender: node.auth.actor,
         delivery_kind: str(args.delivery_kind) ?? 'message',
         msg,
-        ...(thread === undefined && inReplyTo === undefined ? {} : {
+        ...(thread === undefined && inReplyTo === undefined && work === undefined ? {} : {
           meta: {
             ...(thread === undefined ? {} : { thread }),
             ...(inReplyTo === undefined ? {} : { in_reply_to: inReplyTo, relation: 'reply' as const }),
+            ...(work === undefined ? {} : { work }),
           },
         }),
       };
@@ -238,7 +274,7 @@ async function dispatch(node: OnlyneNode, name: string, args: Record<string, unk
       return result(await node.messages.list(auth, { owner, id }, { ...pageOptions(args), attention }));
     }
     case 'list_neighbors':
-      return result(await node.trust.list(auth));
+      return result(await neighborRows(node, auth.actor));
     case 'list_resources':
       return result(await node.resources.list(auth, pageOptions(args)));
     case 'describe_resource': {
@@ -266,7 +302,7 @@ async function readResource(node: OnlyneNode, uri: string): Promise<string> {
     case 'onlyne://threads':
       return JSON.stringify(await node.threads.list(auth), null, 2);
     case 'onlyne://neighbors':
-      return JSON.stringify(await node.trust.list(auth), null, 2);
+      return JSON.stringify(await neighborRows(node, auth.actor), null, 2);
     default:
       throw new OnlyneError('not_found', t('error.unknownResource', { uri }));
   }

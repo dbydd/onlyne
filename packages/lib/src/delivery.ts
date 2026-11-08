@@ -133,6 +133,7 @@ export function messageDigest(request: SendRequest): string {
   return canonical({
     sender: request.message.sender,
     target_endpoint: request.target_endpoint,
+    work: meta?.work ?? null,
     thread_ref: meta?.thread ?? null,
     in_reply_to: meta?.in_reply_to ?? null,
     relation: meta?.relation ?? null,

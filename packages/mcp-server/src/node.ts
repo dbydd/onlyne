@@ -3,6 +3,7 @@ import {
   type NodeId, type Plugins, type Storage, type Transport,
 } from '@onlyne/lib';
 import { FileStorage } from '@onlyne/im-gateway/storage';
+import { neighborRows } from '@onlyne/im-gateway';
 import type { LogSink } from '@onlyne/node-host';
 import type { McpServerConfig } from './config.ts';
 import { t } from './server-text.ts';
@@ -47,10 +48,18 @@ export async function createOnlyneHost(config: McpServerConfig, options: OnlyneH
     authenticate,
     maintenanceClock: nodeClock(),
     resolve: async id => {
-      const target = id === owner ? { node_id: id, base_url } : await node.discovery.resolve(id);
+      const target = id === owner ? { node_id: id, base_url }
+        : await node.discovery.resolve(id).catch(async error => {
+            const failure = error instanceof OnlyneError ? error.error : undefined;
+            if (failure?.code !== 'not_found' && failure?.code !== 'unavailable') throw error;
+            const entry = await node.trust.entry(id);
+            if (entry === undefined || entry.state !== 'trusted' || entry.base_url.length === 0) throw error;
+            return { node_id: id, base_url: entry.base_url };
+          });
       return { ...target, headers: { 'Onlyne-Actor': owner } };
     },
     domainCandidates: domain_id => node.discovery.candidates(domain_id),
+    neighbors: () => neighborRows(node, owner),
     executionContexts: async () => (config.contexts ?? ['main']).map(alias => ({
       alias, summary: t('context.summary'), state: 'idle',
     })) as Json,
@@ -79,6 +88,8 @@ export async function createOnlyneHost(config: McpServerConfig, options: OnlyneH
     now: () => Date.now(),
     id: () => crypto.randomUUID(),
   });
+  // The clock is always supplied, so the maintenance ring belongs to this host (lib contract §4).
+  node.client.runMaintenance();
   return {
     node, config, storage,
     async stop(): Promise<void> {

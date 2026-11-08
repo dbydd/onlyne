@@ -18,6 +18,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { configPath, normalizeNodeId, normalizeRegion, normalizeServiceUrl, saveConfig, shortNodeId } from "../config.ts";
 import { parseAllowBlock, type AcquirePolicy } from "@onlyne/node-host/acquire";
+import { ensureKeyDir } from "@onlyne/node-host/keys";
 import { startRuntime } from "../runtime.ts";
 import type { OnlyneConfig } from "@onlyne/node-host/types";
 import { t, type UiTextKey } from "./bootstrap-text.ts";
@@ -220,6 +221,14 @@ export class OnlyneBootstrap implements Component {
 		this.changed();
 		let persisted = false;
 		try {
+			if (scope !== "none") {
+				try {
+					await ensureKeyDir(this.ctx.cwd, config.node.id, scope);
+				} catch (error) {
+					this.fail(error instanceof Error ? error.message : String(error));
+					return;
+				}
+			}
 			await saveConfig(config);
 			persisted = true;
 			const runtime = await startRuntime(this.pi, this.ctx);

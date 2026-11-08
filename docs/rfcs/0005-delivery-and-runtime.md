@@ -42,13 +42,13 @@ SystemOne 只从当前 endpoint 声明的能力、目标位置和运行时可执
 
 | kind | 必填字段 | 可选字段 | 含义 |
 |---|---|---|---|
-| `send` | `to` | `thread`、`context`、`in_reply_to`、`relation`、`mentions` | 向一个 endpoint 投递消息 |
-| `read` | `scope` | `to`、`thread`、`message`、`cursor`、`page_size` | 本地目录、thread 列表、消息列表、单条消息或出站证据 |
+| `send` | `to` | `thread`、`context`、`in_reply_to`、`relation`、`mentions`、`work` | 向一个 endpoint 投递消息 |
+| `read` | `scope` | `to`、`thread`、`message`、`cursor`、`page_size` | 本地目录、邻居表、thread 列表、消息列表、单条消息或出站证据 |
 | `resource` | `resource`、`operation` | `data` | 调用资源声明的操作 |
 | `thread` | `op` | `title`、`thread`、`to` | 创建、关闭、列举、描述本地 thread，或变更其成员 |
 | `domain` | `op` | `domain_id`、`expected_revision` | 创建、列举、查询、加入、退出本节点的域关系，或核对域成员 |
 
-`read.scope` 取 `directory`、`threads`、`inbox`、`messages`、`message`、`evidence`。`directory` 不需要其他字段；`threads` 需要 `to`；`inbox` 返回当前主体的关注条目，可按 `thread` 过滤；`messages` 需要 `thread`；`message` 需要 `thread` 和 `message`；`evidence` 需要 `message`。`cursor` 只用于分页读取。`threads` 只列本节点的 thread，不列出对端 thread。
+`read.scope` 取 `directory`、`neighbors`、`threads`、`inbox`、`messages`、`message`、`evidence`。`directory` 与 `neighbors` 不需要其他字段；`threads` 可选 `to`；`inbox` 返回当前主体的关注条目，可按 `thread` 过滤；`messages` 需要 `thread`；`message` 需要 `thread` 和 `message`；`evidence` 需要 `message`。`cursor` 只用于分页读取。`threads` 只列本节点的 thread，不列出对端 thread。
 
 `mentions` 只对 `send` 有意义，取 `@all` 或特定 endpoint。它决定谁收到主动关注，不改变消息归属的 thread。`read` 的 `attention` 字段在 `inbox` 和 `messages` 两个 scope 上取 `inbox` 或 `thread`，默认 `inbox`。
 
@@ -121,3 +121,4 @@ Onlyne 不保存任务状态。一条消息要求持续工作时，由运行时�
 - 同一根消息的补充说明进入该消息已有的执行上下文；上下文存在且可用时不创建第二个。
 - 上下文已中止或丢失时，接入返回 `context_lost`，不静默新建上下文。
 - 入站来信由 SystemOne 判定处理动作；接入按动作执行，不按宿主忙闲自行改选动作。
+- 消息携带 `meta.work` 时，`Action(kind: "send")` 与线协议信封完整保留 `meta.work`，接收方与工作流编排器可按 `work.unit` 执行跨线程关联与幂等去重。

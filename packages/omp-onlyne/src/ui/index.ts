@@ -71,7 +71,8 @@ export function registerUi(pi: ExtensionAPI): void {
 			try {
 				let runtime = getRuntime();
 				if (command === "init") {
-					const existing = runtime?.config ?? (await loadConfig(ctx.cwd).catch(() => undefined));
+					// Only refuse init if the runtime is actually running; if unstarted or down, allow init to proceed or retry bootstrap.
+					const existing = runtime?.config;
 					if (existing !== undefined) {
 						ctx.ui.notify(t("configured"), "info");
 						return;

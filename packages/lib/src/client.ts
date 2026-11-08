@@ -22,6 +22,7 @@ import type {
 } from "./delivery.ts";
 import { AwaitedReplies } from "./awaited.ts";
 import type { Waiter } from "./awaited.ts";
+import { workRef } from "./routes/shared.ts";
 
 export type { MsgOptions, SendOptions, SendOutcome } from "./delivery.ts";
 
@@ -32,6 +33,7 @@ interface MaintenanceLoop {
   handle: unknown;
   lastPending: boolean;
   running: boolean;
+  rerunImmediate?: boolean;
 }
 
 export class OnlyneClient {
@@ -100,6 +102,17 @@ export class OnlyneClient {
     if (loop.active.intervalMs !== OnlyneClient.ACTIVE_INTERVAL_MS) this.#arm(loop, OnlyneClient.ACTIVE_INTERVAL_MS);
   }
 
+  /** @internal Schedules an immediate maintenance pass when new inbound or grant work lands locally. */
+  wakeImmediate(): void {
+    const loop = this.#loop;
+    if (loop === undefined || loop.controller.signal.aborted || loop.handle === undefined) return;
+    if (loop.running) {
+      loop.rerunImmediate = true;
+      return;
+    }
+    if (loop.active.intervalMs !== 0) this.#arm(loop, 0);
+  }
+
   #arm(loop: MaintenanceLoop, intervalMs: number): void {
     if (loop.handle !== undefined) loop.clock.clearTimer(loop.handle);
     loop.active.intervalMs = intervalMs;
@@ -116,6 +129,7 @@ export class OnlyneClient {
     }
     if (loop.running) return this.#arm(loop, OnlyneClient.ACTIVE_INTERVAL_MS);
     loop.running = true;
+    loop.rerunImmediate = false;
     try {
       await this.maintain(loop.controller.signal);
       await this.#recover(loop.controller.signal, true);
@@ -130,7 +144,11 @@ export class OnlyneClient {
       loop.lastPending = pending;
       this.#ctx.options.plugins.runtime?.notify?.({ event: 'work-pending', pending });
     }
-    if (!loop.controller.signal.aborted) this.#arm(loop, pending ? OnlyneClient.ACTIVE_INTERVAL_MS : OnlyneClient.IDLE_INTERVAL_MS);
+    if (!loop.controller.signal.aborted) {
+      const nextMs = loop.rerunImmediate ? 0 : (pending ? OnlyneClient.ACTIVE_INTERVAL_MS : OnlyneClient.IDLE_INTERVAL_MS);
+      loop.rerunImmediate = false;
+      this.#arm(loop, nextMs);
+    }
   }
 
   // ---- delivery ---------------------------------------------------------------
@@ -715,16 +733,23 @@ export class OnlyneClient {
       fail('decision_unavailable', 'A send needs response and execution; no plan was chosen.');
     }
     const meta = input.meta;
+    // RFC 0003 §1: the decision may carry the work unit, and a caller may name it in the
+    // input meta; either way it becomes the first-class field a receiver dedupes on.
+    const work = action.work !== undefined
+      ? workRef(action.work, 'action.work')
+      : meta?.work === undefined ? undefined : workRef(meta.work, 'message.meta.work');
     const relation = action.in_reply_to === undefined ? action.relation : action.relation ?? 'reply';
     const message: Message = {
       id: this.#ctx.id(),
       sender: this.#ctx.options.node_id,
       delivery_kind: input.delivery_kind,
       msg: input.msg,
-      ...(action.thread === undefined && action.in_reply_to === undefined && action.mentions === undefined && meta === undefined
+      ...(action.thread === undefined && action.in_reply_to === undefined && action.mentions === undefined
+        && work === undefined && meta === undefined
         ? {}
         : {
             meta: {
+              ...(work === undefined ? {} : { work }),
               ...(action.thread === undefined ? {} : { thread: action.thread }),
               ...(action.in_reply_to === undefined ? {} : { in_reply_to: action.in_reply_to }),
               ...(relation === undefined ? {} : { relation }),

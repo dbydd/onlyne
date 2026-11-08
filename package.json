@@ -8,12 +8,17 @@
     "packages/*"
   ],
   "scripts": {
-    "check": "bun run --filter '@onlyne/lib' check && bun run --filter '@onlyne/node-host' check && bun run --filter omp-onlyne check && bun run --filter '@onlyne/im-core' check && bun run --filter '@onlyne/im-fake' check && bun run --filter '@onlyne/im-lark' check && bun run --filter '@onlyne/im-qq' check && bun run --filter '@onlyne/im-wechat' check && bun run --filter '@onlyne/im-gateway' check && bun run --filter '@onlyne/mcp-core' check && bun run --filter '@onlyne/mcp-gateway' check && bun run --filter '@onlyne/grok-bot' check && bun run --filter '@onlyne/mcp-server' check",
-    "test": "bun run --filter '@onlyne/lib' test && bun run --filter omp-onlyne test && bun run --filter '@onlyne/im-core' test && bun run --filter '@onlyne/im-fake' test && bun run --filter '@onlyne/im-lark' test && bun run --filter '@onlyne/im-qq' test && bun run --filter '@onlyne/im-wechat' test && bun run --filter '@onlyne/im-gateway' test && bun run --filter '@onlyne/mcp-core' test && bun run --filter '@onlyne/mcp-gateway' test && bun run --filter '@onlyne/grok-bot' test && bun run --filter '@onlyne/mcp-server' test",
-    "publish:packages": "for p in lib node-host im-core im-fake im-lark im-qq im-wechat im-gateway mcp-core mcp-gateway grok-bot mcp-server omp-onlyne; do echo \"== packages/$p\"; npm publish \"./packages/$p\" || exit 1; done",
-    "publish:dry": "for p in lib node-host im-core im-fake im-lark im-qq im-wechat im-gateway mcp-core mcp-gateway grok-bot mcp-server omp-onlyne; do echo \"== packages/$p\"; npm publish \"./packages/$p\" --dry-run || exit 1; done",
+    "build": "bun run --filter '@onlyne/lib' build && bun run --filter '@onlyne/node-host' build && bun run --filter '@onlyne/im-core' build && bun run --filter '@onlyne/im-fake' build && bun run --filter '@onlyne/im-lark' build && bun run --filter '@onlyne/im-qq' build && bun run --filter '@onlyne/im-wechat' build && bun run --filter '@onlyne/im-gateway' build && bun run --filter '@onlyne/mcp-core' build && bun run --filter '@onlyne/mcp-gateway' build && bun run --filter '@onlyne/compute-core' build && bun run --filter '@onlyne/compute-gateway' build && bun run --filter '@onlyne/grok-bot' build && bun run --filter '@onlyne/mcp-server' build",
+    "check": "bun run --filter '@onlyne/lib' check && bun run --filter '@onlyne/node-host' check && bun run --filter omp-onlyne check && bun run --filter '@onlyne/im-core' check && bun run --filter '@onlyne/im-fake' check && bun run --filter '@onlyne/im-lark' check && bun run --filter '@onlyne/im-qq' check && bun run --filter '@onlyne/im-wechat' check && bun run --filter '@onlyne/im-gateway' check && bun run --filter '@onlyne/mcp-core' check && bun run --filter '@onlyne/mcp-gateway' check && bun run --filter '@onlyne/compute-core' check && bun run --filter '@onlyne/compute-gateway' check && bun run --filter '@onlyne/grok-bot' check && bun run --filter '@onlyne/mcp-server' check",
+    "test": "bun run build && bun run --filter '@onlyne/lib' test && bun run --filter omp-onlyne test && bun run --filter '@onlyne/im-core' test && bun run --filter '@onlyne/im-fake' test && bun run --filter '@onlyne/im-lark' test && bun run --filter '@onlyne/im-qq' test && bun run --filter '@onlyne/im-wechat' test && bun run --filter '@onlyne/im-gateway' test && bun run --filter '@onlyne/mcp-core' test && bun run --filter '@onlyne/mcp-gateway' test && bun run --filter '@onlyne/compute-core' test && bun run --filter '@onlyne/compute-gateway' test && bun run --filter '@onlyne/grok-bot' test && bun run --filter '@onlyne/mcp-server' test",
+    "publish:packages": "for p in lib node-host im-core im-fake im-lark im-qq im-wechat im-gateway mcp-core mcp-gateway compute-core compute-gateway grok-bot mcp-server omp-onlyne; do echo \"== packages/$p\"; npm publish \"./packages/$p\" || exit 1; done",
+    "publish:dry": "for p in lib node-host im-core im-fake im-lark im-qq im-wechat im-gateway mcp-core mcp-gateway compute-core compute-gateway grok-bot mcp-server omp-onlyne; do echo \"== packages/$p\"; npm publish \"./packages/$p\" --dry-run || exit 1; done",
     "version:list": "bun scripts/version.ts list",
     "version:set": "bun scripts/version.ts",
     "devinstall": "bun scripts/devinstall.ts"
+  },
+  "devDependencies": {
+    "@informalsystems/quint": "^0.33.1",
+    "likec4": "^1.60.0"
   }
 }

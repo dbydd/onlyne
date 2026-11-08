@@ -33,10 +33,15 @@ const compareOrdinal = (a: string, b: string): number => decimal(a) < decimal(b)
 
 export class MessageService {
   readonly #ctx: Context;
+  /** The client's loop, woken immediately when a message is admitted locally; set by the node. */
+  #waker: { wakeImmediate(): void } | undefined;
 
   constructor(ctx: Context) {
     this.#ctx = ctx;
   }
+
+  /** @internal Called by OnlyneNode so local admissions wake the maintenance loop immediately. */
+  bindLoop(waker: { wakeImmediate(): void }): void { this.#waker = waker; }
 
   async admit(auth: Auth, request: SendRequest): Promise<Receipt> {
     const { message } = request;
@@ -95,6 +100,7 @@ export class MessageService {
       }
     });
     if ('error' in outcome) throw new OnlyneError(outcome.error.code, outcome.error.message, outcome.error.details);
+    try { this.#waker?.wakeImmediate(); } catch { /* a loop fault never blocks admission */ }
     this.#ctx.options.plugins.runtime?.notify?.({ event: 'inbound', thread: outcome.receipt.thread_ref, seq: outcome.receipt.seq, sender: message.sender });
     this.#ctx.options.plugins.runtime?.notify?.({ event: 'work-pending', pending: true });
     return requireValue(outcome.receipt);

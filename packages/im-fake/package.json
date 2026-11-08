@@ -1,10 +1,10 @@
 {
   "name": "@onlyne/im-fake",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Scripted in-memory IM connector for Onlyne gateway tests and fixtures",
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -17,16 +17,21 @@
   "publishConfig": { "access": "public" },
   "engines": { "bun": ">=1.4.3" },
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
-  "files": ["src", "README.md", "LICENSE"],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
-    "check": "tsc --noEmit",
-    "test": "bun tests/verify.ts"
+    "build": "tsc",
+    "check": "tsc && tsc -p tsconfig.tests.json",
+    "test": "bun tests/verify.ts",
+    "prepack": "bun run build"
   },
   "dependencies": {
-    "@onlyne/im-core": "^3.1.0",
-    "@onlyne/lib": "^3.1.0"
+    "@onlyne/im-core": "^3.2.0",
+    "@onlyne/lib": "^3.2.0"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

@@ -114,10 +114,15 @@ interface Known {
 
 export class ThreadService {
   readonly #ctx: Context;
+  /** The client's loop, woken immediately when a grant notice is accepted or queued; set by the node. */
+  #waker: { wakeImmediate(): void } | undefined;
 
   constructor(ctx: Context) {
     this.#ctx = ctx;
   }
+
+  /** @internal Called by OnlyneNode so grant notices wake the maintenance loop immediately. */
+  bindLoop(waker: { wakeImmediate(): void }): void { this.#waker = waker; }
 
   async create(auth: Auth, mutation: Mutation & { title: string; id?: string; default?: boolean }): Promise<Thread> {
     if (!auth.actor) fail('unauthenticated', 'Authentication is required.');
@@ -395,6 +400,9 @@ export class ThreadService {
       const next: Grant = { id: grant.id, recipient: this.#ctx.node, thread_ref: ref, revision: grant.revision, acked: grant.acked === true };
       await tx.put(slot, next);
       return next;
+    }).then(result => {
+      try { this.#waker?.wakeImmediate(); } catch { /* a loop fault never blocks grant acceptance */ }
+      return result;
     });
   }
 

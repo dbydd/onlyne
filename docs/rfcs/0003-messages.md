@@ -18,6 +18,7 @@
     "in_reply_to": null,
     "thread": {"owner": "urn:onlyne:agent:lazuli", "id": "thr-research"},
     "mentions": ["@all"],
+    "work": {"unit": "work-exp-01", "parent": null, "attempt": 1},
     "parts": [],
     "data": {}
   }
@@ -27,6 +28,8 @@
 `in_reply_to` 是 MessageRef。库在发送前把本地来信句柄翻译成该 MessageRef，网络只传可验证的引用。接收方不解析对方的本地句柄。
 
 `mentions` 是字符串数组，表达该消息希望谁主动关注。取值为 `@all`（全体成员关注）或特定的 endpoint 别名 / `node_id`（单发关注）。省略或为空表示普通通信。
+
+`work` 是可选的一级工作单元标识，形状为 `{"unit": string, "parent"?: string, "attempt"?: number}`。它把消息与具体的跨线程工作单元（如 issue、worker、算力任务或审批流）解耦关联：即使调用方在另一个对话 thread 中发起 `review`、`close` 或重试，接收方仍可按 `(sender, work.unit)` 或 `work.unit` 做确定性幂等关联，而无需把工作单元身份绑死在单个会话 thread 或机器名上。`work.unit` 为非空字符串，`work.attempt` 为正整数。
 
 ### 消息存盘与投送关注分离
 
@@ -109,7 +112,7 @@
 
 1. 认证调用方并校验其有权代表 `sender`。普通直连发送要求 sender 等于 actor。绑定转发必须有单独授权，授权记录同时指定该消息的回复权威。
 2. 按 `(sender, id)` 查找接收方已存的接纳结果。结果包括已接纳和终态拒绝。命中且内容相同返回原结果。命中且内容不同返回 `id_conflict`。
-3. 内容相同由身份摘要判定。摘要覆盖 `sender`、目标 endpoint、ThreadRef、`in_reply_to` 的关系目标、relation、`mentions`、`delivery_kind` 原文、`msg` 正文、`meta.parts`、`meta.data`。`retry_until` 不属于身份。
+3. 内容相同由身份摘要判定。摘要覆盖 `sender`、目标 endpoint、ThreadRef、`in_reply_to` 的关系目标、relation、`mentions`、`meta.work`、`delivery_kind` 原文、`msg` 正文、`meta.parts`、`meta.data`。`retry_until` 不属于身份。
 4. 评估成员和 thread 状态。非 post 成员或 thread 关闭返回 not_a_member 或 thread_closed，并把该终态拒绝与消息身份一起记录。判定服务暂时不可用等可重试失败不写终态拒绝。
 5. 提交消息条目、回执和待处理项，再返回 201。
 

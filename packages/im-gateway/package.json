@@ -1,10 +1,10 @@
 {
   "name": "@onlyne/im-gateway",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Onlyne IM gateway: one node that hosts platform conversations as resources and pushes events to their handlers",
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -17,29 +17,40 @@
   "publishConfig": { "access": "public" },
   "engines": { "bun": ">=1.4.3" },
   "exports": {
-    ".": "./src/index.ts",
-    "./storage": "./src/storage.ts",
-    "./migrate": "./src/migrate.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./storage": {
+      "types": "./dist/storage.d.ts",
+      "default": "./dist/storage.js"
+    },
+    "./migrate": {
+      "types": "./dist/migrate.d.ts",
+      "default": "./dist/migrate.js"
+    }
   },
   "bin": {
-    "onlyne-im-gateway": "src/main.ts",
-    "onlyne-im-migrate": "src/migrate-main.ts"
+    "onlyne-im-gateway": "dist/main.js",
+    "onlyne-im-migrate": "dist/migrate-main.js"
   },
-  "files": ["src", "README.md", "LICENSE"],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
-    "check": "tsc --noEmit",
-    "test": "bun tests/verify.ts && bun tests/channels.ts && bun tests/migration.ts && bun tests/observability.ts"
+    "build": "tsc",
+    "check": "tsc && tsc -p tsconfig.tests.json",
+    "test": "bun tests/verify.ts && bun tests/channels.ts && bun tests/migration.ts && bun tests/observability.ts",
+    "prepack": "bun run build"
   },
   "dependencies": {
-    "@onlyne/im-core": "^3.1.0",
-    "@onlyne/im-fake": "^3.1.0",
-    "@onlyne/lib": "^3.1.0",
-    "@onlyne/node-host": "^3.1.0"
+    "@onlyne/im-core": "^3.2.0",
+    "@onlyne/im-fake": "^3.2.0",
+    "@onlyne/lib": "^3.2.0",
+    "@onlyne/node-host": "^3.2.0"
   },
   "peerDependencies": {
-    "@onlyne/im-lark": "^3.1.0",
-    "@onlyne/im-qq": "^3.1.0",
-    "@onlyne/im-wechat": "^3.1.0"
+    "@onlyne/im-lark": "^3.2.0",
+    "@onlyne/im-qq": "^3.2.0",
+    "@onlyne/im-wechat": "^3.2.0"
   },
   "peerDependenciesMeta": {
     "@onlyne/im-lark": { "optional": true },
@@ -47,9 +58,9 @@
     "@onlyne/im-wechat": { "optional": true }
   },
   "devDependencies": {
-    "@onlyne/im-lark": "^3.1.0",
-    "@onlyne/im-qq": "^3.1.0",
-    "@onlyne/im-wechat": "^3.1.0",
+    "@onlyne/im-lark": "^3.2.0",
+    "@onlyne/im-qq": "^3.2.0",
+    "@onlyne/im-wechat": "^3.2.0",
     "@types/bun": "^1.3.0",
     "typescript": "^5.9.0"
   }

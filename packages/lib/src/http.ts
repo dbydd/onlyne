@@ -62,8 +62,13 @@ export function createHttpHandler(services: HttpServices): (request: Request) =>
   async function handle(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
-      if (!url.pathname.startsWith(`${PREFIX}/`)) fail('not_found', 'Unknown route.');
-      const path = url.pathname.slice(PREFIX.length).split('/').filter(segment => segment.length > 0).map(segment => {
+      // A shared listener mounts each node under its own path prefix (`/nodes/<id>/onlyne/v3`),
+      // so the prefix is located inside the path rather than assumed at its start. Only the
+      // route segments are sliced; `request.url` stays untouched, because the signature covers
+      // exactly the `pathname + search` the sender signed (RFC 0017).
+      const mount = url.pathname.lastIndexOf(`${PREFIX}/`);
+      if (mount < 0) fail('not_found', 'Unknown route.');
+      const path = url.pathname.slice(mount + PREFIX.length).split('/').filter(segment => segment.length > 0).map(segment => {
         try {
           return decodeURIComponent(segment);
         } catch {

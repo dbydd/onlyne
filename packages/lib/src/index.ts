@@ -1,5 +1,6 @@
 export type * from './types.ts';
 export { trustPhase } from './types.ts';
+export type { WorkRef } from './types.ts';
 export { OnlyneError } from './core.ts';
 export { OnlyneNode } from './node.ts';
 export { ThreadService } from './threads.ts';

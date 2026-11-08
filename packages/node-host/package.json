@@ -1,10 +1,10 @@
 {
   "name": "@onlyne/node-host",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Shared Onlyne node host pieces: identity keys, DNS-SD discovery, the gateway trust terminal, and message catalogs",
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -17,20 +17,51 @@
   "publishConfig": { "access": "public" },
   "engines": { "bun": ">=1.4.3" },
   "exports": {
-    ".": "./src/index.ts",
-    "./keys": "./src/keys.ts",
-    "./network": "./src/network.ts",
-    "./i18n": "./src/i18n.ts",
-    "./node": "./src/node.ts",
-    "./store": "./src/store.ts",
-    "./types": "./src/types.ts",
-    "./acquire": "./src/acquire.ts",
-    "./host-text": "./src/host-text.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./keys": {
+      "types": "./dist/keys.d.ts",
+      "default": "./dist/keys.js"
+    },
+    "./network": {
+      "types": "./dist/network.d.ts",
+      "default": "./dist/network.js"
+    },
+    "./i18n": {
+      "types": "./dist/i18n.d.ts",
+      "default": "./dist/i18n.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "default": "./dist/node.js"
+    },
+    "./store": {
+      "types": "./dist/store.d.ts",
+      "default": "./dist/store.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "default": "./dist/types.js"
+    },
+    "./acquire": {
+      "types": "./dist/acquire.d.ts",
+      "default": "./dist/acquire.js"
+    },
+    "./host-text": {
+      "types": "./dist/host-text.d.ts",
+      "default": "./dist/host-text.js"
+    }
   },
-  "files": ["src", "README.md", "LICENSE"],
-  "scripts": { "check": "tsc --noEmit" },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc",
+    "prepack": "bun run build"
+  },
   "dependencies": {
-    "@onlyne/lib": "^3.1.0",
+    "@onlyne/lib": "^3.2.0",
     "bonjour-service": "^1.4.4"
   },
   "devDependencies": { "@types/bun": "^1.3.0", "typescript": "^5.9.0" }
