@@ -28,6 +28,20 @@ import { createWidgetHost, createWidgetRegistry } from "./widgets.ts";
 import { registerBuiltinViews } from "./views.ts";
 import { registerOmpPanels } from "./omp-panels.ts";
 import { registerCharacterPanel } from "./character-panel.ts";
+import { registerDeskSurfaces } from "./surfaces.ts";
+import {
+	BUILTIN_WORKSPACES,
+	LAYOUT_STORAGE_KEY,
+	defaultLayout,
+	moveInRail,
+	normalizeLayout,
+	type DeskLayout,
+	type WorkspaceSpec,
+} from "./layout.ts";
+import type { WorkspaceContribution } from "./api.ts";
+import { assignDeliveryErrors, chord, commandKey, formatDeskHash, formatWhen, isTextControl, middleEllipsis, navigationFromKey, parseDeskHash, shouldToastDelivery, type DeliveryNote } from "../desk-format.ts";
+
+const MOD = commandKey(navigator.platform, navigator.userAgent);
 
 /* ------------------------------------------------------------------ */
 /* small DOM helpers                                                   */
@@ -97,7 +111,20 @@ type IconName =
 	| "reply"
 	| "refresh"
 	| "attach"
-	| "sticker";
+	| "sticker"
+	| "chat"
+	| "inbox"
+	| "peers"
+	| "trust"
+	| "threads"
+	| "box"
+	| "pulse"
+	| "plug"
+	| "team"
+	| "sun"
+	| "moon"
+	| "search"
+	| "dock";
 
 const ICON_PATHS: Record<IconName, string> = {
 	plus: "M12 5v14M5 12h14",
@@ -113,6 +140,32 @@ const ICON_PATHS: Record<IconName, string> = {
 	refresh: "M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5",
 	attach: "M20.5 11.5 12 20a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8",
 	sticker: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM8.6 14.2a4.6 4.6 0 0 0 6.8 0M9.2 9.4v.6M14.8 9.4v.6",
+	chat: "M5 6.5h14a2 2 0 0 1 2 2V16a2 2 0 0 1-2 2H9l-4 3v-3H5a2 2 0 0 1-2-2V8.5a2 2 0 0 1 2-2Z",
+	inbox: "M4 13h4.5a3.5 3.5 0 0 0 7 0H20v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-5Zm0 0 2.2-6.2A2 2 0 0 1 8.1 5.5h7.8a2 2 0 0 1 1.9 1.3L20 13",
+	peers: "M8 10.5a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2Zm8 .6a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2ZM3.5 18.5a4.6 4.6 0 0 1 9 0M13 18.5a4.6 4.6 0 0 1 7.5-1.2",
+	trust: "M12 3.2 19 6.2v5.6c0 4.2-2.8 6.8-7 8.5-4.2-1.7-7-4.3-7-8.5V6.2l7-3Z",
+	threads: "M8 6.5h12M8 12h12M8 17.5H14M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01",
+	box: "M3.5 8 12 3.5 20.5 8v8.5L12 21 3.5 16.5V8Zm8.5 4.2 8.5-4.2M12 12.2V21",
+	pulse: "M3 12h4l2.2-5.5 4.2 11 2.3-5.5H21",
+	plug: "M9 7v4M15 7v4M8 11h8v3a4 4 0 0 1-8 0v-3ZM12 18v3",
+	team: "M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM5.5 19a6.5 6.5 0 0 1 13 0",
+	sun: "M12 16.2a4.2 4.2 0 1 0 0-8.4 4.2 4.2 0 0 0 0 8.4ZM12 2.6v2.1M12 19.3v2.1M2.6 12h2.1M19.3 12h2.1M5.1 5.1l1.5 1.5M17.4 17.4l1.5 1.5M18.9 5.1l-1.5 1.5M6.6 17.4l-1.5 1.5",
+	moon: "M20 14.6A7.6 7.6 0 1 1 9.4 4 6.2 6.2 0 0 0 20 14.6Z",
+	search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM16.5 16.5 21 21",
+	dock: "M4 5h16v14H4V5Zm10 0v14",
+};
+
+const WORKSPACE_ICONS: Record<string, IconName> = {
+	chat: "chat",
+	inbox: "inbox",
+	neighbors: "peers",
+	trust: "trust",
+	threads: "threads",
+	resources: "box",
+	health: "pulse",
+	integrations: "plug",
+	team: "team",
+	settings: "settings",
 };
 
 function icon(name: IconName, size = 16): SVGSVGElement {
@@ -228,8 +281,15 @@ interface ThemeEntry {
 
 interface Refs {
 	app: HTMLElement;
+	mast: HTMLElement;
+	demoChip: HTMLElement;
+	themeButton: HTMLButtonElement;
 	railBots: HTMLElement;
 	railFoot: HTMLElement;
+	botSwitch: HTMLElement;
+	dock: HTMLElement;
+	dockTitle: HTMLElement;
+	dockBody: HTMLElement;
 	nav: HTMLElement;
 	navTitle: HTMLElement;
 	navSub: HTMLElement;
@@ -294,6 +354,109 @@ let runtimeStatusList: HTMLElement | null = null;
 let runtimeFramesBox: HTMLElement | null = null;
 let runtimeModelChip: HTMLElement | null = null;
 let membersOpen = window.matchMedia("(min-width: 1081px)").matches;
+let shellReady = false;
+let layout: DeskLayout = defaultLayout(BUILTIN_WORKSPACES.map((item) => item.id));
+let extraWorkspaces: WorkspaceSpec[] = [];
+let dockKey = "";
+let goChord = 0;
+
+function railCatalog(): WorkspaceSpec[] {
+	return [...BUILTIN_WORKSPACES, ...extraWorkspaces].filter((item) => item.group !== "studio");
+}
+
+function catalogIds(): string[] {
+	return railCatalog().map((item) => item.id);
+}
+
+function workspaceById(id: string): WorkspaceSpec | undefined {
+	return [...BUILTIN_WORKSPACES, ...extraWorkspaces].find((item) => item.id === id);
+}
+
+function loadLayout(): void {
+	try {
+		layout = normalizeLayout(JSON.parse(localStorage.getItem(LAYOUT_STORAGE_KEY) ?? "null"), catalogIds());
+	} catch {
+		layout = defaultLayout(catalogIds());
+	}
+}
+
+function visibleRail(): WorkspaceSpec[] {
+	const byId = new Map(railCatalog().map((item) => [item.id, item]));
+	return layout.rail.flatMap((id) => {
+		if (layout.hidden.includes(id)) return [];
+		const spec = byId.get(id);
+		return spec === undefined ? [] : [spec];
+	});
+}
+
+function persistLayout(): void {
+	layout = normalizeLayout(layout, catalogIds());
+	localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layout));
+	if (refs) {
+		refs.app.classList.toggle("has-dock", layout.dock !== null);
+		renderRail();
+		renderDock();
+	}
+}
+
+function setDock(id: string | null): void {
+	if (layout.dock === id) return;
+	dockKey = "";
+	layout = { ...layout, dock: id };
+	persistLayout();
+	renderStatusbar();
+	writeRoute();
+}
+
+function toggleDock(): void {
+	if (layout.dock) setDock(null);
+	else setDock(activePanel ?? "health");
+}
+
+function resetLayout(): void {
+	dockKey = "";
+	layout = defaultLayout(catalogIds());
+	localStorage.removeItem(LAYOUT_STORAGE_KEY);
+	persistLayout();
+}
+
+function openWorkspace(spec: WorkspaceSpec): void {
+	if (spec.panel === null) showChat({ focus: true });
+	else openPanel(spec.panel);
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+	if (!(target instanceof HTMLElement)) return false;
+	if (isTextControl(target.tagName, target.isContentEditable)) return true;
+	const host = target.closest("input, textarea, select, [contenteditable='true']");
+	return host instanceof HTMLElement && isTextControl(host.tagName, host.isContentEditable);
+}
+
+function registerWorkspaceEntry(botId: string | undefined, entry: WorkspaceContribution): () => void {
+	const id = botId ? `${botId}:${entry.id}` : entry.id;
+	const spec: WorkspaceSpec = {
+		id,
+		title: entry.title,
+		hint: entry.hint ?? "",
+		shortcut: entry.shortcut ?? "",
+		group: entry.group ?? "studio",
+		panel: id,
+	};
+	extraWorkspaces = extraWorkspaces.filter((item) => item.id !== id);
+	extraWorkspaces.push(spec);
+	layout = normalizeLayout(layout, catalogIds());
+	if (shellReady) renderRail();
+	return () => {
+		extraWorkspaces = extraWorkspaces.filter((item) => item.id !== id);
+		if (layout.dock === id) layout = { ...layout, dock: null };
+		layout = normalizeLayout(layout, catalogIds());
+		dockKey = "";
+		if (shellReady) {
+			renderRail();
+			renderDock();
+		}
+	};
+}
 
 const drafts = new Map<string, string>();
 const attachmentsByConversation = new Map<string, AttachmentEntry[]>();
@@ -971,12 +1134,61 @@ function handleEvent(event: DesktopEvent): void {
 		}
 		return;
 	}
-	if (type === "error") {
-		const message = typeof event["message"] === "string" ? event["message"] : typeof event["error"] === "string" ? event["error"] : "The host reported an unknown error.";
-		notify(message, "error");
+	if (type === "typing") {
+		const conversationId = typeof event.conversationId === "string" ? event.conversationId : "";
+		const botId = typeof event.botId === "string" ? event.botId : "";
+		if (!conversationId) return;
+		if (event["done"] === true) typingBots.delete(conversationId);
+		else typingBots.set(conversationId, { botId, demo: event["demo"] === true });
+		if (selectedConversationId === conversationId) {
+			messageSignature = "";
+			renderMessages();
+		}
 		return;
 	}
-	notify(`Unhandled host event: ${type || "(empty)"}`, "warn");
+	if (type === "error") {
+		const raw = typeof event["message"] === "string" ? event["message"] : typeof event["error"] === "string" ? event["error"] : "The host reported an unknown error.";
+		const message = humanRuntimeError(raw);
+		const conversationId = typeof event.conversationId === "string" ? event.conversationId : "";
+		const inline = conversationId.length > 0;
+		if (inline) {
+			const queued = queuedErrors.get(conversationId) ?? [];
+			queued.push({ text: message, at: Date.now() });
+			queuedErrors.set(conversationId, queued);
+			flushDelivery(conversationId);
+			messageSignature = "";
+			if (selectedConversationId === conversationId) renderMessages();
+		}
+		if (shouldToastDelivery(inline)) notify(message, "error");
+		return;
+	}
+	if (type.startsWith("onlyne.") || type === "context") return;
+}
+
+const failedDelivery = new Map<string, string>();
+const dismissedFailures = new Set<string>();
+const queuedErrors = new Map<string, DeliveryNote[]>();
+let errorListOpen = false;
+
+function flushDelivery(conversationId: string): void {
+	const mine = new Map<string, string>();
+	for (const [id, text] of failedDelivery) {
+		const message = state.messages.find(item => item.id === id);
+		if (message?.conversationId === conversationId) mine.set(id, text);
+	}
+	const result = assignDeliveryErrors(state.messages, conversationId, mine, dismissedFailures, queuedErrors.get(conversationId) ?? []);
+	for (const id of mine.keys()) if (!result.failures.has(id)) failedDelivery.delete(id);
+	for (const [id, text] of result.failures) failedDelivery.set(id, text);
+	if (result.queued.length > 0) queuedErrors.set(conversationId, result.queued);
+	else queuedErrors.delete(conversationId);
+}
+const typingBots = new Map<string, { botId: string; demo: boolean }>();
+
+function humanRuntimeError(message: string): string {
+	if (/executable not found|enoent|spawn omp|omp/i.test(message)) {
+		return "No model runtime is available. Install OMP and put the omp command on PATH. The demo desk simulates a reply instead, and labels it Demo.";
+	}
+	return message;
 }
 
 function setRuntime(conversationId: string, botId: string, status: string, message?: string): void {
@@ -1093,17 +1305,36 @@ function buildShell(): void {
 	app.replaceChildren();
 	app.className = "app";
 	app.classList.toggle("members-hidden", !membersOpen);
+	app.classList.toggle("has-dock", layout.dock !== null);
+
+	const demoChip = h("span", { class: "demo-chip", hidden: true, text: "Demo" });
+	const themeButton = h("button", {
+		class: "theme-toggle",
+		type: "button",
+		"aria-label": "Toggle color theme",
+		title: "Toggle theme",
+		onclick: () => void toggleTheme(),
+	}, icon("sun", 16), h("span", { class: "theme-label", text: "Light" }));
+	const commandButton = h("button", { class: "command-trigger", type: "button", onclick: openPalette },
+		icon("search", 15),
+		h("span", { class: "command-label", text: "Search or jump" }),
+		h("kbd", { text: chord(MOD, "K") }),
+	);
+	const mast = h("header", { class: "mast" },
+		h("div", { class: "mast-brand" }, h("span", { class: "wordmark", text: "Onlyne" }), demoChip),
+		commandButton,
+		h("div", { class: "mast-tools" }, themeButton),
+	);
 
 	const railBots = h("div", { class: "rail-top", id: "rail-bots" });
 	const railFoot = h(
 		"div",
 		{ class: "rail-foot" },
-		h("button", { class: "rail-btn", type: "button", title: "Command palette (⌘K)", "aria-label": "Open command palette", onclick: openPalette }, icon("command")),
-		h("button", { class: "rail-btn", type: "button", title: "Node and peers", "aria-label": "Open node and peers", onclick: () => openPanel("node") }, icon("node")),
-		h("button", { class: "rail-btn", type: "button", title: "Settings", "aria-label": "Open settings", onclick: () => openPanel("settings") }, icon("settings")),
+		h("button", { class: "rail-link", type: "button", title: "Keyboard shortcuts", "aria-label": "Keyboard shortcuts", onclick: openShortcuts }, icon("command")),
 	);
 	const rail = h("nav", { class: "rail", id: "rail", "aria-label": "Bots" }, railBots, railFoot);
 
+	const botSwitch = h("div", { class: "bot-switch", id: "bot-switch", role: "tablist", "aria-label": "Bots" });
 	const navTitle = h("div", { class: "nav-title", id: "nav-title" });
 	const navSub = h("div", { class: "nav-sub", id: "nav-sub" });
 	const navSearch = h("input", {
@@ -1120,7 +1351,7 @@ function buildShell(): void {
 	const nav = h(
 		"aside",
 		{ class: "nav", id: "nav", "aria-label": "Conversations" },
-		h("div", { class: "nav-head" }, navTitle, navSub),
+		h("div", { class: "nav-head" }, botSwitch, navTitle, navSub),
 		h("div", { class: "nav-search" }, navSearch),
 		navSections,
 		navViews,
@@ -1251,12 +1482,39 @@ function buildShell(): void {
 	const dialogs = h("div", { class: "dialog-layer", id: "dialogs" });
 	const modals = h("div", { class: "modal-layer", id: "modals", hidden: true });
 	const backdrop = h("div", { class: "drawer-backdrop", id: "drawer-backdrop", hidden: true });
+	const dockTitle = h("span", { id: "dock-title", text: "Dock" });
+	const dockBody = h("div", { class: "dock-body" });
+	const dock = h("aside", { class: "dock", id: "dock", hidden: layout.dock === null, "aria-label": "Docked panel" },
+		h("div", { class: "dock-head" }, dockTitle, h("button", { class: "btn ghost sm", type: "button", onclick: () => setDock(null) }, "Close")),
+		dockBody,
+	);
+	dock.addEventListener("dragover", (event) => {
+		event.preventDefault();
+		dock.classList.add("drop");
+	});
+	dock.addEventListener("dragleave", () => dock.classList.remove("drop"));
+	dock.addEventListener("drop", (event) => {
+		event.preventDefault();
+		dock.classList.remove("drop");
+		const id = event.dataTransfer?.getData("text/plain") ?? "";
+		const spec = workspaceById(id);
+		if (!spec || spec.panel === null) return;
+		setDock(spec.panel);
+		if (activePanel === spec.panel) showChat();
+	});
 
-	app.append(rail, nav, main, aside, toasts, dialogs, modals, backdrop);
+	app.append(mast, rail, nav, main, aside, dock, toasts, dialogs, modals, backdrop);
 
 	refs = {
 		app,
+		mast,
+		demoChip,
+		themeButton,
 		railBots,
+		botSwitch,
+		dock,
+		dockTitle,
+		dockBody,
 		railFoot,
 		nav,
 		navTitle,
@@ -1298,9 +1556,16 @@ function buildShell(): void {
 		modals,
 		backdrop,
 	};
+	shellReady = true;
 }
 
 function wireStaticEvents(): void {
+	refs.transcript.addEventListener("mousedown", (event) => {
+		const target = event.target;
+		if (!(target instanceof HTMLElement)) return;
+		if (target.closest("button, a, input, textarea, summary")) return;
+		event.preventDefault();
+	});
 	refs.transcript.addEventListener("scroll", () => {
 		const node = refs.transcript;
 		stickToBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 56;
@@ -1360,9 +1625,23 @@ function wireStaticEvents(): void {
 	});
 	refs.backdrop.addEventListener("click", closeDrawers);
 	document.addEventListener("keydown", (event) => {
+		if (refs.app.classList.contains("nav-open")) {
+			if (event.key === "Escape") {
+				event.preventDefault();
+				closeDrawers();
+				return;
+			}
+			if (event.key === "Tab") trapDrawerFocus(event);
+		}
+		if (isTypingTarget(event.target)) return;
 		if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
 			event.preventDefault();
 			openPalette();
+			return;
+		}
+		if ((event.metaKey || event.ctrlKey) && event.key === "\\") {
+			event.preventDefault();
+			toggleDock();
 			return;
 		}
 		if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "n") {
@@ -1373,7 +1652,32 @@ function wireStaticEvents(): void {
 		if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "c") {
 			event.preventDefault();
 			openPanel("character");
+			return;
 		}
+		if (event.metaKey || event.ctrlKey || event.altKey) return;
+		if (event.key === "?") {
+			event.preventDefault();
+			openShortcuts();
+			return;
+		}
+		const screens: Record<string, string> = {};
+		for (const spec of [...BUILTIN_WORKSPACES, ...extraWorkspaces]) {
+			if (spec.shortcut.length > 0) screens[spec.shortcut] = spec.panel ?? "chat";
+		}
+		const step = navigationFromKey({ armed: goChord }, {
+			key: event.key,
+			target: "other",
+			meta: event.metaKey,
+			ctrl: event.ctrlKey,
+			alt: event.altKey,
+			now: Date.now(),
+		}, screens);
+		goChord = step.clock.armed;
+		if (step.screen === null) return;
+		const spec = [...BUILTIN_WORKSPACES, ...extraWorkspaces].find((item) => (item.panel ?? "chat") === step.screen);
+		if (!spec) return;
+		event.preventDefault();
+		openWorkspace(spec);
 	});
 	window.addEventListener("online", () => {
 		reconnectDelay = 1000;
@@ -1389,6 +1693,7 @@ function wireStaticEvents(): void {
 			void refresh().catch(() => undefined);
 		}
 	});
+	window.addEventListener("hashchange", () => restoreRoute());
 	window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
 		if (themeSetting === "system") applyTheme("system");
 	});
@@ -1401,58 +1706,152 @@ function wireStaticEvents(): void {
 function renderAll(): void {
 	ensureSelection();
 	applyAppearance();
+	renderMast();
 	renderRail();
 	renderNav();
 	renderTopbar();
 	renderView();
 	renderChat();
 	renderAside();
+	renderDock();
 	renderStatusbar();
 	renderBanner();
 }
 
+function renderMast(): void {
+	const light = document.documentElement.dataset["theme"] === "light";
+	refs.themeButton.replaceChildren(icon(light ? "moon" : "sun", 16), h("span", { class: "theme-label", text: light ? "Dark" : "Light" }));
+	refs.themeButton.title = light ? "Switch to dark" : "Switch to light";
+	refs.themeButton.setAttribute("aria-label", refs.themeButton.title);
+}
+
+async function toggleTheme(): Promise<void> {
+	const next = document.documentElement.dataset["theme"] === "light" ? "dark" : "light";
+	applyTheme(next);
+	themeDirty = false;
+	renderMast();
+	try {
+		await command("settings.save", { settings: { ...currentSettings(), theme: next } });
+		await refresh().catch(() => undefined);
+	} catch (error) {
+		notify(errText(error), "error");
+	}
+}
+
+async function markDemo(): Promise<void> {
+	try {
+		const health = await command<{ demo?: boolean }>("desktop.health");
+		refs.demoChip.hidden = health?.demo !== true;
+	} catch {
+		refs.demoChip.hidden = true;
+	}
+}
+
+function renderDock(): void {
+	const id = layout.dock;
+	refs.app.classList.toggle("has-dock", id !== null);
+	refs.dock.hidden = id === null;
+	if (id === null) {
+		dockKey = "";
+		return;
+	}
+	const panel = panels.get(id);
+	refs.dockTitle.textContent = panel?.title ?? "Dock";
+	if (id === activePanel) {
+		if (dockKey === "stage") return;
+		dockKey = "stage";
+		refs.dockBody.replaceChildren(
+			h("div", { class: "desk-empty" },
+				h("h2", { text: "Already on stage" }),
+				h("p", { text: "This panel is the main view. Dock a different one to keep it beside the conversation." })),
+		);
+		return;
+	}
+	if (dockKey === id && refs.dockBody.childElementCount > 0) return;
+	dockKey = id;
+	if (!panel) {
+		refs.dockBody.replaceChildren(h("p", { class: "lede", text: "That panel is no longer registered." }));
+		return;
+	}
+	try {
+		refs.dockBody.replaceChildren(panel.render(state));
+	} catch (error) {
+		refs.dockBody.replaceChildren(h("div", { class: "invalid", text: errText(error) }));
+	}
+}
+
 function renderRail(): void {
 	refs.railBots.replaceChildren();
-	const all = h(
-		"button",
-		{
-			class: `rail-bot all${selectedBotId === null ? " on" : ""}`,
-			type: "button",
-			title: "All bots",
-			"aria-label": "All bots",
-			"aria-pressed": String(selectedBotId === null),
-			onclick: () => selectBot(null),
-		},
-		"ALL",
-	);
-	refs.railBots.append(all);
-	for (const bot of state.bots) {
-		const busy = state.conversations.some(
-			(conversation) => conversation.botIds.includes(bot.id) && hasActiveStream(conversation.id),
-		);
-		const avatar = botAvatarOf(bot);
+	let previousGroup = "";
+	for (const spec of visibleRail()) {
+		if (previousGroup.length > 0 && previousGroup !== spec.group) refs.railBots.append(h("span", { class: "rail-sep", "aria-hidden": "true" }));
+		previousGroup = spec.group;
+		const active = spec.panel === null ? activePanel === null : activePanel === spec.panel;
+		const glyph = WORKSPACE_ICONS[spec.id] ?? "node";
 		const button = h(
 			"button",
 			{
-				class: `rail-bot${selectedBotId === bot.id ? " on" : ""}`,
+				class: `rail-link${active ? " on" : ""}`,
 				type: "button",
-				title: bot.name,
-				"aria-label": `Show conversations with ${bot.name}`,
-				"aria-pressed": String(selectedBotId === bot.id),
-				onclick: () => selectBot(bot.id),
+				title: `${spec.title}. ${spec.hint}. Drag to reorder. Right-click to dock.`,
+				"aria-label": spec.title,
+				"aria-current": active ? "page" : undefined,
+				"data-workspace": spec.id,
+				onclick: () => { if (!suppressRailClick) openWorkspace(spec); },
 			},
-			avatar ? h("img", { class: "rail-avatar", src: mediaUrl(avatar), alt: "", loading: "lazy", decoding: "async" }) : initials(bot.name),
-			busy ? h("span", { class: "dot run", "aria-hidden": "true" }) : null,
+			icon(glyph, 18),
 		);
+		button.addEventListener("pointerdown", (event) => {
+			if (event.button !== 0) return;
+			const pointerId = event.pointerId;
+			const startY = event.clientY;
+			let dragging = false;
+			let targetId = "";
+			const onMove = (ev: PointerEvent): void => {
+				if (ev.pointerId !== pointerId) return;
+				if (!dragging && Math.abs(ev.clientY - startY) < 8) return;
+				dragging = true;
+				suppressRailClick = true;
+				targetId = "";
+				for (const item of refs.railBots.querySelectorAll<HTMLElement>(".rail-link")) {
+					const box = item.getBoundingClientRect();
+					const hit = ev.clientY >= box.top && ev.clientY <= box.bottom;
+					item.classList.toggle("drop", hit && item.dataset["workspace"] !== spec.id);
+					if (hit) targetId = item.dataset["workspace"] ?? "";
+				}
+			};
+			const onUp = (ev: PointerEvent): void => {
+				if (ev.pointerId !== pointerId) return;
+				window.removeEventListener("pointermove", onMove);
+				window.removeEventListener("pointerup", onUp);
+				for (const item of refs.railBots.querySelectorAll(".rail-link")) item.classList.remove("drop");
+				if (dragging && targetId.length > 0 && targetId !== spec.id) {
+					layout = moveInRail(layout, spec.id, layout.rail.indexOf(targetId));
+					persistLayout();
+					refs.railBots.querySelector<HTMLButtonElement>(`[data-workspace="${spec.id}"]`)?.focus();
+				}
+				window.setTimeout(() => { suppressRailClick = false; }, 0);
+			};
+			window.addEventListener("pointermove", onMove);
+			window.addEventListener("pointerup", onUp);
+		});
+		button.addEventListener("keydown", (event) => {
+			if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+			event.preventDefault();
+			const index = layout.rail.indexOf(spec.id);
+			const to = event.key === "ArrowUp" ? Math.max(0, index - 1) : Math.min(layout.rail.length - 1, index + 1);
+			if (to === index) return;
+			layout = moveInRail(layout, spec.id, to);
+			persistLayout();
+			refs.railBots.querySelector<HTMLButtonElement>(`[data-workspace="${spec.id}"]`)?.focus();
+		});
+		button.addEventListener("contextmenu", (event) => {
+			if (spec.panel === null) return;
+			event.preventDefault();
+			setDock(layout.dock === spec.panel ? null : spec.panel);
+		});
 		refs.railBots.append(button);
 	}
-	refs.railBots.append(
-		h(
-			"button",
-			{ class: "rail-add", type: "button", title: "Create a bot", "aria-label": "Create a bot", onclick: () => openBotEditor() },
-			icon("plus", 18),
-		),
-	);
 }
 
 function selectBot(id: string | null): void {
@@ -1470,7 +1869,41 @@ function selectBot(id: string | null): void {
 	activateBotPlugins();
 }
 
+function renderBotSwitch(): void {
+	refs.botSwitch.replaceChildren();
+	const all = h("button", {
+		class: `bot-chip${selectedBotId === null ? " on" : ""}`,
+		type: "button",
+		role: "tab",
+		"aria-selected": selectedBotId === null ? "true" : "false",
+		onclick: () => selectBot(null),
+	}, "All");
+	refs.botSwitch.append(all);
+	for (const bot of state.bots) {
+		const busy = state.conversations.some((conversation) => conversation.botIds.includes(bot.id) && hasActiveStream(conversation.id));
+		refs.botSwitch.append(h("button", {
+			class: `bot-chip${selectedBotId === bot.id ? " on" : ""}`,
+			type: "button",
+			role: "tab",
+			title: bot.name,
+			"aria-selected": selectedBotId === bot.id ? "true" : "false",
+			onclick: () => selectBot(bot.id),
+		}, initials(bot.name), busy ? h("span", { class: "dot run", "aria-hidden": "true" }) : false));
+	}
+	refs.botSwitch.append(h("button", {
+		class: "bot-chip add",
+		type: "button",
+		title: "Create a bot",
+		"aria-label": "Create a bot",
+		onclick: () => openBotEditor(),
+	}, icon("plus", 14)));
+}
+
 function renderNav(): void {
+	renderBotSwitch();
+	if (document.activeElement instanceof HTMLElement && refs.navViews.contains(document.activeElement) && activePanel !== document.activeElement.dataset["panel"]) {
+		document.activeElement.blur();
+	}
 	refs.navTitle.textContent = selectedBotId ? botName(selectedBotId) : "All bots";
 	const nodeId = currentSettings().nodeId;
 	const shortNode = nodeId ? nodeId.split(":").filter(Boolean).slice(-1)[0] : "node not configured";
@@ -1534,7 +1967,7 @@ function renderNav(): void {
 					title: `${conversation.title} — ${memberLabel}`,
 					onclick: () => selectConversation(conversation.id),
 				},
-				h("span", { class: "chan-icon", text: conversation.kind === "group" ? "#" : "@" }),
+				h("span", { class: "chan-icon", text: conversation.kind === "group" ? "G" : "D" }),
 				h("span", { class: "chan-title", text: conversation.title }),
 				busy ? h("span", { class: "chan-dot", title: "A bot is responding" }) : h("span", { class: "chan-meta", text: relativeTime(last) }),
 			);
@@ -1542,41 +1975,57 @@ function renderNav(): void {
 		}
 	}
 	renderNavViews();
+	syncChrome();
+}
+
+const DESK_PANELS = new Set(["inbox", "neighbors", "trust", "threads", "resources", "health", "integrations", "team"]);
+
+let libraryOpen = false;
+let suppressRailClick = false;
+
+function developerMode(): boolean {
+	return localStorage.getItem("onlyne.desk.developer") === "1";
+}
+
+function syncChrome(): void {
+	const docked = layout.dock !== null;
+	refs.app.classList.toggle("members-hidden", docked || activePanel !== null || !membersOpen);
 }
 
 function renderNavViews(): void {
+	refs.navSections.querySelectorAll(".library").forEach(node => node.remove());
 	refs.navViews.replaceChildren();
-	refs.navViews.append(h("div", { class: "section" }, h("span", { text: "Views" })));
-	const entries: Array<{ id: string | null; title: string }> = [{ id: null, title: "Chat" }];
+	const railPanels = new Set(visibleRail().flatMap((item) => item.panel === null ? [] : [item.panel]));
 	const activeBots = uiActiveBotIds();
-	for (const panel of panels.values()) {
-		if (panel.botId && !activeBots.has(panel.botId)) continue;
-		entries.push({ id: panel.id, title: panel.title });
-	}
+	const entries = [...panels.values()].filter((panel) => !railPanels.has(panel.id) && (!panel.botId || activeBots.has(panel.botId)));
+	if (entries.length === 0) return;
+	const details = h("details", { class: "library", open: libraryOpen });
+	const summary = h("summary", { text: "Library" });
+	details.append(summary);
 	for (const entry of entries) {
-		const active = entry.id === null ? activePanel === null : activePanel === entry.id;
-		refs.navViews.append(
-			h(
-				"button",
-				{
-					class: `view-link${active ? " on" : ""}`,
-					type: "button",
-					"aria-current": active ? "page" : undefined,
-					onclick: () => (entry.id === null ? showChat() : openPanel(entry.id)),
-				},
-				h("span", { class: "chan-icon", text: "▸" }),
-				entry.title,
-			),
-		);
+		const active = activePanel === entry.id;
+		const button = h("button", {
+			class: `view-link${active ? " on" : ""}`,
+			type: "button",
+			"data-panel": entry.id,
+			"aria-current": active ? "page" : undefined,
+			onclick: () => openPanel(entry.id),
+		}, entry.title);
+		details.append(button);
 	}
+	details.addEventListener("toggle", () => { libraryOpen = details.open; });
+	refs.navSections.append(details);
 }
 
 function renderTopbar(): void {
 	const panel = activePanel ? panels.get(activePanel) : null;
+	const bar = refs.topTitle.closest(".topbar");
+	bar?.classList.toggle("quiet", panel !== null);
 	renderCover(panel ? undefined : selectedConversation());
 	if (panel) {
+		const place = [...BUILTIN_WORKSPACES, ...extraWorkspaces].find((item) => item.panel === activePanel);
 		refs.topTitle.textContent = panel.title;
-		refs.topSub.textContent = "View";
+		refs.topSub.textContent = place?.hint || "Panel";
 	} else {
 		const conversation = selectedConversation();
 		refs.topTitle.textContent = conversation?.title ?? "No conversation";
@@ -1593,12 +2042,12 @@ function renderTopbar(): void {
 	actions.push(
 		h(
 			"button",
-			{ class: "btn icon ghost only-mobile", type: "button", "aria-label": "Open navigation", title: "Navigation", onclick: toggleNav },
+			{ class: "btn icon ghost only-mobile", type: "button", "aria-label": "Open navigation", "aria-controls": "nav", "aria-expanded": refs.app.classList.contains("nav-open") ? "true" : "false", title: "Navigation", onclick: toggleNav },
 			icon("menu"),
 		),
 	);
 	if (panel) {
-		actions.push(h("button", { class: "btn ghost", type: "button", onclick: showChat }, "← Chat"));
+		actions.push(h("button", { class: "btn ghost", type: "button", onclick: showChat }, "Conversations"));
 		actions.push(
 			h("button", { class: "btn", type: "button", title: "Refresh this view", onclick: () => renderPanel() }, icon("refresh"), "Refresh"),
 		);
@@ -1629,7 +2078,7 @@ function renderTopbar(): void {
 			),
 			h(
 				"button",
-				{ class: "btn ghost icon", type: "button", "aria-label": "Command palette (⌘K)", title: "Command palette (⌘K)", onclick: openPalette },
+				{ class: "btn ghost icon", type: "button", "aria-label": `Command palette (${chord(MOD, "K")})`, title: `Command palette (${chord(MOD, "K")})`, onclick: openPalette },
 				icon("command"),
 			),
 		);
@@ -1711,6 +2160,15 @@ function renderStatusbar(): void {
 			connectionLabel,
 		),
 	);
+	if (layout.dock) {
+		const docked = panels.get(layout.dock);
+		items.push(h("button", {
+			class: "status-item docked",
+			type: "button",
+			title: "Close the dock",
+			onclick: () => setDock(null),
+		}, `Docked ${docked?.title ?? layout.dock}`));
+	}
 	const conversation = selectedConversation();
 	if (conversation) items.push(h("span", { class: "status-item", title: conversation.id, text: conversation.title }));
 	const auto = conversation ? autoStatus.get(conversation.id) : undefined;
@@ -1734,9 +2192,9 @@ function renderStatusbar(): void {
 		items.push(
 			h(
 				"button",
-				{ class: "status-item node", type: "button", title: `${nodeId} — open node and peers`, onclick: () => openPanel("node") },
+				{ class: "status-item node", type: "button", title: nodeId, onclick: () => openPanel("node") },
 				h("span", { class: `dot ${connection === "online" ? "ok" : "none"}` }),
-				nodeId,
+				middleEllipsis(nodeId, 10, 8),
 			),
 		);
 	}
@@ -1746,12 +2204,28 @@ function renderStatusbar(): void {
 		items.push(
 			h(
 				"button",
-				{ class: "status-error", type: "button", title: "Open the activity view", onclick: () => openPanel("activity") },
+				{
+					class: "status-error",
+					type: "button",
+					title: "Show recent errors",
+					"aria-expanded": errorListOpen ? "true" : "false",
+					onclick: () => { errorListOpen = !errorListOpen; renderStatusbar(); },
+				},
 				`${errors.length} error${errors.length === 1 ? "" : "s"}`,
 			),
 		);
-	}
+	} else errorListOpen = false;
+	const popover = errorListOpen
+		? h("div", { class: "error-popover", role: "dialog", "aria-label": "Recent errors" },
+			h("div", { class: "error-popover-head" },
+				h("strong", { text: "Recent errors" }),
+				h("button", { class: "btn sm", type: "button", onclick: () => { errors.length = 0; errorListOpen = false; renderStatusbar(); } }, "Clear"),
+			),
+			...errors.slice(-8).reverse().map(entry => h("p", { text: entry.message })),
+		)
+		: false;
 	refs.statusbar.replaceChildren(h("div", { class: "statusbar-items" }, ...items), refs.widgetStatus);
+	if (popover) refs.statusbar.append(popover);
 }
 
 function toggleMembers(): void {
@@ -1761,15 +2235,50 @@ function toggleMembers(): void {
 	renderTopbar();
 }
 
+let drawerReturn: HTMLElement | null = null;
+
+function drawerFocusable(): HTMLElement[] {
+	return [...refs.nav.querySelectorAll<HTMLElement>("a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])")]
+		.filter(element => element.offsetParent !== null || element === document.activeElement);
+}
+
+function trapDrawerFocus(event: KeyboardEvent): void {
+	const focusable = drawerFocusable();
+	if (focusable.length === 0) return;
+	const first = focusable[0];
+	const last = focusable[focusable.length - 1];
+	if (!first || !last) return;
+	if (event.shiftKey && document.activeElement === first) {
+		event.preventDefault();
+		last.focus();
+	} else if (!event.shiftKey && document.activeElement === last) {
+		event.preventDefault();
+		first.focus();
+	}
+}
+
 function toggleNav(): void {
 	const open = !refs.app.classList.contains("nav-open");
 	refs.app.classList.toggle("nav-open", open);
 	refs.backdrop.hidden = !open;
+	if (open) {
+		drawerReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		window.requestAnimationFrame(() => focusFirst(refs.nav));
+		return;
+	}
+	const back = drawerReturn;
+	drawerReturn = null;
+	back?.focus();
 }
 
 function closeDrawers(): void {
+	const wasOpen = refs.app.classList.contains("nav-open");
 	refs.app.classList.remove("nav-open");
 	refs.backdrop.hidden = true;
+	if (!wasOpen) return;
+	const back = drawerReturn;
+	drawerReturn = null;
+	back?.focus();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1876,7 +2385,12 @@ function renderMessages(): void {
 	if (!messages.length) {
 		refs.messageList.append(emptyTranscript());
 	} else {
+		if (selectedConversationId) flushDelivery(selectedConversationId);
 		for (const message of messages) refs.messageList.append(renderMessage(message));
+		const typing = selectedConversationId ? typingBots.get(selectedConversationId) : undefined;
+		if (typing) {
+			refs.messageList.append(h("div", { class: "typing", role: "status" }, `${botName(typing.botId) || "The bot"} is typing${typing.demo ? " · demo" : ""}`));
+		}
 	}
 	if (stickToBottom) scrollToBottom();
 }
@@ -1893,12 +2407,13 @@ function renderMessage(message: ChatMessage): HTMLElement {
 	const head = h(
 		"div",
 		{ class: "msg-head" },
-		role === "user"
-			? h("span", { class: "avatar sm", "aria-hidden": "true", text: "YOU" })
-			: avatarNode(author, botAvatarOf(botOf(message.botId))),
-		h("span", { class: "msg-author", text: author }),
-		h("span", { class: "msg-role", text: role }),
-		h("time", { class: "msg-time", datetime: new Date(message.createdAt).toISOString(), text: `${clockTime(message.createdAt)} · ${relativeTime(message.createdAt)}` }),
+		role === "user" ? false : avatarNode(author, botAvatarOf(botOf(message.botId))),
+		h("span", { class: "msg-author", text: role === "user" ? "You" : author }),
+		role === "user" ? false : h("span", { class: "msg-role", text: role }),
+		(() => {
+			const when = formatWhen(message.createdAt);
+			return h("time", { class: "msg-time", datetime: new Date(message.createdAt).toISOString(), title: when.title, text: when.label });
+		})(),
 		message.usage ? usageChips(message.usage) : null,
 	);
 
@@ -1934,6 +2449,17 @@ function renderMessage(message: ChatMessage): HTMLElement {
 
 	const media = Array.isArray(message.media) ? message.media : [];
 	if (media.length) body.append(mediaGallery(media));
+	if (message.role === "assistant" && message.text.startsWith("Demo reply")) body.prepend(h("span", { class: "chip warn", text: "Demo" }));
+	const failure = failedDelivery.get(message.id);
+	if (failure) {
+		body.append(h("div", { class: "send-failed" },
+			h("p", { text: failure }),
+			h("div", { class: "row-actions" },
+				h("button", { class: "btn sm", type: "button", onclick: () => void retrySend(message.conversationId) }, "Retry"),
+				h("button", { class: "btn sm", type: "button", onclick: () => dismissFailure(message.id) }, "Dismiss"),
+			),
+		));
+	}
 	const lastAssistant = message.role === "assistant" && currentMessages().filter((item) => item.role === "assistant").at(-1)?.id === message.id;
 
 	const actions = h(
@@ -2462,8 +2988,8 @@ function updateComposerState(): void {
 	if (!conversation) hint = "Select or create a conversation.";
 	else if (!recipientsOk) hint = "Choose at least one recipient.";
 	else if (busyUpload) hint = `Uploading ${list.length} attachment${list.length === 1 ? "" : "s"}…`;
-	else if (groupMany) hint = `${chosen.size} of ${conversation.botIds.length} recipients · ⌘↵ to send`;
-	else hint = `${conversation.title} · ⌘↵ to send`;
+	else if (groupMany) hint = `${chosen.size} of ${conversation.botIds.length} recipients · ${chord(MOD, "Enter")} to send`;
+	else hint = `${conversation.title} · ${chord(MOD, "Enter")} to send`;
 	const auto = conversation ? autoStatus.get(conversation.id) : undefined;
 	if (auto?.active) hint += ` · auto ${auto.turns}/${auto.max}`;
 	else if (conversation?.scene?.group?.auto === true && auto?.reason === "limit") hint += " · auto paused";
@@ -2513,10 +3039,31 @@ async function sendMessage(): Promise<void> {
 	} catch (error) {
 		refs.composerInput.value = text;
 		drafts.set(conversation.id, text);
-		notify(errText(error), "error");
+		notify(humanRuntimeError(errText(error)), "error");
 	} finally {
 		sending.delete(conversation.id);
 		updateComposerState();
+	}
+}
+
+function dismissFailure(messageId: string): void {
+	dismissedFailures.add(messageId);
+	failedDelivery.delete(messageId);
+	messageSignature = "";
+	renderMessages();
+}
+
+async function retrySend(conversationId: string): Promise<void> {
+	const conversation = conversationOf(conversationId);
+	try {
+		await command("message.retry", { conversationId, botId: conversation?.adminBotId });
+		messageSignature = "";
+		await refresh().catch(() => undefined);
+		flushDelivery(conversationId);
+		messageSignature = "";
+		renderMessages();
+	} catch (error) {
+		notify(humanRuntimeError(errText(error)), "error");
 	}
 }
 
@@ -2548,6 +3095,7 @@ function selectConversation(id: string): void {
 	renderAll();
 	syncHostSelection();
 	activateBotPlugins();
+	writeRoute();
 	refs.composerInput.focus();
 }
 
@@ -3132,7 +3680,20 @@ function buildMembersTab(): void {
 }
 
 function definitionList(pairs: Array<[string, string]>): HTMLElement {
-	return h("dl", { class: "kv" }, ...pairs.flatMap(([key, value]) => [h("dt", { text: key }), h("dd", { text: value })]));
+	const list = h("dl", { class: "kv" });
+	for (const [key, value] of pairs) {
+		const dd = h("dd");
+		if (value.length > 28 || value.includes("urn:onlyne:") || value.includes("/") || value.startsWith("http")) {
+			dd.append(identifierNode(value));
+		} else dd.textContent = value;
+		list.append(h("dt", { text: key }), dd);
+	}
+	return list;
+}
+
+function identifierNode(value: string): HTMLElement {
+	const button = h("button", { class: "id-copy", type: "button", "aria-label": `Copy ${value}`, onclick: () => void copyText(value, "Copied.") }, "Copy");
+	return h("span", { class: "identifier", title: value }, h("span", { class: "identifier-text", text: middleEllipsis(value) }), button);
 }
 
 function renderBotDetail(conversation: Conversation, bot: Bot): HTMLElement {
@@ -3152,7 +3713,8 @@ function renderBotDetail(conversation: Conversation, bot: Bot): HTMLElement {
 		["Host plugins", plugins.host.length ? plugins.host.join(", ") : "none"],
 		["Renderer plugins", plugins.renderer.length ? plugins.renderer.join(", ") : "none"],
 		["Capabilities", bot.capabilities.length ? bot.capabilities.map(capabilityName).join(", ") : "none"],
-		["Messages", String(messages.length)],
+		["In conversation", String(messagesOf(conversation.id).length)],
+		["From this bot", String(messages.length)],
 	];
 	if (usage.length) pairs.push(["Usage", usage.map((entry) => `${entry.key} ${compactNumber(entry.total)}`).join(" · ")]);
 	const teamAdmin = state.teamAdminId === bot.id;
@@ -3688,7 +4250,7 @@ function closeModal(): void {
 	close();
 }
 
-function openModal(options: { title: string; body: HTMLElement; wide?: boolean; narrow?: boolean; onClose?: () => void }): ModalHandle {
+function openModal(options: { title: string; body: HTMLElement; wide?: boolean; narrow?: boolean; anchor?: boolean; onClose?: () => void }): ModalHandle {
 	closeModal();
 	modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 	const titleId = `modal-title-${++fieldSequence}`;
@@ -3696,7 +4258,7 @@ function openModal(options: { title: string; body: HTMLElement; wide?: boolean; 
 	const footer = h("div", { class: "modal-foot" });
 	const root = h(
 		"div",
-		{ class: `modal${options.wide ? " wide" : options.narrow ? " narrow" : ""}`, role: "dialog", "aria-modal": "true", "aria-labelledby": titleId },
+		{ class: `modal${options.wide ? " wide" : options.narrow ? " narrow" : ""}${options.anchor ? " stable" : ""}`, role: "dialog", "aria-modal": "true", "aria-labelledby": titleId },
 		h(
 			"div",
 			{ class: "modal-head" },
@@ -3707,6 +4269,7 @@ function openModal(options: { title: string; body: HTMLElement; wide?: boolean; 
 		footer,
 	);
 	const layer = refs.modals;
+	layer.classList.toggle("pinned", options.anchor === true);
 	layer.replaceChildren(root);
 	layer.hidden = false;
 
@@ -3715,6 +4278,7 @@ function openModal(options: { title: string; body: HTMLElement; wide?: boolean; 
 		activeModalClose = null;
 		layer.replaceChildren();
 		layer.hidden = true;
+		layer.classList.remove("pinned");
 		if (modalReturnFocus) {
 			const target = modalReturnFocus;
 			modalReturnFocus = null;
@@ -4410,6 +4974,46 @@ function registerPanelInternal(id: string, title: string, render: (snapshot: Des
 	panels.set(id, { id, title, render });
 }
 
+let routing = false;
+
+function writeRoute(): void {
+	if (routing || !shellReady) return;
+	const next = formatDeskHash({
+		screen: activePanel ?? "chat",
+		...(selectedConversationId ? { selection: selectedConversationId } : {}),
+		...(layout.dock ? { dock: layout.dock } : {}),
+	});
+	if (location.hash === next) return;
+	history.pushState({ onlyne: true }, "", next);
+}
+
+function restoreRoute(): void {
+	if (!shellReady) return;
+	const route = parseDeskHash(location.hash || "#/chat");
+	routing = true;
+	try {
+		if (route.selection && state.conversations.some(item => item.id === route.selection)) selectedConversationId = route.selection;
+		const dock = route.dock && panels.has(route.dock) ? route.dock : null;
+		if (layout.dock !== dock) {
+			dockKey = "";
+			layout = { ...layout, dock };
+			persistLayout();
+		}
+		const screen = route.screen === "chat" || !panels.has(route.screen) ? null : route.screen;
+		if (screen === null) {
+			activePanel = null;
+			renderAll();
+		} else {
+			activePanel = screen;
+			renderAll();
+			renderPanel();
+		}
+		renderStatusbar();
+	} finally {
+		routing = false;
+	}
+}
+
 function openPanel(id: string): void {
 	if (!panels.has(id)) {
 		notify(`Unknown view: ${id}`, "error");
@@ -4418,20 +5022,54 @@ function openPanel(id: string): void {
 	if (activePanel === "settings" && id !== "settings") resetSettingsPreview();
 	activePanel = id;
 	closeDrawers();
+	renderRail();
 	renderNav();
 	renderTopbar();
 	renderView();
 	renderPanel();
+	renderDock();
+	writeRoute();
 }
 
-function showChat(): void {
+function showChat(options?: { focus?: boolean }): void {
 	if (activePanel === "settings") resetSettingsPreview();
 	activePanel = null;
 	closeDrawers();
+	renderRail();
 	renderNav();
 	renderTopbar();
 	renderView();
-	refs.composerInput.focus();
+	renderDock();
+	writeRoute();
+	if (options?.focus) refs.composerInput.focus();
+}
+
+const PANEL_LEDE: Record<string, string> = {
+	"omp.session": "The transcript for this conversation. A model session, with its tree, starts when OMP can run.",
+	"omp.subagents": "Workers this session has spawned. Each one is a short-lived agent with its own transcript.",
+	"omp.goal": "A standing objective for this session. The controls stay off until a runtime can start.",
+	"omp.queue": "Steering and follow-ups waiting on the runtime. Nothing here is sent until you ask.",
+	"omp.config": "This bot’s .omp files. Secrets stay masked. Saving writes the file on this machine.",
+	character: "The character card and the scene for the open conversation.",
+	node: "This bot’s Onlyne node: identity, fingerprint, and the peers it already knows.",
+	capabilities: "MCP servers, skills, and extensions the team can attach to a bot.",
+	activity: "Recent host errors. Clearing the list does not retry a failed send.",
+};
+
+function withPageHeader(id: string, title: string, content: HTMLElement): HTMLElement {
+	if (content.classList.contains("desk-page") || content.querySelector(".desk-page") !== null) return content;
+	const place = [...BUILTIN_WORKSPACES, ...extraWorkspaces].find(item => item.panel === id);
+	const lede = place?.hint || PANEL_LEDE[id] || "";
+	return h("div", { class: "desk-page layout-single" },
+		h("header", { class: "desk-page-head" },
+			h("div", { class: "desk-page-copy" },
+				h("p", { class: "eyebrow", text: "Desk" }),
+				h("h1", { text: title }),
+				lede.length > 0 ? h("p", { class: "lede", text: lede }) : false,
+			),
+		),
+		content,
+	);
 }
 
 function renderPanel(): void {
@@ -4443,7 +5081,8 @@ function renderPanel(): void {
 		return;
 	}
 	try {
-		const content = panel.render(state);
+		const rendered = panel.render(state);
+		const content = withPageHeader(id, panel.title, rendered);
 		refs.panelView.replaceChildren(h("div", { class: "panel" }, h("div", { class: "panel-body" }, content)));
 	} catch (error) {
 		refs.panelView.replaceChildren(
@@ -4494,6 +5133,44 @@ function capabilitiesPanel(): HTMLElement {
 	return wrap;
 }
 
+function layoutCard(): HTMLElement {
+	const box = h("div", { class: "check-grid" });
+	for (const spec of railCatalog()) {
+		if (spec.id === "chat") continue;
+		const input = h("input", { type: "checkbox" }) as HTMLInputElement;
+		input.checked = !layout.hidden.includes(spec.id);
+		input.addEventListener("change", () => {
+			const hidden = new Set(layout.hidden);
+			if (input.checked) hidden.delete(spec.id);
+			else hidden.add(spec.id);
+			layout = { ...layout, hidden: [...hidden] };
+			persistLayout();
+		});
+		box.append(h("label", { class: "check" }, input, ` ${spec.title}`));
+	}
+	const dock = h("select", { "aria-label": "Docked panel" });
+	dock.append(h("option", { value: "", text: "Nothing docked" }));
+	for (const panel of panels.values()) {
+		if (panel.botId) continue;
+		dock.append(h("option", { value: panel.id, text: panel.title }));
+	}
+	dock.value = layout.dock ?? "";
+	dock.addEventListener("change", () => setDock(dock.value.length === 0 ? null : dock.value));
+	return h("div", { class: "card", id: "settings-layout" },
+		h("div", { class: "card-head", text: "Layout" }),
+		h("div", { class: "card-body" },
+			h("p", { class: "field-hint", text: "Drag a rail icon, or focus it and press Alt+Up or Alt+Down. Right-click docks that panel. Hidden places stay in Jump." }),
+			h("label", { class: "check" }, (() => {
+				const input = h("input", { type: "checkbox" }) as HTMLInputElement;
+				input.checked = developerMode();
+				input.addEventListener("change", () => localStorage.setItem("onlyne.desk.developer", input.checked ? "1" : "0"));
+				return input;
+			})(), " Developer mode (raw commands in Jump)"),
+			box,
+			field("Dock", dock, "Pins a second panel beside the stage."),
+			h("button", { class: "btn", type: "button", onclick: () => { resetLayout(); renderPanel(); } }, "Reset layout")));
+}
+
 function settingsPanel(): HTMLElement {
 	themeDirty = false;
 	customCssPreview = null;
@@ -4517,6 +5194,43 @@ function settingsPanel(): HTMLElement {
 		themeOptions.push({ value: settings.theme, label: `${settings.theme} (theme not loaded)` });
 	}
 	const theme = selectEl(themeOptions, settings.theme);
+	theme.hidden = themeOptions.length <= 3;
+	const themePicker = h("div", { class: "theme-picker", role: "radiogroup", "aria-label": "Theme" });
+	const paintTheme = (): void => {
+		for (const button of themePicker.querySelectorAll<HTMLButtonElement>("[data-theme]")) {
+			const on = button.dataset["theme"] === theme.value;
+			button.classList.toggle("on", on);
+			button.setAttribute("aria-checked", on ? "true" : "false");
+		}
+	};
+	for (const option of [
+		{ value: "light", label: "Light", hint: "Paper" },
+		{ value: "dark", label: "Dark", hint: "Ink" },
+		{ value: "system", label: "System", hint: "Match" },
+	]) {
+		const button = h("button", {
+			class: `theme-swatch swatch-${option.value}`,
+			type: "button",
+			role: "radio",
+			"data-theme": option.value,
+			onclick: () => {
+				theme.value = option.value;
+				themeDirty = true;
+				applyTheme(option.value);
+				paintTheme();
+			},
+		},
+		h("span", { class: "swatch-face", "aria-hidden": "true" }),
+		h("span", { class: "swatch-label", text: option.label }),
+		h("span", { class: "swatch-hint", text: option.hint }));
+		themePicker.append(button);
+	}
+	paintTheme();
+	const accentPreview = h("div", { class: "accent-preview", "aria-hidden": "true" },
+		h("span", { class: "accent-sample" }, "Accent"),
+		h("span", { class: "btn primary sm", text: "Primary" }),
+		h("span", { class: "accent-mono", text: "urn:onlyne:agent" }),
+	);
 	const locale = selectEl(
 		[
 			{ value: "en", label: "English" },
@@ -4534,6 +5248,7 @@ function settingsPanel(): HTMLElement {
 	theme.onchange = () => {
 		themeDirty = true;
 		applyTheme(theme.value);
+		paintTheme();
 	};
 	customCss.addEventListener("input", () => {
 		customCssPreview = customCss.value;
@@ -4584,18 +5299,22 @@ function settingsPanel(): HTMLElement {
 		{ class: "form" },
 		h(
 			"div",
-			{ class: "card" },
-			h("div", { class: "card-head", text: "Appearance" }),
+			{ class: "card", id: "settings-appearance" },
+			h("div", { class: "card-head" }, h("span", { text: "Appearance" })),
 			h(
 				"div",
 				{ class: "card-body" },
-				h("div", { class: "grid-2" }, field("Theme", theme), field("Locale", locale, "Stored for host plugins; the built-in shell is English.")),
-				field("Custom CSS", customCss, "Applied immediately as a preview; saved with the button below."),
+				h("p", { class: "field-hint", text: "The shell uses the swatch you pick. Custom themes from a plugin stay in the list below." }),
+				h("div", { class: "field" }, h("span", { class: "field-label", text: "Theme" }), themePicker, themeOptions.length > 3 ? theme : false),
+				accentPreview,
+				field("Locale", locale, "Stored for host plugins. The built-in shell stays in English."),
+				field("Custom CSS", customCss, "Applied immediately as a preview. It is saved with the button below."),
 			),
 		),
+		layoutCard(),
 		h(
 			"div",
-			{ class: "card" },
+			{ class: "card", id: "settings-node" },
 			h("div", { class: "card-head", text: "Application node" }),
 			h(
 				"div",
@@ -4606,7 +5325,7 @@ function settingsPanel(): HTMLElement {
 		),
 		h(
 			"div",
-			{ class: "card" },
+			{ class: "card", id: "settings-plugins" },
 			h("div", { class: "card-head", text: "Application plugins" }),
 			h(
 				"div",
@@ -4618,22 +5337,37 @@ function settingsPanel(): HTMLElement {
 		formError,
 		h("div", { class: "form-actions" }, reset, save),
 	);
-	const wrap = h(
-		"div",
-		{ class: "panel-inner" },
-		h(
-			"div",
-			{ class: "panel-note", text: "These are application and window preferences. Each bot's models, plugins, MCP servers, Onlyne identity and memory live in its own configuration root." },
-		),
-		h(
-			"div",
-			{ class: "panel-actions" },
-			h("button", { class: "btn", type: "button", onclick: () => openPanel("node") }, icon("node"), "Node and peers"),
-			h("button", { class: "btn", type: "button", onclick: () => openPanel("capabilities") }, "Capabilities"),
-		),
-		form,
+	const settingsNav = h("nav", { class: "settings-nav", "aria-label": "Settings sections" },
+		...([
+			["settings-appearance", "Appearance"],
+			["settings-layout", "Layout"],
+			["settings-node", "Node"],
+			["settings-plugins", "Plugins"],
+		] as const).map(([id, label]) => h("button", {
+			class: "settings-nav-link",
+			type: "button",
+			onclick: () => document.getElementById(id)?.scrollIntoView({ block: "start" }),
+		}, label)),
 	);
-	return wrap;
+	return h("div", { class: "desk-page settings-page" },
+		h("header", { class: "desk-page-head" },
+			h("div", { class: "desk-page-copy" },
+				h("p", { class: "eyebrow", text: "Desk" }),
+				h("h1", { text: "Settings" }),
+				h("p", { class: "lede", text: "Application and window preferences. Each bot’s models, plugins, identity and memory stay in that bot’s own configuration." }),
+			),
+		),
+		h("div", { class: "settings-shell" },
+			settingsNav,
+			h("div", { class: "settings-content" },
+				h("div", { class: "settings-links" },
+					h("button", { class: "btn", type: "button", onclick: () => openPanel("node") }, icon("node"), "Node record"),
+					h("button", { class: "btn", type: "button", onclick: () => openPanel("capabilities") }, "Capabilities"),
+				),
+				form,
+			),
+		),
+	);
 }
 
 /* ------------------------------------------------------------------ */
@@ -5258,6 +5992,32 @@ const RESPONSE_PRESETS: Array<{ label: string; frame: RpcFrame }> = [
 	{ label: "value response", frame: { type: "extension_ui_response", id: "", value: "" } },
 ];
 
+function openShortcuts(): void {
+	const rows: Array<[string, string]> = [
+		[chord(MOD, "K"), "Command palette"],
+		[chord(MOD, "\\"), "Dock the current panel, or close the dock"],
+		["?", "Shortcut list"],
+		[chord(MOD, "Shift+N"), "New conversation"],
+		[chord(MOD, "Shift+C"), "Character and scene"],
+		[chord(MOD, "Enter"), "Send the draft"],
+		["G then C", "Conversations"],
+		["G then I", "Inbox"],
+		["G then P", "Neighbors"],
+		["G then T", "Trust"],
+		["G then D", "Threads"],
+		["G then R", "Resources"],
+		["G then H", "Health"],
+		["G then X", "Integrations"],
+		["G then M", "Team"],
+		["G then S", "Settings"],
+	];
+	const body = h("div", { class: "shortcut-list" }, ...rows.map(([keys, label]) => h("div", { class: "shortcut-row" },
+		h("kbd", { text: keys }),
+		h("span", { text: label }))));
+	const modal = openModal({ title: "Keyboard", body });
+	modal.footer.append(h("button", { class: "btn", type: "button", onclick: () => modal.close() }, "Close"));
+}
+
 function openPalette(): void {
 	const actions = paletteActions();
 	const conversation = selectedConversation();
@@ -5268,7 +6028,7 @@ function openPalette(): void {
 
 	const firstAction = actions[0];
 	const actionName = textInput(firstAction?.name ?? "");
-	const actionPayload = textArea(safeJson(firstAction?.payload() ?? {}), { rows: "6" });
+	const actionPayload = textArea("{}", { rows: "6" });
 	const actionResult = h("pre", { class: "palette-result" });
 
 	const botSelect = selectEl(
@@ -5332,34 +6092,82 @@ function openPalette(): void {
 	rpcTab.onclick = () => setMode("rpc");
 	respondTab.onclick = () => setMode("respond");
 
+	let closePalette = (): void => undefined;
+	type PaletteRow =
+		| { kind: "jump"; title: string; description: string; kbd?: string; run: () => void }
+		| { kind: "action"; action: PaletteAction };
+	const paletteRows = (): PaletteRow[] => {
+		const jumps: PaletteRow[] = [...BUILTIN_WORKSPACES, ...extraWorkspaces].map((spec) => ({
+			kind: "jump",
+			title: spec.title,
+			description: spec.hint || "Open",
+			...(spec.shortcut ? { kbd: `G ${spec.shortcut.toUpperCase()}` } : {}),
+			run: () => { openWorkspace(spec); closePalette(); },
+		}));
+		for (const conversation of state.conversations) {
+			jumps.push({
+				kind: "jump",
+				title: conversation.title,
+				description: conversation.kind === "group" ? "Open this group" : "Open this conversation",
+				run: () => {
+					selectedConversationId = conversation.id;
+					showChat({ focus: true });
+					closePalette();
+				},
+			});
+		}
+		for (const panel of panels.values()) {
+			if (panel.botId) continue;
+			if (BUILTIN_WORKSPACES.some(item => item.panel === panel.id)) continue;
+			jumps.push({
+				kind: "jump",
+				title: panel.title,
+				description: "Library",
+				run: () => { openPanel(panel.id); closePalette(); },
+			});
+		}
+		jumps.push(
+			{ kind: "jump", title: "Toggle theme", description: "Switch the dark and light themes", run: () => { void toggleTheme(); closePalette(); } },
+			{ kind: "jump", title: layout.dock ? "Close dock" : "Dock this panel", description: "Pin a panel beside the stage. Undo is offered.", kbd: chord(MOD, "\\"), run: () => { toggleDock(); closePalette(); } },
+			{ kind: "jump", title: "Keyboard shortcuts", description: "Show the shortcut list", kbd: "?", run: () => { closePalette(); openShortcuts(); } },
+		);
+		const commands = developerMode() ? actions.map((action) => ({ kind: "action" as const, action })) : [];
+		return [...jumps, ...commands];
+	};
+	const matches = (row: PaletteRow, needle: string): boolean => {
+		if (!needle) return true;
+		if (row.kind === "jump") return row.title.toLowerCase().includes(needle) || row.description.toLowerCase().includes(needle);
+		return row.action.name.toLowerCase().includes(needle) || row.action.description.toLowerCase().includes(needle);
+	};
 	const paintList = (): void => {
 		const needle = search.value.trim().toLowerCase();
 		list.replaceChildren();
-		const filtered = actions.filter((action) => !needle || action.name.toLowerCase().includes(needle) || action.description.toLowerCase().includes(needle));
+		const filtered = paletteRows().filter((row) => matches(row, needle));
 		if (!filtered.length) {
-			list.append(h("div", { class: "panel-note", text: "No matching actions." }));
+			list.append(h("div", { class: "panel-note", text: "Nothing matches." }));
 			return;
 		}
 		if (selectedIndex >= filtered.length) selectedIndex = filtered.length - 1;
-		filtered.forEach((action, index) => {
-			list.append(
-				h(
-					"button",
-					{
-						class: `palette-item${index === selectedIndex ? " on" : ""}`,
-						type: "button",
-						onclick: () => {
-							selectedIndex = index;
-							actionName.value = action.name;
-							actionPayload.value = safeJson(action.payload());
-							setMode("action");
-							paintList();
-						},
-					},
-					h("div", { class: "palette-main", text: action.name }),
-					h("div", { class: "palette-desc", text: action.description }),
-				),
-			);
+		filtered.forEach((row, index) => {
+			const title = row.kind === "jump" ? row.title : row.action.name;
+			const description = row.kind === "jump" ? row.description : row.action.description;
+			list.append(h("button", {
+				class: `palette-item${index === selectedIndex ? " on" : ""}`,
+				type: "button",
+				onclick: () => {
+					selectedIndex = index;
+					if (row.kind === "jump") {
+						row.run();
+						return;
+					}
+					actionName.value = row.action.name;
+					actionPayload.value = safeJson(row.action.payload());
+					setMode("action");
+					paintList();
+				},
+			},
+			h("div", { class: "palette-main" }, h("span", { text: title }), row.kind === "jump" && row.kbd ? h("kbd", { class: "palette-kbd", text: row.kbd }) : false),
+			h("div", { class: "palette-desc", text: description })));
 		});
 	};
 	search.addEventListener("input", () => {
@@ -5367,13 +6175,11 @@ function openPalette(): void {
 		paintList();
 	});
 	search.addEventListener("keydown", (event) => {
-		const filtered = actions.filter((action) => {
-			const needle = search.value.trim().toLowerCase();
-			return !needle || action.name.toLowerCase().includes(needle) || action.description.toLowerCase().includes(needle);
-		});
+		const needle = search.value.trim().toLowerCase();
+		const filtered = paletteRows().filter((row) => matches(row, needle));
 		if (event.key === "ArrowDown") {
 			event.preventDefault();
-			selectedIndex = Math.min(selectedIndex + 1, filtered.length - 1);
+			selectedIndex = Math.min(selectedIndex + 1, Math.max(filtered.length - 1, 0));
 			paintList();
 		} else if (event.key === "ArrowUp") {
 			event.preventDefault();
@@ -5383,23 +6189,32 @@ function openPalette(): void {
 			const chosen = filtered[selectedIndex];
 			if (!chosen) return;
 			event.preventDefault();
-			actionName.value = chosen.name;
-			actionPayload.value = safeJson(chosen.payload());
+			if (chosen.kind === "jump") {
+				chosen.run();
+				return;
+			}
+			actionName.value = chosen.action.name;
+			actionPayload.value = safeJson(chosen.action.payload());
 			setMode("action");
+			paintList();
 		}
 	});
 	paintList();
 
 	const modal = openModal({
-		title: "Command palette",
-		wide: true,
+		title: "Jump",
+		anchor: true,
+		wide: false,
 		body: h(
 			"div",
 			{ class: "palette-grid" },
 			h("div", { class: "palette-left" }, h("div", { class: "palette-search" }, search), list),
-			h("div", { class: "palette-right" }, h("div", { class: "palette-tabs" }, actionTab, rpcTab, respondTab), actionPane, rpcPane, respondPane),
+			developerMode()
+				? h("div", { class: "palette-right" }, h("div", { class: "palette-tabs" }, actionTab, rpcTab, respondTab), actionPane, rpcPane, respondPane)
+				: h("p", { class: "palette-dev-note", text: "Raw commands stay in Settings → Developer mode." }),
 		),
 	});
+	closePalette = () => modal.close();
 	modal.footer.append(h("button", { class: "btn ghost", type: "button", onclick: () => modal.close() }, "Close"));
 	if (!conversation) {
 		actionResult.textContent = "No conversation is selected; runtime actions need a conversation and bot.";
@@ -5460,7 +6275,7 @@ async function runPaletteRespond(conversationId: string, botId: string, frameInp
 /* notifications                                                       */
 /* ------------------------------------------------------------------ */
 
-function notify(message: string, level: Level = "info"): void {
+function notify(message: string, level: Level = "info", action?: { label: string; run: () => void; ms?: number }): void {
 	const text = message.trim() || "(empty message)";
 	if (level === "error") {
 		errors.push({ message: text, at: Date.now() });
@@ -5468,15 +6283,39 @@ function notify(message: string, level: Level = "info"): void {
 		renderStatusbar();
 		if (activePanel === "activity") renderPanel();
 	}
+	const existing = [...refs.toasts.querySelectorAll<HTMLElement>(".toast")].find(item => item.dataset["text"] === text && item.dataset["level"] === level);
+	if (existing && action === undefined) {
+		const count = Number(existing.dataset["count"] ?? "1") + 1;
+		existing.dataset["count"] = String(count);
+		const label = existing.querySelector(".toast-text");
+		if (label) label.textContent = `${text} (${count})`;
+		return;
+	}
+	const bar = h("span", { class: "toast-progress" });
 	const toast = h(
 		"div",
-		{ class: `toast ${level}`, role: level === "error" ? "alert" : "status" },
+		{ class: `toast ${level}`, role: level === "error" ? "alert" : "status", "data-text": text, "data-level": level, "data-count": "1" },
 		h("span", { class: "toast-text", text }),
-		h("button", { class: "toast-close", type: "button", "aria-label": "Dismiss notification", onclick: () => toast.remove() }, "×"),
+		action === undefined ? false : h("button", { class: "btn sm", type: "button", onclick: () => { action.run(); toast.remove(); } }, action.label),
+		h("button", { class: "toast-close", type: "button", "aria-label": "Dismiss notification", onclick: () => toast.remove() }, "Close"),
+		bar,
 	);
+	let paused = false;
+	let started = Date.now();
+	const life = action?.ms ?? 4_000;
+	let remaining = life;
+	const tick = (): void => {
+		if (!toast.isConnected || paused) return;
+		const left = remaining - (Date.now() - started);
+		bar.style.transform = `scaleX(${Math.max(0, left / life)})`;
+		if (left <= 0) toast.remove();
+		else window.setTimeout(tick, 80);
+	};
+	toast.addEventListener("mouseenter", () => { paused = true; remaining -= Date.now() - started; });
+	toast.addEventListener("mouseleave", () => { paused = false; started = Date.now(); tick(); });
 	refs.toasts.append(toast);
-	while (refs.toasts.children.length > 5) refs.toasts.firstElementChild?.remove();
-	window.setTimeout(() => toast.remove(), level === "error" ? 12_000 : 6_000);
+	while (refs.toasts.children.length > 3) refs.toasts.firstElementChild?.remove();
+	tick();
 }
 
 async function copyText(text: string, label: string): Promise<void> {
@@ -5686,6 +6525,15 @@ function createUiApi(): DesktopUiApi {
 		activeContext,
 		widgets: registry,
 		registerPanel: (id, title, render) => registerPanelEntry(undefined, id, title, render),
+		registerWorkspace: (entry) => registerWorkspaceEntry(undefined, entry),
+		layout: {
+			get: () => layout,
+			update: (change) => {
+				layout = normalizeLayout(change(layout), catalogIds());
+				persistLayout();
+			},
+			reset: () => resetLayout(),
+		},
 		registerMessageRenderer: (role, render) => registerRendererEntry(undefined, role, render),
 		registerTheme: (id, css) => registerThemeEntry(undefined, id, css),
 		setTheme: (id) => {
@@ -5734,6 +6582,15 @@ function createScopedUiApi(botId: string, app: DesktopUiApi): DesktopUiApi {
 		},
 		widgets: registryForBot(botId),
 		registerPanel: (id, title, render) => registerPanelEntry(botId, id, title, render),
+		registerWorkspace: (entry) => registerWorkspaceEntry(botId, entry),
+		layout: {
+			get: () => layout,
+			update: (change) => {
+				layout = normalizeLayout(change(layout), catalogIds());
+				persistLayout();
+			},
+			reset: () => resetLayout(),
+		},
 		registerMessageRenderer: (role, render) => registerRendererEntry(botId, role, render),
 		registerTheme: (id, css) => registerThemeEntry(botId, id, css),
 		setTheme: (id) => {
@@ -5755,13 +6612,17 @@ async function hydrate(): Promise<void> {
 		notify(`Cannot read desktop state: ${errText(error)}`, "error");
 	}
 	applyAppearance();
+	await markDemo();
 	await loadRendererPlugins();
 	renderAll();
+	if (location.hash.length > 2) restoreRoute();
+	else writeRoute();
 	syncHostSelection();
 	activateBotPlugins();
 }
 
 function boot(): void {
+	loadLayout();
 	buildShell();
 	wireStaticEvents();
 
@@ -5815,9 +6676,14 @@ function boot(): void {
 	window.onlyne = createUiApi();
 	const disposeOmpPanels = registerOmpPanels(window.onlyne);
 	const disposeCharacterPanel = registerCharacterPanel(window.onlyne);
-	window.addEventListener("pagehide", () => { disposeOmpPanels(); disposeCharacterPanel(); }, { once: true });
+	const disposeSurfaces = registerDeskSurfaces(window.onlyne, {
+		notify: (message, level, action) => notify(message, level === "error" || level === "warn" || level === "ok" ? level : "info", action),
+		open: (id) => { if (id === "chat") showChat(); else openPanel(id); },
+		createBot: () => openBotEditor(),
+	});
+	window.addEventListener("pagehide", () => { disposeOmpPanels(); disposeCharacterPanel(); disposeSurfaces(); }, { once: true });
 
-	registerPanelInternal("node", "Node & peers", nodePanel);
+	registerPanelInternal("node", "Node record", nodePanel);
 	registerPanelInternal("capabilities", "Capabilities", capabilitiesPanel);
 	registerPanelInternal("settings", "Settings", settingsPanel);
 	registerPanelInternal("activity", "Activity", activityPanel);

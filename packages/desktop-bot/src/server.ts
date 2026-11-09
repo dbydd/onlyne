@@ -102,6 +102,13 @@ export async function startDesktopServer(options: ServerOptions): Promise<Deskto
       if (path === '/' || path === '/index.html') return textResponse('text/html; charset=utf-8', shell);
       if (path === '/style.css') return textResponse('text/css; charset=utf-8', css);
       if (path === '/app.js') return textResponse('text/javascript; charset=utf-8', app);
+      const font = /^\/fonts\/([a-z0-9-]+\.woff2)$/.exec(path);
+      if (font !== null) {
+        const file = Bun.file(join(UI_DIRECTORY, 'fonts', font[1]!));
+        if (await file.exists()) {
+          return new Response(file, { headers: { ...BASE_HEADERS, 'content-type': 'font/woff2', 'cache-control': 'public, max-age=86400' } });
+        }
+      }
 
       const plugin = /^\/plugins\/(\d+)\.js$/.exec(path);
       if (plugin !== null) {

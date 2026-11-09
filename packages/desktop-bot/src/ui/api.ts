@@ -1,4 +1,13 @@
 import type { DesktopState, DesktopEvent, RpcFrame, WidgetEnvelope, Json } from '../contracts.ts';
+import type { DeskLayout, WorkspaceGroup } from './layout.ts';
+
+export interface WorkspaceContribution {
+  id: string;
+  title: string;
+  hint?: string;
+  shortcut?: string;
+  group?: WorkspaceGroup;
+}
 
 export interface WidgetContext {
   conversationId: string;
@@ -45,6 +54,13 @@ export interface DesktopUiApi {
   subscribe(listener: (event: DesktopEvent) => void): () => void;
   widgets: WidgetRegistry;
   registerPanel(id: string, title: string, render: (state: DesktopState) => HTMLElement): () => void;
+  /** Puts a panel on the rail when its group is not `studio`. Studio panels stay in the library and the command palette. */
+  registerWorkspace(entry: WorkspaceContribution): () => void;
+  layout: {
+    get(): DeskLayout;
+    update(change: (layout: DeskLayout) => DeskLayout): void;
+    reset(): void;
+  };
   registerMessageRenderer(role: string, render: (message: unknown) => HTMLElement): () => void;
   registerTheme(id: string, css: string): () => void;
   setTheme(id: string): void;
