@@ -5044,15 +5044,28 @@ function showChat(options?: { focus?: boolean }): void {
 	if (options?.focus) refs.composerInput.focus();
 }
 
+const PANEL_LEDE: Record<string, string> = {
+	"omp.session": "The transcript for this conversation. A model session, with its tree, starts when OMP can run.",
+	"omp.subagents": "Workers this session has spawned. Each one is a short-lived agent with its own transcript.",
+	"omp.goal": "A standing objective for this session. The controls stay off until a runtime can start.",
+	"omp.queue": "Steering and follow-ups waiting on the runtime. Nothing here is sent until you ask.",
+	"omp.config": "This bot’s .omp files. Secrets stay masked. Saving writes the file on this machine.",
+	character: "The character card and the scene for the open conversation.",
+	node: "This bot’s Onlyne node: identity, fingerprint, and the peers it already knows.",
+	capabilities: "MCP servers, skills, and extensions the team can attach to a bot.",
+	activity: "Recent host errors. Clearing the list does not retry a failed send.",
+};
+
 function withPageHeader(id: string, title: string, content: HTMLElement): HTMLElement {
 	if (content.classList.contains("desk-page") || content.querySelector(".desk-page") !== null) return content;
 	const place = [...BUILTIN_WORKSPACES, ...extraWorkspaces].find(item => item.panel === id);
-	return h("div", { class: "desk-page" },
+	const lede = place?.hint || PANEL_LEDE[id] || "";
+	return h("div", { class: "desk-page layout-single" },
 		h("header", { class: "desk-page-head" },
 			h("div", { class: "desk-page-copy" },
 				h("p", { class: "eyebrow", text: "Desk" }),
 				h("h1", { text: title }),
-				place?.hint ? h("p", { class: "lede", text: place.hint }) : false,
+				lede.length > 0 ? h("p", { class: "lede", text: lede }) : false,
 			),
 		),
 		content,
@@ -5143,7 +5156,7 @@ function layoutCard(): HTMLElement {
 	}
 	dock.value = layout.dock ?? "";
 	dock.addEventListener("change", () => setDock(dock.value.length === 0 ? null : dock.value));
-	return h("div", { class: "card" },
+	return h("div", { class: "card", id: "settings-layout" },
 		h("div", { class: "card-head", text: "Layout" }),
 		h("div", { class: "card-body" },
 			h("p", { class: "field-hint", text: "Drag a rail icon, or focus it and press Alt+Up or Alt+Down. Right-click docks that panel. Hidden places stay in Jump." }),
@@ -5286,7 +5299,7 @@ function settingsPanel(): HTMLElement {
 		{ class: "form" },
 		h(
 			"div",
-			{ class: "card" },
+			{ class: "card", id: "settings-appearance" },
 			h("div", { class: "card-head" }, h("span", { text: "Appearance" })),
 			h(
 				"div",
@@ -5301,7 +5314,7 @@ function settingsPanel(): HTMLElement {
 		layoutCard(),
 		h(
 			"div",
-			{ class: "card" },
+			{ class: "card", id: "settings-node" },
 			h("div", { class: "card-head", text: "Application node" }),
 			h(
 				"div",
@@ -5312,7 +5325,7 @@ function settingsPanel(): HTMLElement {
 		),
 		h(
 			"div",
-			{ class: "card" },
+			{ class: "card", id: "settings-plugins" },
 			h("div", { class: "card-head", text: "Application plugins" }),
 			h(
 				"div",
@@ -5324,6 +5337,18 @@ function settingsPanel(): HTMLElement {
 		formError,
 		h("div", { class: "form-actions" }, reset, save),
 	);
+	const settingsNav = h("nav", { class: "settings-nav", "aria-label": "Settings sections" },
+		...([
+			["settings-appearance", "Appearance"],
+			["settings-layout", "Layout"],
+			["settings-node", "Node"],
+			["settings-plugins", "Plugins"],
+		] as const).map(([id, label]) => h("button", {
+			class: "settings-nav-link",
+			type: "button",
+			onclick: () => document.getElementById(id)?.scrollIntoView({ block: "start" }),
+		}, label)),
+	);
 	return h("div", { class: "desk-page settings-page" },
 		h("header", { class: "desk-page-head" },
 			h("div", { class: "desk-page-copy" },
@@ -5332,11 +5357,16 @@ function settingsPanel(): HTMLElement {
 				h("p", { class: "lede", text: "Application and window preferences. Each bot’s models, plugins, identity and memory stay in that bot’s own configuration." }),
 			),
 		),
-		h("div", { class: "settings-links" },
-			h("button", { class: "btn", type: "button", onclick: () => openPanel("node") }, icon("node"), "Node record"),
-			h("button", { class: "btn", type: "button", onclick: () => openPanel("capabilities") }, "Capabilities"),
+		h("div", { class: "settings-shell" },
+			settingsNav,
+			h("div", { class: "settings-content" },
+				h("div", { class: "settings-links" },
+					h("button", { class: "btn", type: "button", onclick: () => openPanel("node") }, icon("node"), "Node record"),
+					h("button", { class: "btn", type: "button", onclick: () => openPanel("capabilities") }, "Capabilities"),
+				),
+				form,
+			),
 		),
-		form,
 	);
 }
 

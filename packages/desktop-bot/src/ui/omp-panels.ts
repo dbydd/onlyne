@@ -190,17 +190,17 @@ function lockRuntime(root: HTMLElement, missing: boolean): void {
   for (const control of root.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('button, input, textarea, select')) {
     if (control.closest('.runtime-notice')) continue;
     control.disabled = true;
-    control.style.setProperty('color', 'var(--muted)', 'important');
+    control.style.setProperty('color', 'var(--fg-soft)', 'important');
     control.style.setProperty('background', 'var(--surface-3)', 'important');
     control.style.setProperty('border-color', 'var(--line)', 'important');
-    control.style.setProperty('opacity', '0.55', 'important');
+    control.style.setProperty('opacity', '1', 'important');
     control.style.setProperty('cursor', 'not-allowed', 'important');
     control.style.setProperty('box-shadow', 'none', 'important');
   }
 }
 
-function messageSummary(value: unknown): { role: string; text: string } {
-  if (!isRecord(value)) return { role: 'unknown', text: '' };
+function messageSummary(value: unknown): HistoryMessage {
+  if (!isRecord(value)) return { role: 'unknown', text: '', raw: value };
   const role = typeof value.role === 'string' ? value.role : 'unknown';
   const parts: string[] = [];
   const content = value.content;
@@ -224,7 +224,8 @@ function messageSummary(value: unknown): { role: string; text: string } {
     const name = stringField(value, 'toolName');
     parts.unshift(`[tool result${name === undefined ? '' : ` ${name}`}]`);
   }
-  return { role, text: parts.join('\n') };
+  const at = formatClock(value.createdAt ?? value.at);
+  return { role, text: parts.join('\n'), at, raw: value };
 }
 
 function truncate(text: string, limit: number): string {
@@ -331,6 +332,8 @@ async function appCommand(
 interface HistoryMessage {
   role: string;
   text: string;
+  at?: string;
+  raw?: unknown;
 }
 
 interface SessionTreeNode {
@@ -514,7 +517,7 @@ function createHistoryPanel(api: DesktopUiApi): OmpPanel {
     if (state.messages.length === 0) {
       const desk = api.state().messages.filter(item => item.conversationId === context.conversationId);
       if (desk.length > 0 && (runtimeMissing || errors.length > 0)) {
-        state.messages = desk.map(item => ({ role: item.role, text: item.text }));
+        state.messages = desk.map(item => ({ role: item.role, text: item.text, at: formatClock(item.createdAt), raw: { role: item.role, text: item.text, createdAt: item.createdAt } }));
         state.deskOnly = true;
         state.notice = 'Showing the desk transcript. A model session, with its tree, starts when OMP can run.';
         state.error = undefined;
@@ -603,13 +606,8 @@ function createHistoryPanel(api: DesktopUiApi): OmpPanel {
     const sessionActionSection = el('section', STYLE.section);
     sessionActionSection.append(el('div', STYLE.title, 'Session actions'), sessionActionBody);
 
-    element.classList.add('session-layout');
-    const sessionAside = el('aside', STYLE.section);
-    sessionAside.append(
-      el('div', STYLE.title, 'Desk transcript'),
-      el('p', STYLE.muted, 'This column is the conversation already on the desk. A model session, with its tree, starts when OMP can run. Navigation does not send a message.'),
-    );
-    element.append(status.node, sessionSection, historySection, sessionAside, treeSection, entrySection, draftSection, sessionActionSection);
+    element.classList.add('library-stack');
+    element.append(status.node, sessionSection, historySection, treeSection, entrySection, draftSection, sessionActionSection);
 
     function paint(): void {
       summarizeInput.checked = state.summarize;
@@ -632,13 +630,35 @@ function createHistoryPanel(api: DesktopUiApi): OmpPanel {
       else sessionBody.append(pairs.length === 0 ? el('div', STYLE.muted, 'The model session has not reported state yet.') : pairGrid(pairs));
 
       historyBody.replaceChildren();
-      if (state.messages.length === 0) historyBody.append(el('div', STYLE.muted, 'No messages in this snapshot.'));
+      if (state.messages.length === 0) {
+        const empty = el('div', '');
+        empty.className = 'desk-empty';
+        empty.append(el('h2', '', 'No transcript yet'), el('p', '', 'Messages appear here after someone writes in this conversation.'));
+        historyBody.append(empty);
+      }
       for (const message of state.messages) {
-        const card = el('div', STYLE.card);
-        card.append(
-          el('div', `${STYLE.monospace}font-weight:600;`, message.role),
-          el('div', `${STYLE.text}${STYLE.monospace}`, truncate(message.text, 1500)),
-        );
+        const card = el('article', '');
+        card.className = 'timeline-item';
+        const role = el('span', '', message.role);
+        role.className = 'chip';
+        const when = el('time', '', message.at ?? '');
+        when.className = 'timeline-time';
+        const text = el('p', '', message.text);
+        text.className = 'timeline-text';
+        const raw = el('pre', '', JSON.stringify(message.raw ?? message, null, 2));
+        raw.className = 'desk-pre';
+        raw.hidden = true;
+        const toggle = el('button', '', 'Show raw');
+        toggle.type = 'button';
+        toggle.className = 'btn sm';
+        toggle.addEventListener('click', () => {
+          raw.hidden = !raw.hidden;
+          toggle.textContent = raw.hidden ? 'Show raw' : 'Hide raw';
+        });
+        const head = el('div', '');
+        head.className = 'timeline-head';
+        head.append(role, when);
+        card.append(head, text, toggle, raw);
         historyBody.append(card);
       }
       loadMoreButton.disabled = state.busy !== undefined || state.nextCursor === undefined;
@@ -1035,7 +1055,7 @@ function createSubagentsPanel(api: DesktopUiApi): OmpPanel {
     detailBody.append(detailTitle, detailMeta, steerInput, steerRow, transcriptBody);
     detailSection.append(detailBody);
 
-    element.classList.add('session-layout');
+    element.classList.add('library-stack');
     element.append(status.node, listSection, detailSection);
 
     let transcriptSignature = '';
@@ -1367,13 +1387,8 @@ function createGoalPanel(api: DesktopUiApi): OmpPanel {
     const formSection = el('section', STYLE.section);
     formSection.append(el('div', STYLE.title, 'Goal controls'), formBody);
 
-    element.classList.add('goal-layout');
-    const goalAside = el('aside', STYLE.section);
-    goalAside.append(
-      el('div', STYLE.title, 'How a goal is used'),
-      el('p', STYLE.muted, 'A goal is the objective this session keeps working toward. Create one after OMP is running. Dropping a goal removes its journal.'),
-    );
-    element.append(status.node, summarySection, formSection, goalAside);
+    element.classList.add('library-stack');
+    element.append(status.node, summarySection, formSection);
 
     function paint(): void {
       const value = goalStatus(state);
@@ -1583,7 +1598,7 @@ function createQueuePanel(api: DesktopUiApi): OmpPanel {
     const restoredSection = el('section', STYLE.section);
     restoredSection.append(el('div', STYLE.title, 'Restored drafts'), restoredBody);
 
-    element.classList.add('goal-layout');
+    element.classList.add('library-stack');
     element.append(status.node, queueSection, composerSection, restoredSection);
 
     let restoredSignature = '';

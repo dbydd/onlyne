@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { Window } from 'happy-dom';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDesktopApp } from '../src/app.ts';
@@ -89,7 +90,49 @@ ok('the navigation button is hidden while the side column is on the grid', deskC
 ok('an inline failure is not also a toast', shouldToastDelivery(true) === false && shouldToastDelivery(false) === true);
 ok('revoke confirm stays inside the action row', revokeConfirmModel(false).grows === false && revokeConfirmModel(true).overlay === true && revokeConfirmModel(true).label === 'Revoke trust' && revokeConfirmModel(false).note === '');
 ok('identifiers keep the useful tail', presentIdentifier('http://127.0.0.1:3992/onlyne/v3') === '127.0.0.1:3992/onlyne/v3' && presentIdentifier('urn:onlyne:agent:desktop:mira') === 'agent:desktop:mira');
-ok('light text colors clear AA', contrastRatio('#3a342c', '#f6f3ec') >= 4.5 && contrastRatio('#1c1915', '#e7e0d4') >= 4.5);
+ok('light text colors clear AA', contrastRatio('#2a241c', '#f6f3ec') >= 4.5 && contrastRatio('#2a241c', '#e7e0d4') >= 4.5);
+
+const pixels = (value: string): number => {
+  if (value.endsWith('px')) return Number.parseFloat(value);
+  if (value.endsWith('rem')) return Number.parseFloat(value) * 16;
+  return Number.NaN;
+};
+const channel = (value: string): [number, number, number] => {
+  const rgb = value.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  if (rgb !== null) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
+  const hex = value.replace('#', '');
+  const expanded = hex.length === 3 ? [...hex].map(char => char + char).join('') : hex;
+  return [0, 2, 4].map(index => Number.parseInt(expanded.slice(index, index + 2), 16)) as [number, number, number];
+};
+const hexOf = (value: string): string => `#${channel(value).map(part => part.toString(16).padStart(2, '0')).join('')}`;
+const lengthPx = (value: string): number => {
+  const calc = value.match(/calc\(([0-9.]+)px\s*\+\s*([0-9.]+)px\)/);
+  if (calc !== null) return Number(calc[1]) + Number(calc[2]);
+  return pixels(value);
+};
+for (const theme of ['dark', 'light'] as const) {
+  const win = new Window({ width: 1280, height: 800 });
+  win.document.documentElement.dataset.theme = theme;
+  win.document.documentElement.style.fontSize = '16px';
+  const style = win.document.createElement('style');
+  style.textContent = deskCss;
+  win.document.head.append(style);
+  win.document.body.innerHTML = '<p class="eyebrow">Desk</p><div class="statusbar"><span class="status-item">Connected</span></div><p class="lede">Body</p><button class="btn" disabled>Create goal</button><div class="app"><div class="toasts"></div></div><div class="row-actions"><div class="confirm-pop"></div></div>';
+  const read = (selector: string) => win.getComputedStyle(win.document.querySelector(selector)!);
+  const eyebrow = pixels(read('.eyebrow').fontSize);
+  const status = pixels(read('.status-item').fontSize);
+  const body = pixels(read('.lede').fontSize);
+  const disabled = read('button[disabled]');
+  const toast = read('.toasts');
+  const confirm = read('.confirm-pop');
+  ok(`${theme} type scale stays readable`, eyebrow >= 11 && eyebrow < 12 && status >= 11 && status < 12 && body >= 14 && body <= 15);
+  ok(`${theme} eyebrow and disabled text clear AA`, contrastRatio(hexOf(read('.eyebrow').color), hexOf(read('body').backgroundColor)) >= 4.5 && contrastRatio(hexOf(disabled.color), hexOf(disabled.backgroundColor)) >= 4.5);
+  if (theme === 'dark') {
+    ok('toasts sit above the status bar', lengthPx(toast.bottom) >= 48);
+    ok('revoke confirm overlays the action row', confirm.position === 'absolute');
+  }
+  await win.happyDOM.close();
+}
 
 const directory = await mkdtemp(join(tmpdir(), 'onlyne-desk-'));
 try {
