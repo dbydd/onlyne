@@ -39,7 +39,7 @@ import {
 	type WorkspaceSpec,
 } from "./layout.ts";
 import type { WorkspaceContribution } from "./api.ts";
-import { assignDeliveryErrors, chord, commandKey, formatDeskHash, formatWhen, isTextControl, middleEllipsis, navigationFromKey, parseDeskHash, type DeliveryNote } from "../desk-format.ts";
+import { assignDeliveryErrors, chord, commandKey, formatDeskHash, formatWhen, isTextControl, middleEllipsis, navigationFromKey, parseDeskHash, shouldToastDelivery, type DeliveryNote } from "../desk-format.ts";
 
 const MOD = commandKey(navigator.platform, navigator.userAgent);
 
@@ -1150,7 +1150,8 @@ function handleEvent(event: DesktopEvent): void {
 		const raw = typeof event["message"] === "string" ? event["message"] : typeof event["error"] === "string" ? event["error"] : "The host reported an unknown error.";
 		const message = humanRuntimeError(raw);
 		const conversationId = typeof event.conversationId === "string" ? event.conversationId : "";
-		if (conversationId) {
+		const inline = conversationId.length > 0;
+		if (inline) {
 			const queued = queuedErrors.get(conversationId) ?? [];
 			queued.push({ text: message, at: Date.now() });
 			queuedErrors.set(conversationId, queued);
@@ -1158,7 +1159,7 @@ function handleEvent(event: DesktopEvent): void {
 			messageSignature = "";
 			if (selectedConversationId === conversationId) renderMessages();
 		}
-		notify(message, "error");
+		if (shouldToastDelivery(inline)) notify(message, "error");
 		return;
 	}
 	if (type.startsWith("onlyne.") || type === "context") return;

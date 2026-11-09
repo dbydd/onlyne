@@ -15,7 +15,7 @@ import type {
 } from './contracts.ts';
 import type { OnlyneBridge, OnlyneBridgeOptions } from './contracts.ts';
 import type { DesktopOnlyneStatus, PeerRow, PendingExchangeRow } from './onlyne.ts';
-import { parsePeerUrl } from './desk-format.ts';
+import { parsePeerUrl, peerSnapshot, type PeerSnapshot } from './desk-format.ts';
 
 const MIRA = 'urn:onlyne:agent:desktop:mira';
 const JUN = 'urn:onlyne:agent:desktop:jun';
@@ -333,10 +333,45 @@ export function createDemoOnlyne(options: OnlyneBridgeOptions): Promise<OnlyneBr
         const id = requireText(args.nodeId, 'peer.forget.nodeId');
         const existing = current.peers.find(item => item.nodeId === id);
         if (existing === undefined) throw new Error(`No peer named ${id}.`);
-        if (existing.phase === 'exchanged') throw new Error('Revoke trust before forgetting a paired peer.');
+        const pending = current.pending.find(item => item.nodeId === id) ?? null;
         current.peers = current.peers.filter(item => item.nodeId !== id);
         current.pending = current.pending.filter(item => item.nodeId !== id);
-        return { action: name, nodeId: id };
+        return { action: name, nodeId: id, peer: { ...existing }, pending };
+      }
+      if (name === 'peer.restore') {
+        const raw = args.peer;
+        if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('peer.restore needs the forgotten peer record.');
+        const snapshot: PeerSnapshot = peerSnapshot(raw as Record<string, unknown>);
+        if (snapshot.nodeId.length === 0) throw new Error('peer.restore needs a node id.');
+        const restored = {
+          nodeId: snapshot.nodeId,
+          baseUrl: snapshot.baseUrl,
+          fingerprint: snapshot.fingerprint,
+          phase: snapshot.phase,
+          state: snapshot.state,
+          localApproved: snapshot.localApproved,
+          remoteApproved: snapshot.remoteApproved,
+          verified: snapshot.verified,
+          lastSeen: snapshot.lastSeen,
+          source: snapshot.source,
+          instanceId: snapshot.instanceId,
+          firstSeen: snapshot.firstSeen,
+          lastChecked: snapshot.lastChecked,
+          ...(snapshot.name.length > 0 ? { name: snapshot.name } : {}),
+          ...(snapshot.notes.length > 0 ? { notes: snapshot.notes } : {}),
+        } as PeerRow;
+        const existing = current.peers.find(item => item.nodeId === restored.nodeId);
+        if (existing === undefined) current.peers.push(restored);
+        else Object.assign(existing, restored);
+        const pendingRaw = args.pending;
+        if (pendingRaw !== null && typeof pendingRaw === 'object' && !Array.isArray(pendingRaw)) {
+          const pending = pendingRaw as PendingExchangeRow;
+          if (typeof pending.nodeId === 'string' && pending.nodeId.length > 0) {
+            current.pending = current.pending.filter(item => item.nodeId !== pending.nodeId);
+            current.pending.push(pending);
+          }
+        }
+        return { action: name, peer: existing ?? restored };
       }
       if (name === 'trust.request') {
         const id = requireText(args.nodeId, 'trust.request.nodeId');

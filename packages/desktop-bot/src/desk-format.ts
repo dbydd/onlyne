@@ -229,6 +229,127 @@ export function tracksFit(width: number, tracks: DeskTrack[]): boolean {
   return fixed <= width && tracks.every(track => track.min >= 0);
 }
 
+export interface PeerSnapshot {
+  nodeId: string;
+  baseUrl: string;
+  fingerprint: string | null;
+  phase: string;
+  state: string | null;
+  localApproved: boolean;
+  remoteApproved: boolean;
+  verified: boolean;
+  lastSeen: string | null;
+  source: string | null;
+  instanceId: string | null;
+  firstSeen: string | null;
+  lastChecked: string | null;
+  name: string;
+  notes: string;
+}
+
+function snapshotText(row: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === 'string') return value;
+  }
+  return '';
+}
+
+function snapshotNullable(row: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    if (!(key in row)) continue;
+    const value = row[key];
+    if (value === null) return null;
+    if (typeof value === 'string') return value;
+  }
+  return null;
+}
+
+/** Every field Forget must put back. Observing the endpoint again is not a restore. */
+export function peerSnapshot(row: Record<string, unknown>): PeerSnapshot {
+  return {
+    nodeId: snapshotText(row, ['nodeId', 'node_id']),
+    baseUrl: snapshotText(row, ['baseUrl', 'base_url', 'endpoint']),
+    fingerprint: snapshotNullable(row, ['fingerprint']),
+    phase: snapshotText(row, ['phase']) || 'no_exchange',
+    state: snapshotNullable(row, ['state']),
+    localApproved: row.localApproved === true,
+    remoteApproved: row.remoteApproved === true,
+    verified: row.verified === true,
+    lastSeen: snapshotNullable(row, ['lastSeen', 'last_seen']),
+    source: snapshotNullable(row, ['source']),
+    instanceId: snapshotNullable(row, ['instanceId', 'instance_id']),
+    firstSeen: snapshotNullable(row, ['firstSeen', 'first_seen']),
+    lastChecked: snapshotNullable(row, ['lastChecked', 'last_checked']),
+    name: snapshotText(row, ['name', 'title']),
+    notes: snapshotText(row, ['notes', 'note']),
+  };
+}
+
+export function samePeerRecord(left: PeerSnapshot, right: PeerSnapshot): boolean {
+  return left.nodeId === right.nodeId
+    && left.baseUrl === right.baseUrl
+    && left.fingerprint === right.fingerprint
+    && left.phase === right.phase
+    && left.state === right.state
+    && left.localApproved === right.localApproved
+    && left.remoteApproved === right.remoteApproved
+    && left.verified === right.verified
+    && left.lastSeen === right.lastSeen
+    && left.name === right.name
+    && left.notes === right.notes;
+}
+
+/** A failure already drawn on the message does not also become a toast. */
+export function shouldToastDelivery(shownInline: boolean): boolean {
+  return !shownInline;
+}
+
+/** The confirm covers the existing action row. The card does not grow. */
+export function revokeConfirmModel(armed: boolean): { overlay: true; grows: false; label: string; note: string } {
+  return {
+    overlay: true,
+    grows: false,
+    label: armed ? 'Revoke trust' : 'Revoke',
+    note: armed ? 'Revoke drops the exchanged fingerprint. The peer stays listed until you forget it.' : '',
+  };
+}
+
+/** Host plus the last path segments, or the last three URN parts. The tooltip keeps the full value. */
+export function presentIdentifier(value: string): string {
+  const text = value.trim();
+  if (/^https?:\/\//i.test(text)) {
+    try {
+      const url = new URL(text);
+      const parts = url.pathname.split('/').filter(part => part.length > 0);
+      const tail = parts.slice(-2).join('/');
+      return tail.length > 0 ? `${url.host}/${tail}` : url.host;
+    } catch {
+      return text;
+    }
+  }
+  if (text.startsWith('urn:')) {
+    const parts = text.split(':').filter(part => part.length > 0 && part !== 'urn');
+    return parts.slice(-3).join(':');
+  }
+  return middleEllipsis(text, 14, 12);
+}
+
+export function contrastRatio(foreground: string, background: string): number {
+  const lum = (hex: string): number => {
+    const body = hex.replace('#', '');
+    const expanded = body.length === 3 ? [...body].map(char => char + char).join('') : body;
+    const channel = (index: number): number => {
+      const value = Number.parseInt(expanded.slice(index, index + 2), 16) / 255;
+      return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
+  };
+  const lighter = Math.max(lum(foreground), lum(background));
+  const darker = Math.min(lum(foreground), lum(background));
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 export interface DeliveryRow { id: string; role: string; conversationId: string; createdAt: number }
 export interface DeliveryNote { text: string; at: number }
 

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { createDesktopApp } from '../src/app.ts';
 import { createDemoOnlyne, demoFingerprint, ensureDemoTeam, resetDemoWorld } from '../src/demo.ts';
 import { fingerprintsMatch, formatFingerprint, moveInRail, normalizeLayout } from '../src/ui/layout.ts';
-import { assignDeliveryErrors, commandKey, deskTracks, drawerWanted, filterByQuery, fingerprintHint, fingerprintMarks, formatDeskHash, formatWhen, friendlyRuntimeError, middleEllipsis, navigationFromKey, parseDeskHash, parsePeerUrl, peerPhaseLabel, revokePress, tracksFit, typeInField } from '../src/desk-format.ts';
+import { assignDeliveryErrors, commandKey, contrastRatio, deskTracks, drawerWanted, filterByQuery, fingerprintHint, fingerprintMarks, formatDeskHash, formatWhen, friendlyRuntimeError, middleEllipsis, navigationFromKey, parseDeskHash, parsePeerUrl, peerPhaseLabel, peerSnapshot, presentIdentifier, revokeConfirmModel, revokePress, samePeerRecord, shouldToastDelivery, tracksFit, typeInField } from '../src/desk-format.ts';
 import { openDesktopStore } from '../src/store.ts';
 import { startDesktopServer } from '../src/server.ts';
 import type { OnlyneBridgeOptions } from '../src/contracts.ts';
@@ -86,6 +86,10 @@ ok('a second failure keeps the first retry until that send succeeds', (() => {
 const deskCss = await readFile(new URL('../src/ui/style.css', import.meta.url), 'utf8');
 ok('the stage track can shrink and the desktop nav fills its column', deskCss.includes('minmax(0, 1fr)') && /@media \(min-width: 901px\)[\s\S]*width:\s*auto/.test(deskCss));
 ok('the navigation button is hidden while the side column is on the grid', deskCss.includes('.btn.only-mobile') && deskCss.includes('display: none'));
+ok('an inline failure is not also a toast', shouldToastDelivery(true) === false && shouldToastDelivery(false) === true);
+ok('revoke confirm stays inside the action row', revokeConfirmModel(false).grows === false && revokeConfirmModel(true).overlay === true && revokeConfirmModel(true).label === 'Revoke trust' && revokeConfirmModel(false).note === '');
+ok('identifiers keep the useful tail', presentIdentifier('http://127.0.0.1:3992/onlyne/v3') === '127.0.0.1:3992/onlyne/v3' && presentIdentifier('urn:onlyne:agent:desktop:mira') === 'agent:desktop:mira');
+ok('light text colors clear AA', contrastRatio('#3a342c', '#f6f3ec') >= 4.5 && contrastRatio('#1c1915', '#e7e0d4') >= 4.5);
 
 const directory = await mkdtemp(join(tmpdir(), 'onlyne-desk-'));
 try {
@@ -125,6 +129,13 @@ try {
     ok('approval rejects a fingerprint that was not displayed', rejected);
     const approved = await app.command('onlyne.action', { botId: 'mira', action: 'trust.approve', args: { nodeId: NORTH, fingerprint: demoFingerprint(NORTH) } }) as { phase?: string };
     ok('approval accepts the displayed fingerprint', approved.phase === 'exchanged');
+    const before = (await app.command('onlyne.status', { botId: 'mira' }) as { neighbors?: Array<Record<string, unknown>> }).neighbors?.find(item => item.nodeId === 'urn:onlyne:agent:desktop:jun');
+    const shot = before === undefined ? undefined : peerSnapshot({ ...before, name: 'Jun', notes: 'filesystem server' });
+    const forgotten = shot === undefined ? undefined : await app.command('onlyne.action', { botId: 'mira', action: 'peer.forget', args: { nodeId: shot.nodeId } }) as { peer?: Record<string, unknown> };
+    const gone = (await app.command('onlyne.status', { botId: 'mira' }) as { neighbors?: Array<{ nodeId: string }> }).neighbors?.some(item => item.nodeId === 'urn:onlyne:agent:desktop:jun') !== true;
+    if (shot !== undefined && forgotten?.peer !== undefined) await app.command('onlyne.action', { botId: 'mira', action: 'peer.restore', args: { peer: { ...forgotten.peer, name: shot.name, notes: shot.notes } } });
+    const restored = (await app.command('onlyne.status', { botId: 'mira' }) as { neighbors?: Array<Record<string, unknown>> }).neighbors?.find(item => item.nodeId === 'urn:onlyne:agent:desktop:jun');
+    ok('undo restores the trusted peer exactly', shot !== undefined && gone && restored !== undefined && samePeerRecord(peerSnapshot({ ...restored, name: 'Jun', notes: 'filesystem server' }), shot) && restored.phase === 'exchanged' && restored.fingerprint === shot.fingerprint);
     const resources = await app.command('onlyne.action', { botId: 'mira', action: 'resource.list', args: {} }) as { inventory?: { owners?: unknown[] } };
     ok('resource list includes gateway owners', (resources.inventory?.owners?.length ?? 0) >= 2);
     const inbox = await app.command('desktop.read', { botId: 'mira', uri: 'onlyne://inbox' }) as { content?: string };

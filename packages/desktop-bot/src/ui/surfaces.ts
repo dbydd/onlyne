@@ -5,7 +5,7 @@
 
 import type { Bot, Capability, DesktopState } from '../contracts.ts';
 import type { DesktopUiApi } from './api.ts';
-import { fingerprintGroups, fingerprintHint, fingerprintMarks, formatWhen, middleEllipsis, parsePeerUrl, peerPhaseLabel, revokePress } from '../desk-format.ts';
+import { fingerprintGroups, fingerprintHint, fingerprintMarks, formatWhen, middleEllipsis, parsePeerUrl, peerPhaseLabel, peerSnapshot, presentIdentifier, revokeConfirmModel, revokePress } from '../desk-format.ts';
 import { formatFingerprint } from './layout.ts';
 
 export interface DeskNotice {
@@ -161,12 +161,12 @@ function copyValue(hooks: DeskHooks, value: string, label: string): void {
   );
 }
 
-function identifier(value: string, hooks: DeskHooks): HTMLElement {
+function identifier(value: string, hooks: DeskHooks, label = 'Copy'): HTMLElement {
   if (value.length === 0) return h('span', { text: '—' });
-  const button = h('button', { class: 'id-copy', type: 'button', 'aria-label': `Copy ${value}` }, 'Copy');
+  const button = h('button', { class: 'id-copy', type: 'button', 'aria-label': `Copy ${value}` }, label);
   button.addEventListener('click', () => copyValue(hooks, value, 'Copied.'));
   return h('span', { class: 'identifier', title: value },
-    h('span', { class: 'identifier-text', text: middleEllipsis(value) }),
+    h('span', { class: 'identifier-text', text: presentIdentifier(value) }),
     button);
 }
 
@@ -391,7 +391,8 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
           .then(() => { hooks.notify(`A fingerprint for ${shortNode(nodeId)} is waiting on Trust.`, 'ok'); hooks.open('trust'); })
           .catch(error => hooks.notify(errorText(error), 'error'));
       });
-      const revoke = h('button', { class: 'btn sm', type: 'button' }, armedRevoke === nodeId ? 'Revoke trust' : 'Revoke');
+      const confirm = revokeConfirmModel(armedRevoke === nodeId);
+      const revoke = h('button', { class: 'btn sm', type: 'button' }, confirm.label);
       revoke.addEventListener('click', () => {
         if (revokePress(armedRevoke === nodeId ? 'armed' : 'idle') === 'armed') {
           armedRevoke = nodeId;
@@ -407,17 +408,16 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
       cancelRevoke.addEventListener('click', () => { armedRevoke = ''; paint(rows); });
       const forget = h('button', { class: 'btn sm', type: 'button' }, 'Forget');
       forget.addEventListener('click', () => {
+        const snapshot = peerSnapshot(row);
         void api.command('onlyne.action', { action: 'peer.forget', args: { nodeId }, ...scopePayload(api.state()) })
-          .then(() => {
+          .then(value => {
+            const returned = isRecord(value) && isRecord(value.peer) ? value.peer : snapshot;
+            const pending = isRecord(value) ? value.pending ?? null : null;
             hooks.notify(`Forgot ${shortNode(nodeId)}.`, 'ok', {
               label: 'Undo',
               ms: 8_000,
               run: () => {
-                if (endpoint.length === 0) {
-                  hooks.notify('That peer had no endpoint to restore.', 'warn');
-                  return;
-                }
-                void api.command('onlyne.action', { action: 'connect', args: { url: endpoint }, ...scopePayload(api.state()) })
+                void api.command('onlyne.action', { action: 'peer.restore', args: { peer: returned, pending }, ...scopePayload(api.state()) })
                   .then(() => load())
                   .catch(error => hooks.notify(errorText(error), 'error'));
               },
@@ -437,8 +437,16 @@ function neighborsPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopSta
           ['Last seen', whenView(pick(row, ['lastSeen', 'last_seen']))],
           ['Verified', row.verified === true ? 'Yes' : 'No'],
         ]),
-        armedRevoke === nodeId ? h('p', { class: 'confirm-note', text: 'Revoke drops the exchanged fingerprint. The peer stays listed until you forget it.' }) : false,
-        h('div', { class: 'row-actions' }, trust, phase === 'exchanged' ? revoke : forget, armedRevoke === nodeId ? cancelRevoke : false, endpoint.length > 0 ? copy : false));
+        h('div', { class: 'row-actions' },
+          h('div', { class: 'action-row', hidden: confirm.note.length > 0 },
+            trust,
+            phase === 'exchanged' && confirm.note.length === 0 ? revoke : false,
+            phase === 'exchanged' ? false : forget,
+            endpoint.length > 0 ? copy : false),
+          h('div', { class: 'confirm-pop', hidden: confirm.note.length === 0 },
+            h('p', { class: 'confirm-note', text: confirm.note }),
+            confirm.note.length > 0 ? revoke : false,
+            confirm.note.length > 0 ? cancelRevoke : false)));
     };
     const connectBar = (): HTMLElement => h('form', { class: 'inline-form', onsubmit: (event: Event) => { event.preventDefault(); runConnect(); } },
       h('label', { class: 'field' },
@@ -617,9 +625,13 @@ function threadsPanel(api: DesktopUiApi): (state: DesktopState) => HTMLElement {
             .catch(error => { detail.replaceChildren(errorBlock(errorText(error), () => show(row))); });
         };
         rows.forEach((row, index) => {
-          const button = h('button', { class: 'desk-row', type: 'button', onclick: () => {
-            for (const item of list.querySelectorAll('.desk-row')) item.classList.remove('on');
+          const button = h('button', { class: 'desk-row', type: 'button', 'aria-current': index === 0 ? 'true' : undefined, onclick: () => {
+            for (const item of list.querySelectorAll('.desk-row')) {
+              item.classList.remove('on');
+              item.removeAttribute('aria-current');
+            }
             button.classList.add('on');
+            button.setAttribute('aria-current', 'true');
             show(row);
           } },
           h('span', { class: 'row-title', text: row.title }),
@@ -787,7 +799,11 @@ function healthPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState)
             h('button', { class: 'btn', type: 'button', onclick: () => hooks.open('neighbors') }, 'Neighbors')),
           h('h2', { class: 'section-title', text: 'Runtimes' }),
           runtimeError.length > 0 ? h('p', { class: 'lede', text: runtimeError }) : runtimes.length === 0
-            ? emptyBlock('No runtime is running', 'A runtime starts when a conversation sends a message. Until OMP is on PATH, the demo answers locally and labels the reply.', h('button', { class: 'btn primary', type: 'button', onclick: () => hooks.open('chat') }, 'Back to the conversation'))
+            ? h('div', { class: 'runtime-notice compact' },
+              h('strong', { text: 'No runtime is running' }),
+              h('p', { text: 'Install OMP so the omp command can start. The demo still answers locally until then.' }),
+              h('code', { class: 'runtime-command', text: 'omp --mode rpc-ui' }),
+              h('button', { class: 'btn sm', type: 'button', onclick: () => hooks.open('omp.goal') }, 'Install notes'))
             : h('div', { class: 'table-wrap' }, h('table', { class: 'desk-table' },
               h('thead', {}, h('tr', {}, ...['Bot', 'Conversation', 'Settled', 'Pending', 'Last error'].map(label => h('th', { text: label })))),
               h('tbody', {}, ...runtimes.map(row => h('tr', {},
@@ -919,7 +935,7 @@ function teamPanel(api: DesktopUiApi, hooks: DeskHooks): (state: DesktopState) =
             h('div', { class: 'peer-top' }, h('h2', { text: bot.name }), bot.id === admin ? chip('admin', 'ok') : chip('member')),
             h('p', { class: 'lede', text: bot.description || 'No description.' }),
             kv([
-              ['Node', identifier(bot.onlyne?.nodeId ?? '', hooks)],
+              ['Node', identifier(bot.onlyne?.nodeId ?? '', hooks, 'Copy ID')],
               ['Thinking', bot.thinking],
               ['Model', bot.model ? `${bot.model.provider}/${bot.model.id}` : 'OMP default'],
               ['Capabilities', bot.capabilities.length === 0 ? 'none' : bot.capabilities.join(', ')],
