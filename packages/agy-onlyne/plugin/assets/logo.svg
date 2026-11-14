@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="onlyne-ring" x1="16" y1="16" x2="112" y2="112" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0EA5E9" />
+      <stop offset="55%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#6366F1" />
+    </linearGradient>
+    <linearGradient id="onlyne-link" x1="36" y1="36" x2="92" y2="92" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#818CF8" />
+    </linearGradient>
+  </defs>
+  <circle cx="64" cy="64" r="46" stroke="url(#onlyne-ring)" stroke-width="10" />
+  <path d="M44 48 L84 48 M44 80 L84 80 M44 48 L84 80" stroke="url(#onlyne-link)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+  <circle cx="44" cy="48" r="7" fill="#38BDF8" stroke="#0F172A" stroke-width="2.5" />
+  <circle cx="84" cy="48" r="7" fill="#38BDF8" stroke="#0F172A" stroke-width="2.5" />
+  <circle cx="44" cy="80" r="7" fill="#818CF8" stroke="#0F172A" stroke-width="2.5" />
+  <circle cx="84" cy="80" r="7" fill="#6366F1" stroke="#0F172A" stroke-width="2.5" />
+</svg>

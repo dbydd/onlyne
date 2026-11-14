@@ -14,7 +14,7 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dir, "..");
 const PACKAGES = join(ROOT, "packages");
 const BIN_DIR = join(homedir(), ".bun", "bin");
-const BINS = ["onlyne-im-gateway", "onlyne-im-migrate", "onlyne-mcp-gateway", "onlyne-grok-bot", "onlyne-mcp-server", "onlyne-compute-broker"];
+const BINS = ["onlyne-im-gateway", "onlyne-im-migrate", "onlyne-mcp-gateway", "onlyne-grok-bot", "onlyne-mcp-server", "onlyne-compute-broker", "onlyne-agy", "onlyne-agy-mcp", "onlyne-agy-hook"];
 
 function run(cmd: string[], cwd: string): boolean {
   const result = Bun.spawnSync({ cmd, cwd, stdout: "pipe", stderr: "pipe" });
@@ -67,6 +67,15 @@ if (Bun.which("omp") === null) {
   } catch {
     console.log("   could not read the OMP plugin list; run omp plugin list yourself");
   }
+}
+
+console.log("\n== Antigravity plugin");
+const agyPlugin = join(PACKAGES, "agy-onlyne", "plugin");
+console.log(`   bundle: ${agyPlugin}`);
+if (Bun.which("agy") === null) {
+  console.log(`   agy is not on PATH. After installing it, run:\n   agy plugin install ${agyPlugin}`);
+} else {
+  console.log(`   Run \`agy plugin validate --strict ${agyPlugin}\` to verify, or \`agy plugin install ${agyPlugin}\` to install.`);
 }
 
 console.log("\nDone. Source edits take effect on the next command, because every entry is a symlink.");

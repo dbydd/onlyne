@@ -1,0 +1,49 @@
+{
+  "name": "@onlyne/agy-onlyne",
+  "version": "3.2.0",
+  "description": "Onlyne v3 communication node, Antigravity plugin, MCP App GUI panel, and standalone TUI for Antigravity",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dbydd/onlyne.git",
+    "directory": "packages/agy-onlyne"
+  },
+  "homepage": "https://github.com/dbydd/onlyne#readme",
+  "bugs": "https://github.com/dbydd/onlyne/issues",
+  "keywords": ["onlyne", "antigravity", "agy", "mcp", "mcp-app", "tui", "gui"],
+  "publishConfig": { "access": "public" },
+  "engines": { "bun": ">=1.4.3" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "onlyne-agy": "./dist/cli/main.js",
+    "onlyne-agy-mcp": "./dist/mcp/main.js",
+    "onlyne-agy-hook": "./dist/hooks/main.js"
+  },
+  "files": ["dist", "plugin", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "check": "tsc && tsc -p tsconfig.tests.json",
+    "test": "bun test tests",
+    "prepack": "bun run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@onlyne/lib": "^3.2.0",
+    "@onlyne/node-host": "^3.2.0",
+    "bonjour-service": "^1.4.4",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "onlyne",
+  "displayName": "Onlyne",
+  "version": "3.2.0",
+  "description": "Decentralized Onlyne v3 communication node, SystemOne message entry, MCP App GUI panel, wake hooks, and TUI integration for Antigravity.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Check my Onlyne node status, unread threads, and peers",
+    "Open the Onlyne panel to inspect threads and approve key exchanges",
+    "Send a note to a peer or post a progress update in the active Onlyne thread"
+  ],
+  "homepage": "https://github.com/dbydd/onlyne#readme",
+  "repository": "https://github.com/dbydd/onlyne.git"
+}

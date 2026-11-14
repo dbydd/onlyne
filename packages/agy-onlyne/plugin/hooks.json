@@ -1,0 +1,44 @@
+{
+  "onlyne-delivery": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "bun ./dist/hook.js",
+        "timeout": 10
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "bun ./dist/hook.js",
+        "timeout": 10
+      }
+    ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "bun ./dist/hook.js",
+        "timeout": 10
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun ./dist/hook.js",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "bun ./dist/hook.js",
+        "timeout": 10
+      }
+    ]
+  }
+}

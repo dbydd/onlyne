@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "onlyne": {
+      "command": "bun",
+      "args": ["${PLUGIN_ROOT}/dist/mcp.js"]
+    }
+  }
+}

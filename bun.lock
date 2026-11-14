@@ -9,11 +9,32 @@
         "likec4": "^1.60.0",
       },
     },
+    "packages/agy-onlyne": {
+      "name": "@onlyne/agy-onlyne",
+      "version": "3.2.0",
+      "bin": {
+        "onlyne-agy": "./dist/cli/main.js",
+        "onlyne-agy-mcp": "./dist/mcp/main.js",
+        "onlyne-agy-hook": "./dist/hooks/main.js",
+      },
+      "dependencies": {
+        "@modelcontextprotocol/ext-apps": "^1.7.5",
+        "@modelcontextprotocol/sdk": "^1.32.2",
+        "@onlyne/lib": "^3.2.0",
+        "@onlyne/node-host": "^3.2.0",
+        "bonjour-service": "^1.4.4",
+        "zod": "^3.25.76",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.0",
+        "typescript": "^5.9.0",
+      },
+    },
     "packages/compute-core": {
       "name": "@onlyne/compute-core",
       "version": "3.2.0",
       "dependencies": {
-        "@onlyne/lib": "^3.1.0",
+        "@onlyne/lib": "^3.2.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -24,12 +45,12 @@
       "name": "@onlyne/compute-gateway",
       "version": "3.2.0",
       "bin": {
-        "onlyne-compute-broker": "src/main.ts",
+        "onlyne-compute-broker": "dist/main.js",
       },
       "dependencies": {
-        "@onlyne/compute-core": "^3.1.0",
-        "@onlyne/lib": "^3.1.0",
-        "@onlyne/node-host": "^3.1.0",
+        "@onlyne/compute-core": "^3.2.0",
+        "@onlyne/lib": "^3.2.0",
+        "@onlyne/node-host": "^3.2.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -40,12 +61,12 @@
       "name": "@onlyne/grok-bot",
       "version": "3.2.0",
       "bin": {
-        "onlyne-grok-bot": "src/main.ts",
+        "onlyne-grok-bot": "dist/main.js",
       },
       "dependencies": {
-        "@onlyne/im-gateway": "^3.1.0",
-        "@onlyne/lib": "^3.1.0",
-        "@onlyne/node-host": "^3.1.0",
+        "@onlyne/im-gateway": "^3.2.0",
+        "@onlyne/lib": "^3.2.0",
+        "@onlyne/node-host": "^3.2.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -56,7 +77,7 @@
       "name": "@onlyne/im-core",
       "version": "3.2.0",
       "dependencies": {
-        "@onlyne/lib": "^3.1.0",
+        "@onlyne/lib": "^3.2.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -67,8 +88,8 @@
       "name": "@onlyne/im-fake",
       "version": "3.2.0",
       "dependencies": {
-        "@onlyne/im-core": "^3.1.0",
-        "@onlyne/lib": "^3.1.0",
+        "@onlyne/im-core": "^3.2.0",
+        "@onlyne/lib": "^3.2.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -79,26 +100,26 @@
       "name": "@onlyne/im-gateway",
       "version": "3.2.0",
       "bin": {
-        "onlyne-im-gateway": "src/main.ts",
-        "onlyne-im-migrate": "src/migrate-main.ts",
+        "onlyne-im-gateway": "dist/main.js",
+        "onlyne-im-migrate": "dist/migrate-main.js",
       },
       "dependencies": {
-        "@onlyne/im-core": "^3.1.0",
-        "@onlyne/im-fake": "^3.1.0",
-        "@onlyne/lib": "^3.1.0",
-        "@onlyne/node-host": "^3.1.0",
+        "@onlyne/im-core": "^3.2.0",
+        "@onlyne/im-fake": "^3.2.0",
+        "@onlyne/lib": "^3.2.0",
+        "@onlyne/node-host": "^3.2.0",
       },
       "devDependencies": {
-        "@onlyne/im-lark": "^3.1.0",
-        "@onlyne/im-qq": "^3.1.0",
-        "@onlyne/im-wechat": "^3.1.0",
+        "@onlyne/im-lark": "^3.2.0",
+        "@onlyne/im-qq": "^3.2.0",
+        "@onlyne/im-wechat": "^3.2.0",
         "@types/bun": "^1.3.0",
         "typescript": "^5.9.0",
       },
       "peerDependencies": {
-        "@onlyne/im-lark": "^3.1.0",
-        "@onlyne/im-qq": "^3.1.0",
-        "@onlyne/im-wechat": "^3.1.0",
+        "@onlyne/im-lark": "^3.2.0",
+        "@onlyne/im-qq": "^3.2.0",
+        "@onlyne/im-wechat": "^3.2.0",
       },
       "optionalPeers": [
         "@onlyne/im-lark",
@@ -111,9 +132,9 @@
       "version": "3.2.0",
       "dependencies": {
         "@larksuiteoapi/node-sdk": "^1.76.0",
-        "@onlyne/im-core": "^3.1.0",
-        "@onlyne/lib": "^3.1.0",
-        "@onlyne/node-host": "^3.1.0",
+        "@onlyne/im-core": "^3.2.0",
+        "@onlyne/lib": "^3.2.0",
+        "@onlyne/node-host": "^3.2.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -124,8 +145,8 @@
       "name": "@onlyne/im-qq",
       "version": "3.2.0",
       "dependencies": {
-        "@onlyne/im-core": "^3.1.0",
-        "@onlyne/lib": "^3.1.0",
+        "@onlyne/im-core": "^3.2.0",
+        "@onlyne/lib": "^3.2.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -136,8 +157,8 @@
       "name": "@onlyne/im-wechat",
       "version": "3.2.0",
       "dependencies": {
-        "@onlyne/im-core": "^3.1.0",
-        "@onlyne/lib": "^3.1.0",
+        "@onlyne/im-core": "^3.2.0",
+        "@onlyne/lib": "^3.2.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -157,7 +178,7 @@
       "version": "3.2.0",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.32.2",
-        "@onlyne/lib": "^3.1.0",
+        "@onlyne/lib": "^3.2.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -168,13 +189,13 @@
       "name": "@onlyne/mcp-gateway",
       "version": "3.2.0",
       "bin": {
-        "onlyne-mcp-gateway": "src/main.ts",
+        "onlyne-mcp-gateway": "dist/main.js",
       },
       "dependencies": {
-        "@onlyne/im-gateway": "^3.1.0",
-        "@onlyne/lib": "^3.1.0",
-        "@onlyne/mcp-core": "^3.1.0",
-        "@onlyne/node-host": "^3.1.0",
+        "@onlyne/im-gateway": "^3.2.0",
+        "@onlyne/lib": "^3.2.0",
+        "@onlyne/mcp-core": "^3.2.0",
+        "@onlyne/node-host": "^3.2.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -185,13 +206,13 @@
       "name": "@onlyne/mcp-server",
       "version": "3.2.0",
       "bin": {
-        "onlyne-mcp-server": "src/main.ts",
+        "onlyne-mcp-server": "dist/main.js",
       },
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.32.2",
-        "@onlyne/im-gateway": "^3.1.0",
-        "@onlyne/lib": "^3.1.0",
-        "@onlyne/node-host": "^3.1.0",
+        "@onlyne/im-gateway": "^3.2.0",
+        "@onlyne/lib": "^3.2.0",
+        "@onlyne/node-host": "^3.2.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",
@@ -202,7 +223,7 @@
       "name": "@onlyne/node-host",
       "version": "3.2.0",
       "dependencies": {
-        "@onlyne/lib": "^3.1.0",
+        "@onlyne/lib": "^3.2.0",
         "bonjour-service": "^1.4.4",
       },
       "devDependencies": {
@@ -214,8 +235,8 @@
       "name": "omp-onlyne",
       "version": "0.3.0",
       "dependencies": {
-        "@onlyne/lib": "^3.1.0",
-        "@onlyne/node-host": "^3.1.0",
+        "@onlyne/lib": "^3.2.0",
+        "@onlyne/node-host": "^3.2.0",
       },
       "devDependencies": {
         "@oh-my-pi/pi-agent-core": "18.12.6",
@@ -380,6 +401,8 @@
 
     "@likec4/icons": ["@likec4/icons@1.46.4", "", { "peerDependencies": { "react": "^18.x || ^19.x", "react-dom": "^18.x || ^19.x" } }, "sha512-GAL7aW53Mq3RnbFGK8BxHi/vGf73F7ODqgf7yPqfv/Kslt7KxHoxr/ZDIHcSo0oF4tXhpL7GYlpsgY71UJseqw=="],
 
+    "@modelcontextprotocol/ext-apps": ["@modelcontextprotocol/ext-apps@1.7.5", "", { "dependencies": { "@standard-schema/spec": "^1.1.0" }, "peerDependencies": { "@modelcontextprotocol/sdk": "^1.29.0", "react": "^17.0.0 || ^18.0.0 || ^19.0.0", "react-dom": "^17.0.0 || ^18.0.0 || ^19.0.0", "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["react", "react-dom"] }, "sha512-TjPH2S2y5UEGKhmI6+XGFuqfqOV4ppe1x6DA3txnUaEWkgtA4G5vo14jGKFZmegdkZ1H4QMLyujLvoU1BEdnAg=="],
+
     "@modelcontextprotocol/sdk": ["@modelcontextprotocol/sdk@1.32.2", "", { "dependencies": { "@hono/node-server": "^1.19.9 || ^2.0.5", "ajv": "^8.17.1", "ajv-formats": "^3.0.1", "content-type": "^1.0.5", "cors": "^2.8.5", "cross-spawn": "^7.0.5", "eventsource": "^3.0.2", "eventsource-parser": "^3.0.0", "express": "^5.2.1", "express-rate-limit": "^8.2.1", "hono": "^4.11.4", "jose": "^6.1.3", "json-schema-typed": "^8.0.2", "pkce-challenge": "^5.0.0", "raw-body": "^3.0.0", "zod": "^3.25 || ^4.0", "zod-to-json-schema": "^3.25.1" }, "peerDependencies": { "@cfworker/json-schema": "^4.1.1" }, "optionalPeers": ["@cfworker/json-schema"] }, "sha512-SWsVtH/0vULSQStoZ6xxH2K09Li8fXYTMC64ZeogCdpZ3XSi1eCPOByV1OpuJxuI3OcmHhosDWYyii07tpPsLw=="],
 
     "@octokit/endpoint": ["@octokit/endpoint@9.0.6", "", { "dependencies": { "@octokit/types": "^13.1.0", "universal-user-agent": "^6.0.0" } }, "sha512-H1fNTMA57HbkFESSt3Y9+FBICv+0jFceJFPWDePYlR/iMGrwM5ph+Dd4XRQs+8X+PUFURLQgX9ChPfhJ/1uNQw=="],
@@ -427,6 +450,8 @@
     "@oh-my-pi/pi-wire": ["@oh-my-pi/pi-wire@18.12.6", "", {}, "sha512-NPREkkLEUqbcqJ5T/NOg2xF3d5wYSE92CWoEwxMvbyBerdyU0JhZKFgciiAiHTg5F/cH9oYJNr3Dm8MRVrpDWA=="],
 
     "@oh-my-pi/snapcompact": ["@oh-my-pi/snapcompact@18.12.6", "", { "dependencies": { "@oh-my-pi/pi-ai": "18.12.6", "@oh-my-pi/pi-catalog": "18.12.6", "@oh-my-pi/pi-natives": "18.12.6", "@oh-my-pi/pi-utils": "18.12.6", "@oh-my-pi/pi-wire": "18.12.6" } }, "sha512-w34sYdM5vw6Pilqf5krZZgcFVpLnfaYsLT2yA/G30j+YNlg8oB6WxmShmY8LqNFlxbP373Fet8bLkuqRdHuBCQ=="],
+
+    "@onlyne/agy-onlyne": ["@onlyne/agy-onlyne@workspace:packages/agy-onlyne"],
 
     "@onlyne/compute-core": ["@onlyne/compute-core@workspace:packages/compute-core"],
 
@@ -543,6 +568,8 @@
     "@rolldown/binding-win32-x64-msvc": ["@rolldown/binding-win32-x64-msvc@1.2.16", "", { "os": "win32", "cpu": "x64" }, "sha512-1lv1KvX0Z871zfk7vw+dnXMMnHNyDwMzWG8Kv3HxDXMOhzCX4SHc7HK319fInP0i+0p9D8brkfzL7pJOaGl+tw=="],
 
     "@rolldown/pluginutils": ["@rolldown/pluginutils@1.0.1", "", {}, "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw=="],
+
+    "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
     "@sweet-monads/either": ["@sweet-monads/either@3.2.0", "", { "dependencies": { "@sweet-monads/interfaces": "^3.2.0" } }, "sha512-n+nR0b60GRTKb+D76qhTf4NEBXU9zfpigYYEtKtSYbV+5+i5gxr9jFd64pYkY2O7hVsb/G7nspbAeFni/i1ltA=="],
 
@@ -1056,13 +1083,13 @@
 
     "yargs-parser": ["yargs-parser@21.1.1", "", {}, "sha512-tVpsJW7DdjecAiFpbIB1e3qxIQsE6NoPc5/eTdrbbIC4h0LVsWhnoa3g+m2HclBIujHzsxZ4VJVA+GUuc2/LBw=="],
 
-    "zod": ["zod@4.6.7", "", {}, "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg=="],
+    "zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
 
     "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
 
     "@grpc/grpc-js/@grpc/proto-loader": ["@grpc/proto-loader@0.8.1", "", { "dependencies": { "lodash.camelcase": "^4.3.0", "long": "^5.0.0", "protobufjs": "^7.5.5", "yargs": "^17.7.2" }, "bin": { "proto-loader-gen-types": "build/bin/proto-loader-gen-types.js" } }, "sha512-wtF6h+DY6M3YaDBPAmvuuA6jV8Sif9MjtOI5euKFWRgCDl5PeDpPsHR9u2l6St5ceY8AZgoNDww5+HvEsXFsGg=="],
 
-    "@modelcontextprotocol/sdk/zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
+    "@likec4/core/zod": ["zod@4.6.7", "", {}, "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg=="],
 
     "@opentelemetry/exporter-metrics-otlp-http/@opentelemetry/resources": ["@opentelemetry/resources@2.9.0", "", { "dependencies": { "@opentelemetry/core": "2.9.0", "@opentelemetry/semantic-conventions": "^1.29.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <1.10.0" } }, "sha512-jyA5MBLQ+Dkl3+JsZkUoUvL7yHvU64kLsvpXKarWm6347Sl1t1bXFTFykUePNpT5WH5pm9a2Qtt03iIYQhZ1Fg=="],
 
@@ -1098,11 +1125,11 @@
 
     "body-parser/content-type": ["content-type@2.1.0", "", {}, "sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag=="],
 
-    "chromium-bidi/zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
-
     "express/content-type": ["content-type@2.1.0", "", {}, "sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag=="],
 
     "form-data/mime-types": ["mime-types@2.1.35", "", { "dependencies": { "mime-db": "1.52.0" } }, "sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw=="],
+
+    "likec4/zod": ["zod@4.6.7", "", {}, "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg=="],
 
     "negotiator/content-type": ["content-type@2.1.0", "", {}, "sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag=="],
 
